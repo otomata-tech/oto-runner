@@ -1,0 +1,75 @@
+"""Les deux contrats REST du worker : le FIL d'un run, et la FILE de jobs.
+
+C'est tout ce que le worker connaît du backend en dehors de la face MCP — deux
+familles d'endpoints op-aware, un seul jeton. Pas d'accès base, pas d'import
+oto : si ces contrats tiennent, le worker est remplaçable (ADR 0064-D1).
+"""
+from __future__ import annotations
+
+import os
+from typing import Any, Optional
+
+import requests
+
+_TIMEOUT = (10, 60)
+
+
+class BackendError(RuntimeError):
+    def __init__(self, message: str, *, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
+
+
+class Backend:
+    def __init__(self, base: Optional[str] = None, token: Optional[str] = None):
+        self.base = (base or os.environ.get("OTO_BASE", "https://mcp.oto.cx")).rstrip("/")
+        self.token = (token or os.environ.get("OTO_TOKEN", "")).strip()
+        if not self.token:
+            raise BackendError("OTO_TOKEN absent de l'environnement du worker")
+
+    def _post(self, chemin: str, corps: dict) -> dict:
+        r = requests.post(self.base + chemin, json=corps, timeout=_TIMEOUT,
+                          headers={"Authorization": f"Bearer {self.token}"})
+        if r.status_code >= 400:
+            try:
+                detail = r.json().get("message") or r.json().get("error") or r.text
+            except Exception:  # noqa: BLE001
+                detail = r.text
+            raise BackendError(f"{chemin} → {r.status_code} : {str(detail)[:300]}",
+                               status=r.status_code)
+        return r.json() if r.content else {}
+
+    # ── la file de jobs (runner.jobs, R2) ────────────────────────────────────
+    def claim(self, lease_seconds: int = 600) -> Optional[dict]:
+        return self._post("/api/me/runner/jobs",
+                          {"op": "claim", "lease_seconds": lease_seconds}).get("job")
+
+    def bind_run(self, job_id: int, run_id: str) -> None:
+        self._post("/api/me/runner/jobs",
+                   {"op": "bind_run", "job_id": job_id, "run_id": run_id})
+
+    def extend(self, job_id: int, lease_seconds: int = 600) -> None:
+        self._post("/api/me/runner/jobs",
+                   {"op": "extend", "job_id": job_id, "lease_seconds": lease_seconds})
+
+    def complete(self, job_id: int, ok: bool, error: Optional[str] = None,
+                 run_id: Optional[str] = None) -> str:
+        out = self._post("/api/me/runner/jobs",
+                         {"op": "complete", "job_id": job_id, "ok": ok,
+                          "error": error, "run_id": run_id})
+        return str(out.get("status") or "")
+
+    # ── le fil d'un run (runs.thread, R1) ────────────────────────────────────
+    def thread_append(self, run_id: str, role: str, content: dict,
+                      provider_raw: Optional[dict] = None) -> int:
+        out = self._post("/api/me/runs/thread",
+                         {"op": "append", "run_id": run_id, "role": role,
+                          "content": content, "provider_raw": provider_raw})
+        return int(out.get("seq") or 0)
+
+    def thread_read(self, run_id: str, include_raw: bool = False,
+                    limit: int = 500) -> list[dict[str, Any]]:
+        out = self._post("/api/me/runs/thread",
+                         {"op": "read", "run_id": run_id,
+                          "include_raw": include_raw, "limit": limit})
+        return out.get("messages") or []

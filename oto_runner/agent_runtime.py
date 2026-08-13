@@ -1,0 +1,195 @@
+"""La boucle d'agent du worker — transplantée du prototype, allégée par le design.
+
+Le prototype (`server-agent`, oto-backend 25/07) tournait DANS le process du
+backend : il devait ré-appliquer lui-même la rédaction de champs et surveiller
+ses chemins de credential, parce que `Tool.run` court-circuitait le middleware.
+**Ici le worker est un client MCP pur (ADR 0064-D1), et tout ça disparaît** :
+chaque appel d'outil traverse la face MCP du backend, qui applique credential,
+RBAC, activation, rédaction et journal — comme pour n'importe quel client. La
+boucle n'a plus que trois responsabilités : le tour de modèle, l'allowlist,
+les bornes.
+
+Ce qui est conservé du prototype, à l'identique :
+- l'allowlist FAIL-CLOSED (un outil hors liste revient au modèle en tour
+  d'erreur — le modèle se corrige — jamais en exception qui tuerait le job) ;
+- la troncature MARQUÉE d'une sortie d'outil (le modèle doit SAVOIR qu'il
+  manque quelque chose, sinon il conclut sur un extrait en croyant tout voir) ;
+- tous les résultats d'un tour dans UN message user (les scinder apprend au
+  modèle à cesser de paralléliser) ;
+- le texte intermédiaire gardé comme repli si le budget de tours s'épuise.
+
+Divergence ASSUMÉE : le plafond de tours par défaut passe de 6 à 24. Le 6 du
+prototype bornait un chat public à petites questions ; un run de procédure est
+un travail (la veille LinkedIn réelle = 15 tours). Le plafond effectif se règle
+par job, borné dur à 64.
+"""
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Optional, Protocol
+
+from . import agent_llm
+
+MAX_TOOL_OUTPUT_CHARS = 12_000
+DEFAULT_MAX_STEPS = 24
+HARD_MAX_STEPS = 64
+MAX_HISTORY_MESSAGES = 60   # tours provider transportés au modèle (le fil complet
+                            # reste au backend — ici on borne le COÛT d'un tour)
+
+
+class ToolTransport(Protocol):
+    """Ce que la boucle attend d'un transport d'outils : la face MCP du backend.
+
+    `schemas(names)` → [{name, description, input_schema}] ; `call(name, args)` →
+    (texte, is_error). Les gates et la rédaction sont CÔTÉ SERVEUR — le transport
+    ne filtre rien, il transporte."""
+    def schemas(self, names: frozenset) -> list[dict]: ...
+    def call(self, name: str, arguments: dict) -> tuple[str, bool]: ...
+
+
+@dataclass(frozen=True)
+class AgentSpec:
+    """Ce que l'agent est autorisé à être, pour UN run."""
+    system: str
+    tools: frozenset
+    max_steps: int = DEFAULT_MAX_STEPS
+    label: str = "run"
+
+
+@dataclass
+class AgentStep:
+    tool: str
+    ok: bool
+    duration_ms: int
+    error: Optional[str] = None
+
+    def as_dict(self) -> dict:
+        out = {"tool": self.tool, "ok": self.ok, "duration_ms": self.duration_ms}
+        if self.error:
+            out["error"] = self.error
+        return out
+
+
+@dataclass
+class AgentResult:
+    reply: str
+    steps: list = field(default_factory=list)
+    stopped: str = "end_turn"           # end_turn | max_steps | refusal | no_reply
+    usage: dict = field(default_factory=dict)
+    messages: list = field(default_factory=list)
+
+
+# `on_turn(role, content_neutre, provider_raw)` : le point d'ancrage du FIL (R1).
+# La boucle appose chaque tour au fil du backend PENDANT le run — c'est ce qui rend
+# le worker jetable entre deux tours (un kill se répare par re-claim + rechargement).
+# None = pas de persistance (tests, dry-run).
+OnTurn = Callable[[str, dict, dict], None]
+
+
+def _cap(text: str) -> str:
+    if len(text) <= MAX_TOOL_OUTPUT_CHARS:
+        return text
+    return (text[:MAX_TOOL_OUTPUT_CHARS]
+            + f"\n…[sortie tronquée à {MAX_TOOL_OUTPUT_CHARS} caractères — "
+              "affine la requête (filtre, limite) pour en voir moins à la fois]")
+
+
+def _trim(messages: list) -> list:
+    if len(messages) <= MAX_HISTORY_MESSAGES:
+        return list(messages)
+    return list(messages[-MAX_HISTORY_MESSAGES:])
+
+
+def execute_tool(spec: AgentSpec, transport: ToolTransport,
+                 call: agent_llm.ToolCall) -> tuple[str, bool]:
+    """UN appel d'outil. Ne lève jamais : une erreur d'outil est un résultat que le
+    modèle lit pour se corriger. Fail-closed sur l'allowlist AVANT tout transport."""
+    if call.name not in spec.tools:
+        return (f"Outil `{call.name}` indisponible pour ce run. "
+                f"Outils autorisés : {', '.join(sorted(spec.tools)) or '(aucun)'}.", True)
+    try:
+        text, is_error = transport.call(call.name, call.arguments or {})
+    except Exception as e:  # noqa: BLE001 — l'erreur de la cible EST un résultat
+        return (f"Erreur de l'outil `{call.name}` : {e}", True)
+    return (_cap(text), is_error)
+
+
+def run(spec: AgentSpec, transport: ToolTransport, prompt: Optional[str] = None,
+        history: Optional[list] = None, on_turn: Optional[OnTurn] = None,
+        api_key: Optional[str] = None) -> AgentResult:
+    """La boucle : tours de modèle et d'outils jusqu'à conclusion, plafond, ou refus.
+
+    `history` = les `provider_raw` du fil, rejoués dans l'ordre (continuation d'un
+    run) ; `prompt` = le nouveau tour user (None = reprendre sans rien ajouter,
+    ex. après un kill en plein tour). `on_turn` appose chaque tour au fil backend."""
+    messages = _trim(history or [])
+    if prompt is not None:
+        messages.append({"role": "user", "content": prompt})
+        if on_turn:
+            on_turn("user", {"text": prompt}, {"role": "user", "content": prompt})
+
+    schemas = transport.schemas(spec.tools)
+    steps: list[AgentStep] = []
+    usage = {"input_tokens": 0, "output_tokens": 0}
+    stopped = "end_turn"
+    reply = ""
+    plafond = max(1, min(spec.max_steps, HARD_MAX_STEPS))
+
+    for _ in range(plafond + 1):
+        turn = agent_llm.complete(system=spec.system, messages=messages,
+                                  tools=schemas, api_key=api_key)
+        for k in ("input_tokens", "output_tokens"):
+            usage[k] = usage.get(k, 0) + int(turn.usage.get(k) or 0)
+
+        if turn.stop_reason == "refusal":
+            stopped, reply = "refusal", ""
+            break
+
+        assistant_raw = {"role": "assistant", "content": turn.raw_content}
+        messages.append(assistant_raw)
+        if on_turn:
+            on_turn("assistant",
+                    {"text": turn.text,
+                     "tool_calls": [{"name": c.name} for c in turn.tool_calls]},
+                    assistant_raw)
+
+        if not turn.wants_tools:
+            reply, stopped = turn.text, "end_turn"
+            break
+
+        results = []
+        neutre = []
+        for call in turn.tool_calls:
+            started = time.monotonic()
+            text, is_error = execute_tool(spec, transport, call)
+            ms = int((time.monotonic() - started) * 1000)
+            steps.append(AgentStep(tool=call.name, ok=not is_error, duration_ms=ms,
+                                   error=text[:200] if is_error else None))
+            neutre.append({"name": call.name, "ok": not is_error, "duration_ms": ms})
+            results.append({"type": "tool_result", "tool_use_id": call.id,
+                            "content": text, "is_error": is_error})
+        tool_raw = {"role": "user", "content": results}
+        messages.append(tool_raw)
+        if on_turn:
+            on_turn("tool", {"tool_calls": neutre}, tool_raw)
+        if turn.text:
+            reply = turn.text
+    else:
+        stopped = "max_steps"
+
+    if not reply and stopped == "end_turn":
+        stopped = "no_reply"
+    return AgentResult(reply=reply, steps=steps, stopped=stopped, usage=usage,
+                       messages=messages)
+
+
+def serialize(payload) -> str:
+    """Payload structuré → texte pour le fil (utilitaire des transports)."""
+    if isinstance(payload, str):
+        return payload
+    try:
+        return json.dumps(payload, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001
+        return str(payload)
