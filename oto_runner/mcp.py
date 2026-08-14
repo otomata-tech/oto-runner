@@ -33,6 +33,7 @@ class McpSession:
         self.run_id = run_id
         self.session: Optional[str] = None
         self._n = 0
+        self._props: Optional[dict] = None   # tool → propriétés d'entrée déclarées
         self._ouvrir()
 
     def _post(self, corps: dict, avec_entetes: bool = False):
@@ -69,7 +70,10 @@ class McpSession:
         d = self._post({"jsonrpc": "2.0", "id": self._n,
                         "method": "tools/list", "params": {}})
         out = []
+        self._props = {}
         for t in ((d.get("result") or {}).get("tools") or []):
+            props = ((t.get("inputSchema") or {}).get("properties") or {})
+            self._props[t.get("name") or ""] = frozenset(props)
             if t.get("name") in names:
                 out.append({"name": t["name"],
                             "description": (t.get("description") or "")[:1024],
@@ -77,13 +81,26 @@ class McpSession:
                             or {"type": "object", "properties": {}}})
         return out
 
+    def _declares(self, name: str) -> frozenset:
+        """Les propriétés d'entrée DÉCLARÉES par ce tool. C'est ce qui rend la
+        pose des jetons de contexte SÉLECTIVE : ils sont advertisés par tool
+        (ADR 0038), et les poser à l'aveugle fait refuser l'appel ENTIER à la
+        validation — vécu au premier vol de flotte : `oto_procedure` ne déclare
+        pas `_project`, 4 jobs en échec avant une seule ligne traitée. Un tool
+        absent du cache ne reçoit AUCUN jeton (un appel sans contexte vaut
+        mieux qu'un refus)."""
+        if self._props is None:
+            self.schemas(frozenset())
+        return self._props.get(name, frozenset())
+
     def call(self, name: str, arguments: dict) -> tuple[str, bool]:
         """UN appel d'outil → (texte pour le fil, is_error). Les jetons de contexte
         sont posés ici — le modèle n'a pas à les connaître."""
         args = dict(arguments or {})
-        if self.project is not None:
+        declares = self._declares(name)
+        if self.project is not None and "_project" in declares:
             args.setdefault("_project", self.project)
-        if self.run_id is not None:
+        if self.run_id is not None and "_run_id" in declares:
             args.setdefault("_run_id", self.run_id)
         self._n += 1
         d = self._post({"jsonrpc": "2.0", "id": self._n, "method": "tools/call",
