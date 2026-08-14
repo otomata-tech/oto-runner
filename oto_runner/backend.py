@@ -39,10 +39,31 @@ class Backend:
                                status=r.status_code)
         return r.json() if r.content else {}
 
+    def _get(self, chemin: str, params: dict) -> dict:
+        r = requests.get(self.base + chemin, params=params, timeout=_TIMEOUT,
+                         headers={"Authorization": f"Bearer {self.token}"})
+        if r.status_code >= 400:
+            raise BackendError(f"{chemin} → {r.status_code} : {r.text[:300]}",
+                               status=r.status_code)
+        return r.json() if r.content else {}
+
     # ── la file de jobs (runner.jobs, R2) ────────────────────────────────────
     def claim(self, lease_seconds: int = 600) -> Optional[dict]:
         return self._post("/api/me/runner/jobs",
                           {"op": "claim", "lease_seconds": lease_seconds}).get("job")
+
+    def enqueue(self, kind: str, payload: dict,
+                run_id: Optional[str] = None) -> int:
+        """Enfile un job — c'est par LÀ qu'un ordonnanceur de flotte travaille :
+        un client ordinaire de la même file que tout le monde (R5)."""
+        out = self._post("/api/me/runner/jobs",
+                         {"op": "enqueue", "kind": kind, "payload": payload,
+                          "run_id": run_id})
+        return int(out["id"])
+
+    def get_job(self, job_id: int) -> dict:
+        return self._post("/api/me/runner/jobs",
+                          {"op": "get", "job_id": job_id}).get("job") or {}
 
     def bind_run(self, job_id: int, run_id: str) -> None:
         self._post("/api/me/runner/jobs",
@@ -53,11 +74,27 @@ class Backend:
                    {"op": "extend", "job_id": job_id, "lease_seconds": lease_seconds})
 
     def complete(self, job_id: int, ok: bool, error: Optional[str] = None,
-                 run_id: Optional[str] = None) -> str:
+                 run_id: Optional[str] = None,
+                 result: Optional[dict] = None) -> str:
+        """`result` = le résumé déclaré du job (usage_tokens, stopped, steps…) :
+        c'est ce que l'ordonnanceur de flotte lit pour sa garde budget."""
         out = self._post("/api/me/runner/jobs",
                          {"op": "complete", "job_id": job_id, "ok": ok,
-                          "error": error, "run_id": run_id})
+                          "error": error, "run_id": run_id, "result": result})
         return str(out.get("status") or "")
+
+    # ── la file de LIGNES (datastore) — lecture seule, pour les bornes ───────
+    def count_rows(self, namespace: str, filter: Optional[dict] = None) -> int:
+        """Combien de lignes matchent encore le filtre de la flotte. Lecture
+        d'observation (borne d'arrêt + ré-enfilement) — jamais un claim : le
+        claim appartient à l'AGENT, dans la procédure."""
+        import json as _json
+        params: dict = {"limit": 1}
+        if filter:
+            params["filters"] = _json.dumps(
+                [{"field": k, "op": "eq", "value": v} for k, v in filter.items()])
+        out = self._get(f"/api/datastore/namespaces/{namespace}/rows", params)
+        return int(out.get("total") or 0)
 
     # ── le fil d'un run (runs.thread, R1) ────────────────────────────────────
     def thread_append(self, run_id: str, role: str, content: dict,

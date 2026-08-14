@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Le worker externe des runs hébergés oto — un client pur : API de fil, face MCP, clé de modèle"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
-dependencies = ["requests>=2.31"]
+dependencies = ["requests>=2.31", "pyyaml>=6.0"]
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
@@ -12,6 +12,7 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 oto-runner = "oto_runner.worker:main"
+oto-fleet = "oto_runner.fleet:main"
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -91,15 +91,19 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                             history=historique, on_turn=apposer)
 
     outcome = "done" if res.stopped in ("end_turn",) else "blocked"
-    note = (f"{res.stopped} · {len(res.steps)} appels · "
-            f"{res.usage.get('input_tokens', 0) + res.usage.get('output_tokens', 0)} jetons")
+    jetons = res.usage.get("input_tokens", 0) + res.usage.get("output_tokens", 0)
+    note = f"{res.stopped} · {len(res.steps)} appels · {jetons} jetons"
     if job["kind"] == "start" or res.stopped in ("end_turn", "max_steps"):
         try:
             mcp.outil("run_finish", {"run_id": run_id, "outcome": outcome, "note": note})
         except Exception as e:  # noqa: BLE001 — la clôture du run est best-effort,
             # sur SA connexion : jamais dans la transaction d'un autre (cf. #333).
             logger.warning("run_finish %s : %s", run_id, e)
-    backend.complete(job["id"], ok=True, run_id=run_id)
+    # Le résultat DÉCLARÉ (R5) : ce que l'ordonnanceur de flotte lit pour sa
+    # garde budget — un résumé, jamais du contenu de fil.
+    backend.complete(job["id"], ok=True, run_id=run_id,
+                     result={"usage_tokens": jetons, "stopped": res.stopped,
+                             "steps": len(res.steps)})
     logger.info("job %s : %s (%s)", job["id"], outcome, note)
 
 

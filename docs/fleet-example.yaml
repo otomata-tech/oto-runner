@@ -1,0 +1,25 @@
+# Une FLOTTE : la déclaration complète d'une campagne d'agents sur une file
+# de travail datastore. Un fichier par flotte — jamais un secret ici : le
+# jeton oto (OTO_TOKEN) et la clé de modèle viennent de l'environnement.
+#
+# Lancer : python -m oto_runner.fleet flotte.yaml
+# Le modèle vient de l'env du WORKER (OTO_RUNNER_MODEL) — un champ `model`
+# ici serait logué puis ignoré : le pool de workers est homogène.
+
+procedure: enrichissement-fiche   # la procédure (doctrine) que chaque run déroule
+namespace: prospects-demo         # la file : le tableau datastore à drainer
+filter: {statut: a_traiter}       # ce qui reste à traiter (borne + comptage)
+project: 42                       # le contexte de chaque appel (_project)
+
+tools:                            # l'allowlist du run — fail-closed côté worker
+  - data_claim_next
+  - data_write
+  - fr_get
+  - serper_search
+
+concurrency: 3                    # jobs en vol au maximum
+ramp_seconds: 60                  # montée en charge : un départ par minute au plus
+volume: épuisement                # ou un entier : plafond TOTAL de lignes
+budget_tokens: 5000000            # cap de sécurité — la flotte s'arrête PROPREMENT
+max_steps: 40                     # tours de modèle par run ; le run se ré-enfile
+                                  # via la flotte tant que la file n'est pas vide
