@@ -78,6 +78,14 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         run_id = job["run_id"]
         tours = backend.thread_read(run_id, include_raw=True)
         historique = [t["provider_raw"] for t in tours if t.get("provider_raw")]
+        # Un fil peut se terminer par un tour ASSISTANT (mort entre l'appose du
+        # tour et celle de ses résultats d'outils) : les API de complétion le
+        # REFUSENT (« Expected last role User or Tool », vécu au premier 502 de
+        # la nuit — 3 refus identiques = job failed définitif). On tronque le
+        # TRANSPORT (jamais le fil persisté) jusqu'au dernier user/tool : le
+        # modèle rejoue son tour, les baux rendent le rejeu inoffensif.
+        while historique and (historique[-1] or {}).get("role") == "assistant":
+            historique.pop()
         # La procédure se recharge à CHAQUE job — jamais figée dans le fil.
         slug = p.get("procedure")
         procedure = (mcp.outil("oto_procedure", {"op": "get", "slug": slug})

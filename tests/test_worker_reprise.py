@@ -128,3 +128,21 @@ def test_le_resultat_declare_compte_les_appels_par_outil(monkeypatch):
     assert result["tool_counts"] == {"data_claim_next": 1, "serper_search": 1}, \
         "les OK comptés par outil (l'échec ne compte pas comme un geste fait) — " \
         "un claim sans write se lit ici sans ouvrir le fil"
+
+
+def test_la_reprise_tronque_un_fil_finissant_par_assistant(monkeypatch):
+    """Mort entre l'appose du tour assistant et celle de ses résultats : le fil
+    finit par assistant, que les API de complétion refusent. Le transport est
+    tronqué au dernier user/tool — le fil persisté, lui, reste intact."""
+    vu = _run_stub(monkeypatch, None)
+    fil = [{"provider_raw": {"role": "user", "content": "go"}},
+           {"provider_raw": {"role": "assistant", "content": None,
+                             "tool_calls": [{"id": "a"}]}},
+           {"provider_raw": {"role": "tool", "tool_call_id": "a", "content": "ok"}},
+           {"provider_raw": {"role": "assistant", "content": None,
+                             "tool_calls": [{"id": "b"}]}}]
+    b = FauxBackend(fil=fil)
+    W._traiter(b, _job("start", run_id="r-x"), provider=None)
+    assert vu["history"][-1]["role"] == "tool", \
+        "le dernier message transporté est user/tool, jamais assistant"
+    assert len(vu["history"]) == 3
