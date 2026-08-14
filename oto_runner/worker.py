@@ -62,7 +62,11 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     projet = p.get("project_id")
     mcp = McpSession(project=projet)
 
-    if job["kind"] == "start":
+    # ⚠️ Le discriminant de la reprise est le RUN LIÉ, pas le kind : un `start`
+    # re-claimé après une mort en plein tour porte déjà son run_id (bind_run a
+    # eu lieu avant la mort) — il REPREND son fil au lieu de rouvrir un run
+    # neuf. Sans ça, chaque kill -9 fabriquait un run orphelin et un doublon.
+    if job["kind"] == "start" and not job.get("run_id"):
         procedure = mcp.outil("oto_procedure", {"op": "get", "slug": p["procedure"]})
         d = mcp.outil("run_start", {"label": p.get("label") or f"run hébergé — {p['procedure']}",
                                     "doctrine": p["procedure"]})
@@ -70,7 +74,7 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         backend.bind_run(job["id"], run_id)
         historique: list = []
         prompt = p.get("input") or "Exécute la procédure."
-    else:  # continue
+    else:  # continue — OU start re-claimé : reprise du fil existant
         run_id = job["run_id"]
         tours = backend.thread_read(run_id, include_raw=True)
         historique = [t["provider_raw"] for t in tours if t.get("provider_raw")]
@@ -78,7 +82,9 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         slug = p.get("procedure")
         procedure = (mcp.outil("oto_procedure", {"op": "get", "slug": slug})
                      if slug else {"body_md": ""})
-        prompt = p.get("input")  # None = reprise pure après une mort en plein tour
+        # Un `continue` porte son message user ; un start repris n'ajoute RIEN :
+        # son message initial est DÉJÀ dans le fil (apposé au premier vol).
+        prompt = p.get("input") if job["kind"] == "continue" else None
 
     mcp.run_id = run_id
     spec = _spec_du_job(job, procedure.get("body_md") or "")
