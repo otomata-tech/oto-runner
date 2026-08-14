@@ -27,9 +27,18 @@ logger = logging.getLogger("oto_runner.fleet")
 
 _POLL_S = 20
 _MAX_FAILED_CONSECUTIFS = 3   # au-delà, enfiler encore = payer pour re-crasher
-DEFAULT_INPUT = ("Exécute la procédure sur la file de travail : traite les lignes "
-                 "une par une, autant que ton budget de tours le permet, puis "
-                 "conclus par un bilan bref (lignes traitées, difficultés).")
+# ⚠️ Le message de lancement NOMME la file : un agent à qui on dit « la file de
+# travail » sans la nommer DEVINE des noms de tableaux (vécu : entreprises,
+# projet_220, data… tous inconnus, puis des SIREN hallucinés et une conclusion
+# vide). Le harnais historique nommait le tableau dans sa conversation — le
+# driver fait pareil, depuis la déclaration.
+DEFAULT_INPUT = ("Ta file de travail est le tableau `{namespace}` : réserve chaque "
+                 "ligne par data_claim_next avec namespace=\"{namespace}\" et "
+                 "filter={filter}. Traite les lignes une par une selon la procédure, "
+                 "autant que ton budget de tours le permet, puis conclus par un bilan "
+                 "bref (lignes traitées, difficultés). N'invente JAMAIS une ligne ni "
+                 "un identifiant : seule la file fait foi — si la réservation ne rend "
+                 "rien, la file est vide, arrête-toi.")
 
 # Champs de déclaration reconnus ; le reste est logué puis ignoré (une flotte
 # écrite pour un autre harnais reste lisible ici, sans mensonge silencieux).
@@ -80,10 +89,16 @@ def load_spec(path: str) -> FleetSpec:
 
 
 def _payload(spec: FleetSpec) -> dict:
+    import json as _json
+    # Interpolation PRUDENTE (replace, jamais .format : un input custom peut
+    # porter des accolades qui ne sont pas des placeholders).
+    message = (spec.input
+               .replace("{namespace}", spec.namespace)
+               .replace("{filter}", _json.dumps(spec.filter, ensure_ascii=False)))
     return {"procedure": spec.procedure, "tools": list(spec.tools),
             "project_id": spec.project, "org_id": spec.org,
             "max_steps": spec.max_steps,
-            "input": spec.input,
+            "input": message,
             "label": f"flotte {spec.namespace} — {spec.procedure}"}
 
 
