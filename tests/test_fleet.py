@@ -178,3 +178,30 @@ def test_lorg_de_la_declaration_scope_le_comptage():
     b = FauxBackend(counts=[2, 2, 0, 0])
     _run(_spec(ramp_seconds=0, org=226), b)
     assert b.org_vu == 226
+
+
+def test_le_filtre_de_flotte_accepte_les_lots_nommes():
+    """Une comparaison A/B se borne à un LOT NOMMÉ de lignes (sirens exacts) —
+    la grammaire riche ({"in": [...]}, ou une liste en raccourci) traverse le
+    driver jusqu'au comptage."""
+    import json as _json
+
+    from oto_runner.backend import Backend
+
+    captures = {}
+
+    class _B(Backend):
+        def __init__(self):
+            self.base = "http://x"
+            self.token = "t"
+
+        def _get(self, chemin, params, org=None):
+            captures.update(params=params)
+            return {"total": 3}
+
+    b = _B()
+    b.count_rows("ns", filter={"statut": "a_enrichir",
+                               "siren": {"in": ["1", "2", "3"]}})
+    clauses = _json.loads(captures["params"]["filters"])
+    assert {"field": "siren", "op": "in", "value": ["1", "2", "3"]} in clauses
+    assert {"field": "statut", "op": "eq", "value": "a_enrichir"} in clauses

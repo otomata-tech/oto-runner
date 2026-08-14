@@ -98,8 +98,21 @@ class Backend:
         import json as _json
         params: dict = {"limit": 1}
         if filter:
-            params["filters"] = _json.dumps(
-                [{"field": k, "op": "eq", "value": v} for k, v in filter.items()])
+            # La grammaire riche du datastore : une valeur peut être un
+            # opérateur ({"in": [...]}) ou une LISTE (raccourci pour in) —
+            # c'est ce qui permet de borner une flotte à un LOT NOMMÉ de
+            # lignes (une comparaison A/B se fait sur des populations exactes,
+            # jamais sur des plages approximatives).
+            clauses = []
+            for k, v in filter.items():
+                if isinstance(v, dict) and len(v) == 1:
+                    op, val = next(iter(v.items()))
+                    clauses.append({"field": k, "op": op, "value": val})
+                elif isinstance(v, (list, tuple)):
+                    clauses.append({"field": k, "op": "in", "value": list(v)})
+                else:
+                    clauses.append({"field": k, "op": "eq", "value": v})
+            params["filters"] = _json.dumps(clauses)
         out = self._get(f"/api/datastore/namespaces/{namespace}/rows", params,
                         org=org)
         return int(out.get("total") or 0)
