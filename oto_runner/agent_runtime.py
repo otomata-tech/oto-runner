@@ -27,6 +27,7 @@ par job, borné dur à 64.
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Protocol
@@ -34,6 +35,13 @@ from typing import Callable, Optional, Protocol
 from .llm_types import ToolCall, Turn  # noqa: F401 — le contrat du provider
 
 MAX_TOOL_OUTPUT_CHARS = 12_000
+# Signatures d'erreurs TRANSITOIRES d'outil : rejouées UNE fois, silencieusement
+# (le modèle ne voit que la seconde réponse). La politique de reprise est de la
+# MÉCANIQUE, pas de la consigne : en prose elle coûte des caractères (payés en
+# écritures perdues, mesuré) et invite l'agent à contourner l'outil capricieux
+# plutôt qu'à le retenter. Une erreur MÉTIER (not_found, 400) n'est jamais
+# rejouée — elle est une réponse.
+_TRANSIENT_RE = None  # compilé au premier usage (module importable sans re)
 DEFAULT_MAX_STEPS = 24
 HARD_MAX_STEPS = 64
 MAX_HISTORY_MESSAGES = 60   # tours provider transportés au modèle (le fil complet
@@ -112,9 +120,19 @@ def execute_tool(spec: AgentSpec, transport: ToolTransport,
                 f"Outils autorisés : {', '.join(sorted(spec.tools)) or '(aucun)'}.", True)
     try:
         text, is_error = transport.call(call.name, call.arguments or {})
+        if is_error and _est_transitoire(text):
+            time.sleep(2)
+            text, is_error = transport.call(call.name, call.arguments or {})
     except Exception as e:  # noqa: BLE001 — l'erreur de la cible EST un résultat
         return (f"Erreur de l'outil `{call.name}` : {e}", True)
     return (_cap(text), is_error)
+
+
+def _est_transitoire(texte: str) -> bool:
+    return bool(re.search(
+        r"timeout|timed?\s*out|d\u00e9lai|429|too many requests|"
+        r"50[234]|bad gateway|unavailable|connection|connexion",
+        (texte or "")[:400], re.IGNORECASE))
 
 
 def run(spec: AgentSpec, transport: ToolTransport, provider,

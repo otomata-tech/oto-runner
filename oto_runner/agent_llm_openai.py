@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 from typing import Optional
 
 import requests
@@ -32,6 +33,34 @@ DEFAULT_BASE = "https://api.scaleway.ai/v1"
 DEFAULT_MODEL = "gpt-oss-120b"
 DEFAULT_MAX_TOKENS = 8192
 _TIMEOUT = (10, 300)
+# ⚠️ Le read timeout d'urllib3 se RÉARME à chaque octet reçu : un serveur qui
+# goutte tient la connexion indéfiniment (vécu : un tour de modèle figé 35 min,
+# pile bloquée dans ssl.read). Le plafond wall-clock coupe pour de vrai.
+_WALL_TIMEOUT_S = 420
+
+
+class _Deadline(Exception):
+    pass
+
+
+def _post_borne(url: str, corps: dict, entetes: dict):
+    """POST avec un VRAI plafond de durée (SIGALRM — le worker est mono-thread).
+    Lève LlmUnavailable au-delà : la boucle échoue proprement, le job se rejoue
+    et REPREND son fil — jamais un process suspendu qu'il faut tuer à la main."""
+    def _coupe(signum, frame):
+        raise _Deadline()
+
+    ancien = signal.signal(signal.SIGALRM, _coupe)
+    signal.alarm(_WALL_TIMEOUT_S)
+    try:
+        return requests.post(url, json=corps, timeout=_TIMEOUT, headers=entetes)
+    except _Deadline:
+        raise LlmUnavailable(
+            f"tour de modèle > {_WALL_TIMEOUT_S}s (deadline wall-clock) — "
+            "le serveur gouttait sans conclure") from None
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, ancien)
 
 _ENV_KEY = "OTO_RUNNER_OPENAI_API_KEY"
 _ENV_BASE = "OTO_RUNNER_OPENAI_BASE"
@@ -106,9 +135,8 @@ def complete(*, system: str, messages: list, tools: list[dict],
     }
     if tools:
         corps["tools"] = tools
-    r = requests.post(base_url() + "/chat/completions", json=corps,
-                      timeout=_TIMEOUT,
-                      headers={"Authorization": f"Bearer {api_key or resolve_key()}"})
+    r = _post_borne(base_url() + "/chat/completions", corps,
+                    {"Authorization": f"Bearer {api_key or resolve_key()}"})
     if r.status_code >= 400:
         try:
             detail = r.json().get("message") or r.json().get("error") or r.text

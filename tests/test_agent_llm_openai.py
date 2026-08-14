@@ -103,3 +103,18 @@ def test_format_tools_enveloppe_en_function():
     assert out == [{"type": "function",
                     "function": {"name": "data_rows", "description": "lit",
                                  "parameters": {"type": "object"}}}]
+
+
+def test_le_plafond_wall_clock_coupe_un_serveur_qui_goutte(monkeypatch):
+    """Le read timeout d'urllib3 se réarme à chaque octet : un serveur qui
+    goutte tient la connexion indéfiniment (vécu : 35 min, pile dans ssl.read).
+    La deadline SIGALRM coupe pour de vrai et lève une erreur propre."""
+    import time as _t
+
+    from oto_runner.llm_types import LlmUnavailable
+
+    monkeypatch.setattr(P, "_WALL_TIMEOUT_S", 1)
+    monkeypatch.setattr(P.requests, "post", lambda *a, **k: _t.sleep(5))
+    with pytest.raises(LlmUnavailable) as e:
+        P.complete(system="s", messages=[], tools=[], api_key="k")
+    assert "wall-clock" in str(e.value)

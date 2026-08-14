@@ -161,3 +161,45 @@ def test_la_boucle_ne_connait_pas_la_forme_du_fil():
         "deux résultats → DEUX messages role:tool (forme OpenAI respectée)"
     assert res.messages[2]["tool_call_id"] == "a1"
     assert res.messages[3]["tool_call_id"] == "a2"
+
+
+def test_une_erreur_transitoire_est_rejouee_en_silence(monkeypatch):
+    """La politique de reprise est de la MÉCANIQUE, pas de la consigne : un
+    timeout d'outil se rejoue UNE fois, le modèle ne voit que la 2e réponse."""
+    import oto_runner.agent_runtime as ar
+    monkeypatch.setattr(ar.time, "sleep", lambda s: None)
+
+    class Capricieux(FauxTransport):
+        def __init__(self):
+            super().__init__()
+            self.essais = 0
+
+        def call(self, name, arguments):
+            self.essais += 1
+            if self.essais == 1:
+                return ("serpapi_jobs : timeout lors de la recherche", True)
+            return ('{"jobs": []}', False)
+
+    t = Capricieux()
+    p = FauxProvider([_turn(calls=[("data_rows", {})]), _turn(text="fini")])
+    res = agent_runtime.run(SPEC, t, p, prompt="go")
+    assert t.essais == 2, "rejoué une fois"
+    assert res.steps[0].ok is True, "le modèle ne voit que la seconde réponse"
+
+
+def test_une_erreur_metier_nest_jamais_rejouee():
+    """not_found est une RÉPONSE, pas un accident — la rejouer coûterait un
+    crédit pour la même réponse."""
+    class Metier(FauxTransport):
+        def __init__(self):
+            super().__init__()
+            self.essais = 0
+
+        def call(self, name, arguments):
+            self.essais += 1
+            return ('{"error": "not_found", "siren": "123"}', True)
+
+    t = Metier()
+    p = FauxProvider([_turn(calls=[("data_rows", {})]), _turn(text="fini")])
+    agent_runtime.run(SPEC, t, p, prompt="go")
+    assert t.essais == 1
