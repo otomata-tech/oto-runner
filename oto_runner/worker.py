@@ -60,7 +60,7 @@ def _spec_du_job(job: dict, procedure_md: str) -> AgentSpec:
 def _traiter(backend: Backend, job: dict, provider) -> None:
     p = job.get("payload") or {}
     projet = p.get("project_id")
-    mcp = McpSession(project=projet)
+    mcp = McpSession(project=projet, org=p.get("org_id"))
 
     # ⚠️ Le discriminant de la reprise est le RUN LIÉ, pas le kind : un `start`
     # re-claimé après une mort en plein tour porte déjà son run_id (bind_run a

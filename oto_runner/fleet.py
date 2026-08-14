@@ -81,7 +81,8 @@ def load_spec(path: str) -> FleetSpec:
 
 def _payload(spec: FleetSpec) -> dict:
     return {"procedure": spec.procedure, "tools": list(spec.tools),
-            "project_id": spec.project, "max_steps": spec.max_steps,
+            "project_id": spec.project, "org_id": spec.org,
+            "max_steps": spec.max_steps,
             "input": spec.input,
             "label": f"flotte {spec.namespace} — {spec.procedure}"}
 

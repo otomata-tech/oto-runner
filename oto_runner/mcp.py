@@ -23,13 +23,17 @@ class McpSession:
     """Une session MCP réutilisable — le transport d'outils de la boucle."""
 
     def __init__(self, url: Optional[str] = None, token: Optional[str] = None,
-                 project: Optional[int] = None, run_id: Optional[str] = None):
+                 project: Optional[int] = None, run_id: Optional[str] = None,
+                 org: Optional[int] = None):
         self.url = url or os.environ.get("OTO_MCP_URL", "https://mcp.oto.cx/mcp")
         self.token = (token or os.environ.get("OTO_TOKEN", "")).strip()
         # Les jetons de contexte d'appel (ADR 0038) : posés sur CHAQUE appel de
         # travail — le projet résout l'org et les identités, le run corrèle le
         # journal. C'est le worker qui les porte, pas le modèle.
         self.project = project
+        self.org = org      # l'org de la MISSION — sert les tools qui déclarent
+        # `_org` mais pas `_project` (oto_procedure : une doctrine d'org se
+        # charge dans SON org, pas dans l'org maison du jeton)
         self.run_id = run_id
         self.session: Optional[str] = None
         self._n = 0
@@ -100,6 +104,10 @@ class McpSession:
         declares = self._declares(name)
         if self.project is not None and "_project" in declares:
             args.setdefault("_project", self.project)
+        if self.org is not None and "_org" in declares and "_project" not in declares:
+            # L'org SEULEMENT quand le projet ne peut pas la porter : deux
+            # jetons redondants sur le même appel n'apportent rien.
+            args.setdefault("_org", self.org)
         if self.run_id is not None and "_run_id" in declares:
             args.setdefault("_run_id", self.run_id)
         self._n += 1

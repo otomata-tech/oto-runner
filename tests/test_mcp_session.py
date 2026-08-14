@@ -54,3 +54,44 @@ def test_un_tool_inconnu_du_cache_ne_recoit_aucun_jeton(monkeypatch):
     s.call("tool_inconnu", {"x": 1})
     assert "_project" not in vu["appel"]["arguments"], \
         "fail-safe : un appel sans contexte vaut mieux qu'un refus"
+
+
+def test_lorg_porte_les_tools_sans_project(monkeypatch):
+    """`oto_procedure` déclare `_org` mais pas `_project` : sans l'org de la
+    mission, la doctrine se cherche dans l'org MAISON du jeton et n'existe pas
+    (vécu : 2 jobs de re-validation en échec avant une ligne). L'org ne se pose
+    QUE quand le projet ne peut pas la porter — jamais les deux."""
+    def _s(tools):
+        return _session_org(monkeypatch, tools)
+
+    s, vu = _s({"oto_procedure": ["op", "slug", "_org"]})
+    s.call("oto_procedure", {"op": "get", "slug": "demo"})
+    assert vu["appel"]["arguments"]["_org"] == 226
+    assert "_project" not in vu["appel"]["arguments"]
+
+    s, vu = _s({"data_claim_next": ["namespace", "_org", "_project", "_run_id"]})
+    s.call("data_claim_next", {"namespace": "ns"})
+    assert vu["appel"]["arguments"]["_project"] == 248
+    assert "_org" not in vu["appel"]["arguments"], "le projet porte déjà l'org"
+
+
+def _session_org(monkeypatch, tools):
+    vu = {}
+
+    def _post(self, corps, avec_entetes=False):
+        methode = corps.get("method")
+        if methode == "initialize":
+            return ({"mcp-session-id": "s1"}, {}) if avec_entetes else {}
+        if methode == "tools/list":
+            return {"result": {"tools": [
+                {"name": n, "inputSchema": {"type": "object",
+                                            "properties": {k: {} for k in props}}}
+                for n, props in tools.items()]}}
+        if methode == "tools/call":
+            vu["appel"] = corps["params"]
+            return {"result": {"content": [{"type": "text", "text": "{}"}]}}
+        return {}
+
+    monkeypatch.setattr(McpSession, "_post", _post)
+    return McpSession(url="http://x", token="t", project=248, run_id="r-1",
+                      org=226), vu
