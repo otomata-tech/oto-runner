@@ -89,13 +89,17 @@ def test_un_start_reclaime_apres_mort_reprend_son_fil(monkeypatch):
     est déjà dans le fil, apposé au premier vol)."""
     vu = _run_stub(monkeypatch, None)
     fil = [{"provider_raw": {"role": "user", "content": "Vas-y."}},
-           {"provider_raw": {"role": "assistant", "content": "je commence"}}]
+           {"provider_raw": {"role": "assistant", "content": None,
+                             "tool_calls": [{"id": "a"}]}},
+           {"provider_raw": {"role": "tool", "tool_call_id": "a", "content": "ok"}}]
     b = FauxBackend(fil=fil)
     W._traiter(b, _job("start", run_id="r-SURVIVANT"), provider=None)
     assert ("thread_read", "r-SURVIVANT") in b.appels, "le fil est rechargé"
     assert not any(a[0] == "bind_run" for a in b.appels), "jamais un run neuf"
     assert vu["prompt"] is None, "reprise PURE — rien à rejouer"
-    assert len(vu["history"]) == 2, "l'historique EST le fil du run survivant"
+    assert len(vu["history"]) == 3, "l'historique EST le fil du run survivant " \
+        "(un fil finissant par user/tool passe INTÉGRAL — la troncature ne " \
+        "vise que le tour assistant orphelin, cf. test dédié)"
     assert ("complete", True, "r-SURVIVANT") in b.appels
 
 
