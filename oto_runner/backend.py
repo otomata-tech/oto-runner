@@ -39,9 +39,15 @@ class Backend:
                                status=r.status_code)
         return r.json() if r.content else {}
 
-    def _get(self, chemin: str, params: dict) -> dict:
+    def _get(self, chemin: str, params: dict,
+             org: Optional[int] = None) -> dict:
+        entetes = {"Authorization": f"Bearer {self.token}"}
+        if org is not None:
+            # Le namespace d'une flotte vit dans l'org de la MISSION, pas dans
+            # l'org maison du jeton — la consultation REST se scope par en-tête.
+            entetes["X-Oto-Org"] = str(org)
         r = requests.get(self.base + chemin, params=params, timeout=_TIMEOUT,
-                         headers={"Authorization": f"Bearer {self.token}"})
+                         headers=entetes)
         if r.status_code >= 400:
             raise BackendError(f"{chemin} → {r.status_code} : {r.text[:300]}",
                                status=r.status_code)
@@ -84,7 +90,8 @@ class Backend:
         return str(out.get("status") or "")
 
     # ── la file de LIGNES (datastore) — lecture seule, pour les bornes ───────
-    def count_rows(self, namespace: str, filter: Optional[dict] = None) -> int:
+    def count_rows(self, namespace: str, filter: Optional[dict] = None,
+                   org: Optional[int] = None) -> int:
         """Combien de lignes matchent encore le filtre de la flotte. Lecture
         d'observation (borne d'arrêt + ré-enfilement) — jamais un claim : le
         claim appartient à l'AGENT, dans la procédure."""
@@ -93,7 +100,8 @@ class Backend:
         if filter:
             params["filters"] = _json.dumps(
                 [{"field": k, "op": "eq", "value": v} for k, v in filter.items()])
-        out = self._get(f"/api/datastore/namespaces/{namespace}/rows", params)
+        out = self._get(f"/api/datastore/namespaces/{namespace}/rows", params,
+                        org=org)
         return int(out.get("total") or 0)
 
     # ── le fil d'un run (runs.thread, R1) ────────────────────────────────────

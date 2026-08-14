@@ -33,7 +33,7 @@ DEFAULT_INPUT = ("Exécute la procédure sur la file de travail : traite les lig
 
 # Champs de déclaration reconnus ; le reste est logué puis ignoré (une flotte
 # écrite pour un autre harnais reste lisible ici, sans mensonge silencieux).
-_CHAMPS = {"procedure", "namespace", "filter", "project", "tools", "concurrency",
+_CHAMPS = {"procedure", "namespace", "filter", "project", "org", "tools", "concurrency",
            "ramp_seconds", "volume", "budget_tokens", "max_steps", "input"}
 
 
@@ -44,6 +44,7 @@ class FleetSpec:
     tools: tuple
     filter: dict = field(default_factory=dict)   # ce qui est encore à traiter
     project: Optional[int] = None
+    org: Optional[int] = None       # l'org de la MISSION (le namespace y vit)
     concurrency: int = 3
     ramp_seconds: int = 60
     volume: Optional[int] = None                 # None = épuisement de la file
@@ -69,6 +70,7 @@ def load_spec(path: str) -> FleetSpec:
         tools=tuple(raw.get("tools") or ()),
         filter=dict(raw.get("filter") or {}),
         project=raw.get("project"),
+        org=raw.get("org"),
         concurrency=int(raw.get("concurrency") or 3),
         ramp_seconds=int(raw.get("ramp_seconds") or 60),
         volume=volume,
@@ -102,7 +104,8 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
     PROUVENT en test, elles ne s'affirment pas — c'est ce qui protège le compte
     pendant une campagne sans surveillance."""
     bilan = FleetBilan(lignes_initiales=backend.count_rows(spec.namespace,
-                                                           filter=spec.filter))
+                                                           filter=spec.filter,
+                                                           org=spec.org))
     en_vol: set[int] = set()
     dernier_depart: Optional[float] = None
     failed_consecutifs = 0
@@ -131,7 +134,8 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                 failed_consecutifs += 1
                 logger.warning("job %s FAILED : %s", jid, job.get("last_error"))
 
-        restantes = backend.count_rows(spec.namespace, filter=spec.filter)
+        restantes = backend.count_rows(spec.namespace, filter=spec.filter,
+                                       org=spec.org)
         bilan.lignes_restantes = restantes
         traitees = max(0, bilan.lignes_initiales - restantes)
 

@@ -25,7 +25,8 @@ class FauxBackend:
         self.enfiles = 0
         self._age: dict[int, int] = {}
 
-    def count_rows(self, namespace, filter=None):
+    def count_rows(self, namespace, filter=None, org=None):
+        self.org_vu = org
         return self.counts.pop(0) if len(self.counts) > 1 else self.counts[0]
 
     def enqueue(self, kind, payload, run_id=None):
@@ -168,3 +169,12 @@ def test_le_payload_porte_le_contrat_du_run():
     p = _payload(_spec(project=220, max_steps=48))
     assert p["procedure"] == "p" and p["project_id"] == 220
     assert p["max_steps"] == 48 and "data_claim_next" in p["tools"]
+
+
+def test_lorg_de_la_declaration_scope_le_comptage():
+    """Le namespace d'une flotte vit dans l'org de la MISSION, pas dans l'org
+    maison du jeton — sans `org:`, le comptage rend namespace_not_found (vécu
+    au premier vol de la re-validation)."""
+    b = FauxBackend(counts=[2, 2, 0, 0])
+    _run(_spec(ramp_seconds=0, org=226), b)
+    assert b.org_vu == 226
