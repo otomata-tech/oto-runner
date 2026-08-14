@@ -24,7 +24,8 @@ import os
 import time
 from typing import Optional
 
-from . import agent_llm, agent_runtime
+from . import agent_runtime
+from .llm_select import get_provider
 from .agent_runtime import AgentSpec
 from .backend import Backend, BackendError
 from .mcp import McpSession
@@ -56,7 +57,7 @@ def _spec_du_job(job: dict, procedure_md: str) -> AgentSpec:
         label=f"job:{job.get('id')}")
 
 
-def _traiter(backend: Backend, job: dict) -> None:
+def _traiter(backend: Backend, job: dict, provider) -> None:
     p = job.get("payload") or {}
     projet = p.get("project_id")
     mcp = McpSession(project=projet)
@@ -86,8 +87,8 @@ def _traiter(backend: Backend, job: dict) -> None:
         backend.thread_append(run_id, role, neutre, provider_raw=brut)
         backend.extend(job["id"], _LEASE_S)   # le heartbeat EST l'écriture du fil
 
-    res = agent_runtime.run(spec, mcp, prompt=prompt, history=historique,
-                            on_turn=apposer)
+    res = agent_runtime.run(spec, mcp, provider, prompt=prompt,
+                            history=historique, on_turn=apposer)
 
     outcome = "done" if res.stopped in ("end_turn",) else "blocked"
     note = (f"{res.stopped} · {len(res.steps)} appels · "
@@ -110,8 +111,10 @@ def main() -> None:
             "réel est gaté par la relecture d'architecture du chantier R2. Ce cran "
             "existe pour qu'un worker lancé par accident ne consomme rien.")
     backend = Backend()
-    agent_llm.resolve_key()   # échoue FORT au boot si la clé manque, pas au 1er job
-    logger.info("worker armé — file de %s", backend.base)
+    provider = get_provider()
+    provider.resolve_key()    # échoue FORT au boot si la clé manque, pas au 1er job
+    logger.info("worker armé — file de %s · provider %s · modèle %s",
+                backend.base, provider.__name__.rsplit('_', 1)[-1], provider.model())
     while True:
         try:
             job = backend.claim(lease_seconds=_LEASE_S)
@@ -123,7 +126,7 @@ def main() -> None:
             time.sleep(_POLL_S)
             continue
         try:
-            _traiter(backend, job)
+            _traiter(backend, job, provider)
         except Exception as e:  # noqa: BLE001 — l'échec d'un job n'arrête pas la batterie
             logger.exception("job %s en échec", job.get("id"))
             try:

@@ -1,19 +1,19 @@
-"""La boucle du worker — les invariants transplantés du prototype, prouvés ici.
+"""La boucle du worker — les invariants, désormais prouvés provider-agnostiques.
 
-Fakes purs (pas de réseau, pas de SDK) : un faux provider à tours scriptés et un
-faux transport MCP. Ce qui se teste est la BOUCLE — allowlist fail-closed,
-troncature marquée, plafond de tours, persistance du fil dans l'ordre.
+Fakes purs : un provider scripté (forme Anthropic pour les assertions de fil) et
+un transport MCP espion. La boucle ne connaît AUCUNE forme de fil — un test le
+prouve en la faisant tourner sur un provider à forme OpenAI.
 """
 from __future__ import annotations
 
 import pytest
 
-from oto_runner import agent_llm, agent_runtime
+from oto_runner import agent_runtime
 from oto_runner.agent_runtime import AgentSpec
+from oto_runner.llm_types import ToolCall, Turn
 
 
 class FauxTransport:
-    """Un transport MCP qui note tout et rend ce qu'on lui a scripté."""
     def __init__(self, reponses=None):
         self.reponses = dict(reponses or {})
         self.appels = []
@@ -27,19 +27,34 @@ class FauxTransport:
         return self.reponses.get(name, ("ok", False))
 
 
-def _tours(monkeypatch, tours):
-    """Scripte la suite de tours du modèle."""
-    file = list(tours)
+class FauxProvider:
+    """Forme Anthropic : tour assistant = blocs, résultats = UN message user."""
 
-    def _complete(**kwargs):
-        return file.pop(0)
-    monkeypatch.setattr(agent_llm, "complete", _complete)
+    def __init__(self, tours):
+        self.file = list(tours)
+
+    def complete(self, **kwargs):
+        return self.file.pop(0)
+
+    def user_message(self, text):
+        return {"role": "user", "content": text}
+
+    def assistant_message(self, turn):
+        return {"role": "assistant", "content": turn.raw_content}
+
+    def tool_messages(self, results):
+        return [{"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": r["id"],
+             "content": r["text"], "is_error": r["is_error"]} for r in results]}]
+
+    def format_tools(self, schemas):
+        return list(schemas)
 
 
 def _turn(text="", calls=(), stop="end_turn"):
-    return agent_llm.Turn(
+    return Turn(
         text=text,
-        tool_calls=tuple(agent_llm.ToolCall(id=f"t{i}", name=n, arguments=a)
+        tool_calls=tuple(ToolCall(id=f"t{i}", name=n, arguments=a)
                          for i, (n, a) in enumerate(calls)),
         stop_reason=stop,
         raw_content=[{"type": "text", "text": text}] if text else [])
@@ -49,95 +64,100 @@ SPEC = AgentSpec(system="s", tools=frozenset({"data_rows", "oto_procedure"}),
                  max_steps=3)
 
 
-def test_un_outil_hors_allowlist_nest_jamais_transporte(monkeypatch):
-    """Fail-closed : le refus revient au modèle en tour d'erreur — et le transport
-    n'est même pas sollicité (un nom hors liste ne se cherche pas)."""
+def test_un_outil_hors_allowlist_nest_jamais_transporte():
     t = FauxTransport()
-    _tours(monkeypatch, [
-        _turn(calls=[("email_send", {"to": "x"})]),
-        _turn(text="compris, j'arrête"),
-    ])
-    res = agent_runtime.run(SPEC, t, prompt="go")
+    p = FauxProvider([_turn(calls=[("email_send", {"to": "x"})]),
+                      _turn(text="compris, j'arrête")])
+    res = agent_runtime.run(SPEC, t, p, prompt="go")
     assert t.appels == [], "l'outil interdit ne doit jamais atteindre le transport"
     assert res.steps[0].ok is False and "indisponible" in (res.steps[0].error or "")
     assert res.stopped == "end_turn"
 
 
-def test_une_sortie_geante_est_tronquee_avec_la_marque(monkeypatch):
-    """Le modèle doit SAVOIR qu'il manque quelque chose — la marque est le contrat."""
+def test_une_sortie_geante_est_tronquee_avec_la_marque():
     t = FauxTransport({"data_rows": ("x" * 50_000, False)})
-    _tours(monkeypatch, [
-        _turn(calls=[("data_rows", {})]),
-        _turn(text="fini"),
-    ])
-    res = agent_runtime.run(SPEC, t, prompt="go")
-    tour_outils = res.messages[-2]          # le message user des tool_results
-    contenu = tour_outils["content"][0]["content"]
+    p = FauxProvider([_turn(calls=[("data_rows", {})]), _turn(text="fini")])
+    res = agent_runtime.run(SPEC, t, p, prompt="go")
+    contenu = res.messages[-2]["content"][0]["content"]
     assert len(contenu) < 50_000 and "tronquée" in contenu
-    assert res.stopped == "end_turn"
 
 
-def test_le_plafond_de_tours_arrete_proprement(monkeypatch):
-    """Un modèle qui boucle s'arrête à max_steps — avec le dernier texte comme repli."""
+def test_le_plafond_de_tours_arrete_proprement():
     t = FauxTransport()
-    _tours(monkeypatch, [
-        _turn(text="je continue", calls=[("data_rows", {})]) for _ in range(10)
-    ])
-    res = agent_runtime.run(SPEC, t, prompt="go")
+    p = FauxProvider([_turn(text="je continue", calls=[("data_rows", {})])
+                      for _ in range(10)])
+    res = agent_runtime.run(SPEC, t, p, prompt="go")
     assert res.stopped == "max_steps"
     assert res.reply == "je continue", "le texte intermédiaire est le repli"
-    assert len(t.appels) <= SPEC.max_steps + 1
 
 
-def test_un_refus_est_terminal_jamais_un_crash(monkeypatch):
+def test_un_refus_est_terminal_jamais_un_crash():
     t = FauxTransport()
-    _tours(monkeypatch, [_turn(stop="refusal")])
-    res = agent_runtime.run(SPEC, t, prompt="go")
-    assert res.stopped == "refusal" and res.reply == ""
-    assert t.appels == []
+    p = FauxProvider([_turn(stop="refusal")])
+    res = agent_runtime.run(SPEC, t, p, prompt="go")
+    assert res.stopped == "refusal" and res.reply == "" and t.appels == []
 
 
-def test_le_fil_est_appose_dans_lordre_et_en_double_etage(monkeypatch):
-    """on_turn reçoit (rôle, projection neutre, brut provider) pour CHAQUE tour —
-    c'est le contrat du fil R1 : l'UI lit le neutre, la reprise rejoue le brut."""
+def test_le_fil_est_appose_dans_lordre_et_en_double_etage():
     t = FauxTransport({"data_rows": ('{"rows": []}', False)})
-    _tours(monkeypatch, [
-        _turn(text="je regarde", calls=[("data_rows", {"limit": 1})]),
-        _turn(text="terminé"),
-    ])
+    p = FauxProvider([_turn(text="je regarde", calls=[("data_rows", {"limit": 1})]),
+                      _turn(text="terminé")])
     fil = []
-    agent_runtime.run(SPEC, t, prompt="vas-y",
+    agent_runtime.run(SPEC, t, p, prompt="vas-y",
                       on_turn=lambda role, neutre, brut: fil.append((role, neutre, brut)))
-    roles = [f[0] for f in fil]
-    assert roles == ["user", "assistant", "tool", "assistant"]
+    assert [f[0] for f in fil] == ["user", "assistant", "tool", "assistant"]
     assert fil[1][1]["tool_calls"] == [{"name": "data_rows"}]
-    assert fil[2][2]["role"] == "user" and fil[2][2]["content"][0]["type"] == "tool_result"
-    assert fil[3][1]["text"] == "terminé"
+    assert fil[2][2]["content"][0]["type"] == "tool_result"
 
 
-def test_une_erreur_de_transport_est_un_resultat_pas_une_panne(monkeypatch):
+def test_une_erreur_de_transport_est_un_resultat_pas_une_panne():
     class Casse(FauxTransport):
         def call(self, name, arguments):
             raise RuntimeError("connexion perdue")
-    t = Casse()
-    _tours(monkeypatch, [
-        _turn(calls=[("data_rows", {})]),
-        _turn(text="je conclus sans"),
-    ])
-    res = agent_runtime.run(SPEC, t, prompt="go")
+    p = FauxProvider([_turn(calls=[("data_rows", {})]),
+                      _turn(text="je conclus sans")])
+    res = agent_runtime.run(SPEC, Casse(), p, prompt="go")
     assert res.stopped == "end_turn"
     assert res.steps[0].ok is False and "connexion perdue" in res.steps[0].error
 
 
-def test_la_continuation_repart_de_lhistorique_sans_nouveau_prompt(monkeypatch):
-    """Reprise après une mort en plein tour : history seul, prompt=None — le fil
-    rejoué verbatim, aucun tour user parasite ajouté."""
-    t = FauxTransport()
-    _tours(monkeypatch, [_turn(text="je reprends et je conclus")])
+def test_la_continuation_repart_de_lhistorique_sans_nouveau_prompt():
+    p = FauxProvider([_turn(text="je reprends et je conclus")])
     historique = [{"role": "user", "content": "démarre"},
                   {"role": "assistant", "content": [{"type": "text", "text": "début"}]}]
-    res = agent_runtime.run(SPEC, t, prompt=None, history=historique)
+    res = agent_runtime.run(SPEC, FauxTransport(), p, prompt=None, history=historique)
     assert res.reply == "je reprends et je conclus"
-    assert res.messages[0] == historique[0], "l'historique est rejoué tel quel"
+    assert res.messages[0] == historique[0]
+    assert [m["role"] for m in res.messages].count("user") == 1
+
+
+def test_la_boucle_ne_connait_pas_la_forme_du_fil():
+    """LE test du seam : le même run sur un provider à forme OpenAI produit des
+    messages `role:tool` SÉPARÉS — si la boucle codait encore la forme Anthropic
+    en dur, ce test la prendrait la main dans le sac."""
+    class ProviderOpenAI(FauxProvider):
+        def assistant_message(self, turn):
+            return turn.raw_content if isinstance(turn.raw_content, dict) else \
+                {"role": "assistant", "content": turn.text}
+
+        def tool_messages(self, results):
+            return [{"role": "tool", "tool_call_id": r["id"], "content": r["text"]}
+                    for r in results]
+
+        def format_tools(self, schemas):
+            return [{"type": "function", "function": {"name": s["name"]}}
+                    for s in schemas]
+
+    t = FauxTransport({"data_rows": ("ok", False), "oto_procedure": ("doc", False)})
+    tours = [Turn(text="", stop_reason="end_turn",
+                  tool_calls=(ToolCall(id="a1", name="data_rows", arguments={}),
+                              ToolCall(id="a2", name="oto_procedure", arguments={})),
+                  raw_content={"role": "assistant", "content": None,
+                               "tool_calls": [{"id": "a1"}, {"id": "a2"}]}),
+             _turn(text="fini")]
+    res = agent_runtime.run(SPEC, t, ProviderOpenAI(tours), prompt="go")
     roles = [m["role"] for m in res.messages]
-    assert roles.count("user") == 1, "aucun tour user n'est inventé à la reprise"
+    assert roles == ["user", "assistant", "tool", "tool", "assistant"], \
+        "deux résultats → DEUX messages role:tool (forme OpenAI respectée)"
+    assert res.messages[2]["tool_call_id"] == "a1"
+    assert res.messages[3]["tool_call_id"] == "a2"

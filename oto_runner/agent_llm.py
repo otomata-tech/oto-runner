@@ -21,8 +21,9 @@ Le reste du contrat est inchangé, et c'est lui qui compte :
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
 from typing import Any, Optional
+
+from .llm_types import LlmUnavailable, ToolCall, Turn
 
 # Sonnet par défaut — divergence ASSUMÉE avec le prototype (Opus) : un run hébergé
 # tourne sans humain qui regarde le compteur, et la campagne réelle a montré qu'un
@@ -33,32 +34,6 @@ DEFAULT_EFFORT = "medium"
 DEFAULT_MAX_TOKENS = 8192
 
 _ENV_KEY = "ANTHROPIC_API_KEY"
-
-
-@dataclass(frozen=True)
-class ToolCall:
-    """Un appel d'outil demandé par le modèle (bloc `tool_use`)."""
-    id: str
-    name: str
-    arguments: dict
-
-
-@dataclass(frozen=True)
-class Turn:
-    """Un tour de modèle. `raw_content` = les blocs bruts, à réémettre tels quels."""
-    text: str
-    tool_calls: tuple[ToolCall, ...] = ()
-    stop_reason: str = "end_turn"
-    raw_content: list = field(default_factory=list)
-    usage: dict = field(default_factory=dict)
-
-    @property
-    def wants_tools(self) -> bool:
-        return bool(self.tool_calls)
-
-
-class LlmUnavailable(RuntimeError):
-    """Le substrat LLM n'est pas configuré (lib absente / clé absente)."""
 
 
 def model() -> str:
@@ -114,6 +89,31 @@ def _block_to_dict(block: Any) -> dict:
             pass
     return {"type": _block_type(block) or "text",
             "text": str(getattr(block, "text", "") or "")}
+
+
+# ── La FORME du fil, confinée ici (la boucle ne connaît que ces 4 hooks) ─────
+def user_message(text: str) -> dict:
+    return {"role": "user", "content": text}
+
+
+def assistant_message(turn: Turn) -> dict:
+    """Le tour assistant à réinjecter — blocs BRUTS, jamais reconstruits."""
+    return {"role": "assistant", "content": turn.raw_content}
+
+
+def tool_messages(results: list[dict]) -> list[dict]:
+    """Les résultats d'outils d'UN tour → messages de fil. Anthropic : TOUS dans
+    UN message user (les scinder apprend au modèle à cesser de paralléliser).
+    `results` = [{id, text, is_error}]."""
+    return [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": r["id"],
+         "content": r["text"], "is_error": r["is_error"]} for r in results]}]
+
+
+def format_tools(schemas: list[dict]) -> list[dict]:
+    """Schémas NEUTRES ({name, description, input_schema}) → format Anthropic
+    (identique, c'est lui qui a fixé la forme neutre)."""
+    return list(schemas)
 
 
 def complete(*, system: str, messages: list, tools: list[dict],

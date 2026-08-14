@@ -14,8 +14,9 @@ Ce qui est conservé du prototype, à l'identique :
   d'erreur — le modèle se corrige — jamais en exception qui tuerait le job) ;
 - la troncature MARQUÉE d'une sortie d'outil (le modèle doit SAVOIR qu'il
   manque quelque chose, sinon il conclut sur un extrait en croyant tout voir) ;
-- tous les résultats d'un tour dans UN message user (les scinder apprend au
-  modèle à cesser de paralléliser) ;
+- les résultats d'un tour rendus GROUPÉS au modèle — leur forme dans le fil
+  appartient au provider (un message user chez Anthropic, N messages role:tool
+  chez OpenAI) ;
 - le texte intermédiaire gardé comme repli si le budget de tours s'épuise.
 
 Divergence ASSUMÉE : le plafond de tours par défaut passe de 6 à 24. Le 6 du
@@ -30,7 +31,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Protocol
 
-from . import agent_llm
+from .llm_types import ToolCall, Turn  # noqa: F401 — le contrat du provider
 
 MAX_TOOL_OUTPUT_CHARS = 12_000
 DEFAULT_MAX_STEPS = 24
@@ -103,7 +104,7 @@ def _trim(messages: list) -> list:
 
 
 def execute_tool(spec: AgentSpec, transport: ToolTransport,
-                 call: agent_llm.ToolCall) -> tuple[str, bool]:
+                 call: ToolCall) -> tuple[str, bool]:
     """UN appel d'outil. Ne lève jamais : une erreur d'outil est un résultat que le
     modèle lit pour se corriger. Fail-closed sur l'allowlist AVANT tout transport."""
     if call.name not in spec.tools:
@@ -116,7 +117,8 @@ def execute_tool(spec: AgentSpec, transport: ToolTransport,
     return (_cap(text), is_error)
 
 
-def run(spec: AgentSpec, transport: ToolTransport, prompt: Optional[str] = None,
+def run(spec: AgentSpec, transport: ToolTransport, provider,
+        prompt: Optional[str] = None,
         history: Optional[list] = None, on_turn: Optional[OnTurn] = None,
         api_key: Optional[str] = None) -> AgentResult:
     """La boucle : tours de modèle et d'outils jusqu'à conclusion, plafond, ou refus.
@@ -126,11 +128,12 @@ def run(spec: AgentSpec, transport: ToolTransport, prompt: Optional[str] = None,
     ex. après un kill en plein tour). `on_turn` appose chaque tour au fil backend."""
     messages = _trim(history or [])
     if prompt is not None:
-        messages.append({"role": "user", "content": prompt})
+        um = provider.user_message(prompt)
+        messages.append(um)
         if on_turn:
-            on_turn("user", {"text": prompt}, {"role": "user", "content": prompt})
+            on_turn("user", {"text": prompt}, um)
 
-    schemas = transport.schemas(spec.tools)
+    schemas = provider.format_tools(transport.schemas(spec.tools))
     steps: list[AgentStep] = []
     usage = {"input_tokens": 0, "output_tokens": 0}
     stopped = "end_turn"
@@ -138,8 +141,8 @@ def run(spec: AgentSpec, transport: ToolTransport, prompt: Optional[str] = None,
     plafond = max(1, min(spec.max_steps, HARD_MAX_STEPS))
 
     for _ in range(plafond + 1):
-        turn = agent_llm.complete(system=spec.system, messages=messages,
-                                  tools=schemas, api_key=api_key)
+        turn = provider.complete(system=spec.system, messages=messages,
+                                 tools=schemas, api_key=api_key)
         for k in ("input_tokens", "output_tokens"):
             usage[k] = usage.get(k, 0) + int(turn.usage.get(k) or 0)
 
@@ -147,7 +150,7 @@ def run(spec: AgentSpec, transport: ToolTransport, prompt: Optional[str] = None,
             stopped, reply = "refusal", ""
             break
 
-        assistant_raw = {"role": "assistant", "content": turn.raw_content}
+        assistant_raw = provider.assistant_message(turn)
         messages.append(assistant_raw)
         if on_turn:
             on_turn("assistant",
@@ -168,12 +171,14 @@ def run(spec: AgentSpec, transport: ToolTransport, prompt: Optional[str] = None,
             steps.append(AgentStep(tool=call.name, ok=not is_error, duration_ms=ms,
                                    error=text[:200] if is_error else None))
             neutre.append({"name": call.name, "ok": not is_error, "duration_ms": ms})
-            results.append({"type": "tool_result", "tool_use_id": call.id,
-                            "content": text, "is_error": is_error})
-        tool_raw = {"role": "user", "content": results}
-        messages.append(tool_raw)
-        if on_turn:
-            on_turn("tool", {"tool_calls": neutre}, tool_raw)
+            results.append({"id": call.id, "text": text, "is_error": is_error})
+        # La FORME des résultats dans le fil appartient au provider (un message
+        # user chez Anthropic, N messages role:tool chez OpenAI) — la boucle ne
+        # la connaît pas, elle appose ce qu'on lui rend.
+        for tool_raw in provider.tool_messages(results):
+            messages.append(tool_raw)
+            if on_turn:
+                on_turn("tool", {"tool_calls": neutre}, tool_raw)
         if turn.text:
             reply = turn.text
     else:
