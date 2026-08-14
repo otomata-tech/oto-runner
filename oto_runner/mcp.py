@@ -56,14 +56,25 @@ class McpSession:
         return (r.headers, data) if avec_entetes else data
 
     def _ouvrir(self):
-        self._n += 1
-        entetes, _ = self._post(
-            {"jsonrpc": "2.0", "id": self._n, "method": "initialize",
-             "params": {"protocolVersion": "2025-06-18", "capabilities": {},
-                        "clientInfo": {"name": "oto-runner", "version": "0.1"}}},
-            avec_entetes=True)
-        self.session = entetes.get("mcp-session-id") or entetes.get("Mcp-Session-Id")
-        self._post({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        # Un 502 pendant l'initialize rendait une session MUETTE (session id
+        # absent avalé) : tous les appels suivants mouraient en « Missing
+        # session ID » cryptique (vécu, nuit du 15/08). Trois essais espacés,
+        # puis un échec NET — le retry de job fait le reste.
+        import time as _t
+        for essai in range(3):
+            self._n += 1
+            entetes, _ = self._post(
+                {"jsonrpc": "2.0", "id": self._n, "method": "initialize",
+                 "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                            "clientInfo": {"name": "oto-runner", "version": "0.1"}}},
+                avec_entetes=True)
+            self.session = entetes.get("mcp-session-id") or entetes.get("Mcp-Session-Id")
+            if self.session:
+                self._post({"jsonrpc": "2.0", "method": "notifications/initialized"})
+                return
+            _t.sleep(5 * (essai + 1))
+        raise RuntimeError(
+            "initialize MCP sans session id après 3 essais — backend indisponible ?")
 
     # ── le contrat ToolTransport de la boucle ────────────────────────────────
     def schemas(self, names: frozenset) -> list[dict]:

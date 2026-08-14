@@ -95,3 +95,23 @@ def _session_org(monkeypatch, tools):
     monkeypatch.setattr(McpSession, "_post", _post)
     return McpSession(url="http://x", token="t", project=248, run_id="r-1",
                       org=226), vu
+
+
+def test_un_initialize_muet_echoue_net_apres_trois_essais(monkeypatch):
+    """Un 502 pendant l'initialize rendait une session MUETTE — puis chaque
+    appel mourait en « Missing session ID » cryptique. Trois essais, échec NET."""
+    import pytest
+
+    import oto_runner.mcp as M
+
+    essais = {"n": 0}
+
+    def _post(self, corps, avec_entetes=False):
+        essais["n"] += 1
+        return ({}, {}) if avec_entetes else {}
+
+    monkeypatch.setattr(McpSession, "_post", _post)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    with pytest.raises(RuntimeError) as e:
+        McpSession(url="http://x", token="t")
+    assert "session id" in str(e.value) and essais["n"] == 3
