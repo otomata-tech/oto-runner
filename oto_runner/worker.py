@@ -106,10 +106,18 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             # sur SA connexion : jamais dans la transaction d'un autre (cf. #333).
             logger.warning("run_finish %s : %s", run_id, e)
     # Le résultat DÉCLARÉ (R5) : ce que l'ordonnanceur de flotte lit pour sa
-    # garde budget — un résumé, jamais du contenu de fil.
+    # garde budget — un résumé, jamais du contenu de fil. `tool_counts` rend le
+    # TOUR PERDU lisible d'un coup d'œil : un agent qui analyse et conclut en
+    # prose SANS écrire ne produit aucune erreur — la seule trace est l'écart
+    # entre ses mots et ses appels. Le compte par outil le montre au grain job
+    # (des claims sans writes), sans lire le fil.
+    compte: dict = {}
+    for s in res.steps:
+        if s.ok:
+            compte[s.tool] = compte.get(s.tool, 0) + 1
     backend.complete(job["id"], ok=True, run_id=run_id,
                      result={"usage_tokens": jetons, "stopped": res.stopped,
-                             "steps": len(res.steps)})
+                             "steps": len(res.steps), "tool_counts": compte})
     logger.info("job %s : %s (%s)", job["id"], outcome, note)
 
 

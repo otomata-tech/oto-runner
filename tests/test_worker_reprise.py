@@ -31,6 +31,7 @@ class FauxBackend:
 
     def complete(self, job_id, ok, error=None, run_id=None, result=None):
         self.appels.append(("complete", ok, run_id))
+        self.appels.append(("complete_result", result))
         return "done"
 
 
@@ -103,3 +104,27 @@ def test_un_continue_garde_son_message(monkeypatch):
     b = FauxBackend(fil=[{"provider_raw": {"role": "user", "content": "avant"}}])
     W._traiter(b, _job("continue", run_id="r-1"), provider=None)
     assert vu["prompt"] == "Vas-y.", "le continue porte SON message user"
+
+
+def test_le_resultat_declare_compte_les_appels_par_outil(monkeypatch):
+    """Le TOUR PERDU (analyser puis conclure en prose SANS écrire) ne produit
+    aucune erreur : sa seule trace est l'écart entre les mots et les appels.
+    `tool_counts` le rend lisible au grain job — des claims sans writes."""
+    import oto_runner.worker as W2
+    from oto_runner.agent_runtime import AgentResult, AgentStep
+
+    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None):
+        return AgentResult(reply="belle synthèse", stopped="end_turn", steps=[
+            AgentStep(tool="data_claim_next", ok=True, duration_ms=1),
+            AgentStep(tool="serper_search", ok=True, duration_ms=1),
+            AgentStep(tool="serper_search", ok=False, duration_ms=1, error="x"),
+        ])
+
+    monkeypatch.setattr(W2.agent_runtime, "run", faux_run)
+    monkeypatch.setattr(W2, "McpSession", FauxMcp)
+    b = FauxBackend()
+    W2._traiter(b, _job("start"), provider=None)
+    result = next(a for a in b.appels if a[0] == "complete_result")[1]
+    assert result["tool_counts"] == {"data_claim_next": 1, "serper_search": 1}, \
+        "les OK comptés par outil (l'échec ne compte pas comme un geste fait) — " \
+        "un claim sans write se lit ici sans ouvrir le fil"
