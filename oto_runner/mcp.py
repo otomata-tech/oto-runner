@@ -12,9 +12,10 @@ import json
 import os
 from typing import Optional
 
-import requests
+import requests  # noqa: F401 — la forme des kwargs
 
 from .agent_runtime import serialize
+from .deadline import post_with_deadline
 
 _TIMEOUT = (10, 180)
 
@@ -46,7 +47,8 @@ class McpSession:
                    "Accept": "application/json, text/event-stream"}
         if self.session:
             entetes["Mcp-Session-Id"] = self.session
-        r = requests.post(self.url, json=corps, headers=entetes, timeout=_TIMEOUT)
+        r = post_with_deadline(self.url, json=corps, headers=entetes,
+                               timeout=_TIMEOUT, wall_s=300)
         charge = "".join(l[5:].strip() for l in r.text.splitlines()
                          if l.startswith("data:")) or r.text
         try:

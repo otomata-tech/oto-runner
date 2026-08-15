@@ -9,7 +9,9 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
-import requests
+import requests  # noqa: F401
+
+from .deadline import get_with_deadline, post_with_deadline
 
 _TIMEOUT = (10, 60)
 
@@ -28,8 +30,9 @@ class Backend:
             raise BackendError("OTO_TOKEN absent de l'environnement du worker")
 
     def _post(self, chemin: str, corps: dict) -> dict:
-        r = requests.post(self.base + chemin, json=corps, timeout=_TIMEOUT,
-                          headers={"Authorization": f"Bearer {self.token}"})
+        r = post_with_deadline(self.base + chemin, json=corps, timeout=_TIMEOUT,
+                               headers={"Authorization": f"Bearer {self.token}"},
+                               wall_s=120)
         if r.status_code >= 400:
             try:
                 detail = r.json().get("message") or r.json().get("error") or r.text
@@ -46,8 +49,8 @@ class Backend:
             # Le namespace d'une flotte vit dans l'org de la MISSION, pas dans
             # l'org maison du jeton — la consultation REST se scope par en-tête.
             entetes["X-Oto-Org"] = str(org)
-        r = requests.get(self.base + chemin, params=params, timeout=_TIMEOUT,
-                         headers=entetes)
+        r = get_with_deadline(self.base + chemin, params=params, timeout=_TIMEOUT,
+                              headers=entetes, wall_s=120)
         if r.status_code >= 400:
             raise BackendError(f"{chemin} → {r.status_code} : {r.text[:300]}",
                                status=r.status_code)

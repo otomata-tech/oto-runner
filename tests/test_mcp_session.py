@@ -115,3 +115,18 @@ def test_un_initialize_muet_echoue_net_apres_trois_essais(monkeypatch):
     with pytest.raises(RuntimeError) as e:
         McpSession(url="http://x", token="t")
     assert "session id" in str(e.value) and essais["n"] == 3
+
+
+def test_toute_requete_sortante_a_une_deadline_dure(monkeypatch):
+    """Deux workers pendus UNE HEURE en SSL (le read timeout se réarme, le
+    handshake pend) : chaque client HTTP du runner passe par la deadline
+    SIGALRM — plus aucun requests nu sur le chemin des requêtes."""
+    import time as _t
+
+    import pytest
+
+    from oto_runner import deadline as D
+
+    monkeypatch.setattr(D, "_DEFAULT_WALL_S", 1)
+    with pytest.raises(D.DeadlineExceeded):
+        D._with_deadline(lambda url, **k: _t.sleep(5), "http://lent", wall_s=1)
