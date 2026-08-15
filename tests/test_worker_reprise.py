@@ -169,12 +169,12 @@ def test_la_reprise_tronque_un_tour_multi_appels_incomplet(monkeypatch):
 
 
 def test_un_tour_multi_appels_complet_passe_integral():
-    from oto_runner.worker import _tronquer_pour_transport
+    from oto_runner.worker import _assainir_pour_transport
     fil = [{"role": "user", "content": "go"},
            {"role": "assistant", "tool_calls": [{"id": "a"}, {"id": "b"}]},
            {"role": "tool", "tool_call_id": "a", "content": "ok"},
            {"role": "tool", "tool_call_id": "b", "content": "ok"}]
-    assert _tronquer_pour_transport(fil) == fil
+    assert _assainir_pour_transport(fil) == fil
 
 
 def test_un_echec_dextend_ne_tue_pas_le_run(monkeypatch):
@@ -230,3 +230,41 @@ def test_lappose_du_fil_est_rejouee_avant_de_tuer(monkeypatch):
     W._traiter(b, _job("start"), provider=None)
     assert b.rates == 2 and ("append", "assistant") in b.appels, \
         "2 échecs absorbés, le 3e essai a écrit"
+
+
+def test_un_resultat_doutil_orphelin_est_ecarte():
+    """400 « Unexpected tool call id in tool results » (vécu, job 28) : un 502
+    rendu APRÈS que l'écriture a réussi côté serveur fait doubler ou orpheliner
+    un résultat au rejeu. Le transport n'embarque que les résultats qui
+    répondent à un appel du tour assistant ouvert — premier gagne."""
+    from oto_runner.worker import _assainir_pour_transport
+    fil = [{"role": "user", "content": "go"},
+           {"role": "assistant", "tool_calls": [{"id": "a"}]},
+           {"role": "tool", "tool_call_id": "a", "content": "ok"},
+           {"role": "tool", "tool_call_id": "a", "content": "ok (doublon)"},
+           {"role": "tool", "tool_call_id": "X75Hps2uA", "content": "orphelin"},
+           {"role": "assistant", "content": "suite"},
+           {"role": "user", "content": "continue"}]
+    assert _assainir_pour_transport(fil) == [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "tool_calls": [{"id": "a"}]},
+        {"role": "tool", "tool_call_id": "a", "content": "ok"},
+        {"role": "assistant", "content": "suite"},
+        {"role": "user", "content": "continue"}]
+
+
+def test_un_segment_incomplet_en_milieu_de_fil_saute_entier():
+    """Le fil PERSISTÉ garde le tour qu'une reprise antérieure avait écarté de
+    son transport — et la suite s'appose APRÈS lui. La vue cohérente est celle
+    que le modèle repris a réellement eue : sans ce segment."""
+    from oto_runner.worker import _assainir_pour_transport
+    fil = [{"role": "user", "content": "go"},
+           {"role": "assistant", "tool_calls": [{"id": "a"}, {"id": "b"}]},
+           {"role": "tool", "tool_call_id": "a", "content": "ok"},
+           # (b jamais apposé — mort ici ; la reprise est repartie d'avant)
+           {"role": "assistant", "tool_calls": [{"id": "c"}]},
+           {"role": "tool", "tool_call_id": "c", "content": "ok"}]
+    assert _assainir_pour_transport(fil) == [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "tool_calls": [{"id": "c"}]},
+        {"role": "tool", "tool_call_id": "c", "content": "ok"}]
