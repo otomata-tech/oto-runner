@@ -86,9 +86,18 @@ class McpSession:
         self._n += 1
         d = self._post({"jsonrpc": "2.0", "id": self._n,
                         "method": "tools/list", "params": {}})
+        outils = (d.get("result") or {}).get("tools")
+        if not outils:
+            # Un tools/list qui échoue (502 en vol) laissait un cache VIDE :
+            # le fail-safe ne posait plus AUCUN jeton, et le job mourait plus
+            # loin sur une erreur MÉTIER trompeuse (« Aucune doctrine (scope
+            # org) », vécu — jamais rejouée car non transitoire). Échec NET
+            # ici : le retry de job repart d'une session saine.
+            raise RuntimeError(
+                f"tools/list vide ou en erreur ({str(d)[:120]}) — session dégradée")
         out = []
         self._props = {}
-        for t in ((d.get("result") or {}).get("tools") or []):
+        for t in outils:
             props = ((t.get("inputSchema") or {}).get("properties") or {})
             self._props[t.get("name") or ""] = frozenset(props)
             if t.get("name") in names:

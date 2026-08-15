@@ -150,3 +150,83 @@ def test_la_reprise_tronque_un_fil_finissant_par_assistant(monkeypatch):
     assert vu["history"][-1]["role"] == "tool", \
         "le dernier message transporté est user/tool, jamais assistant"
     assert len(vu["history"]) == 3
+
+
+def test_la_reprise_tronque_un_tour_multi_appels_incomplet(monkeypatch):
+    """400 Mistral « Not the same number of function calls and responses »
+    (vécu, job 27) : mort entre deux apposes de résultats d'un tour à N appels.
+    Sans troncature le refus est PERSISTANT — chaque re-claim re-frappe le 400
+    jusqu'à l'échec définitif. On tronque depuis le tour assistant incomplet."""
+    vu = _run_stub(monkeypatch, None)
+    fil = [{"provider_raw": {"role": "user", "content": "go"}},
+           {"provider_raw": {"role": "assistant", "content": None,
+                             "tool_calls": [{"id": "a"}, {"id": "b"}]}},
+           {"provider_raw": {"role": "tool", "tool_call_id": "a", "content": "ok"}}]
+    b = FauxBackend(fil=fil)
+    W._traiter(b, _job("start", run_id="r-x"), provider=None)
+    assert vu["history"] == [{"role": "user", "content": "go"}], \
+        "le tour à 2 appels / 1 réponse saute ENTIER — le modèle le rejoue"
+
+
+def test_un_tour_multi_appels_complet_passe_integral():
+    from oto_runner.worker import _tronquer_pour_transport
+    fil = [{"role": "user", "content": "go"},
+           {"role": "assistant", "tool_calls": [{"id": "a"}, {"id": "b"}]},
+           {"role": "tool", "tool_call_id": "a", "content": "ok"},
+           {"role": "tool", "tool_call_id": "b", "content": "ok"}]
+    assert _tronquer_pour_transport(fil) == fil
+
+
+def test_un_echec_dextend_ne_tue_pas_le_run(monkeypatch):
+    """Un 502 isolé sur le HEARTBEAT de bail tuait le run entier (vécu ×2,
+    jets déjà payés) : le bail a 10 min de marge, le prochain tour le
+    prolonge — on logge et on continue."""
+    from oto_runner.backend import BackendError
+
+    monkeypatch.setattr(W, "McpSession", FauxMcp)
+
+    class BackendExtendMort(FauxBackend):
+        def extend(self, job_id, lease_seconds=600):
+            raise BackendError("/api → 502 : bad gateway", status=502)
+
+    apposes = []
+
+    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None):
+        on_turn("assistant", {"content": "un tour"}, {"role": "assistant"})
+        from oto_runner.agent_runtime import AgentResult
+        return AgentResult(reply="fini", stopped="end_turn")
+
+    monkeypatch.setattr(W.agent_runtime, "run", faux_run)
+    b = BackendExtendMort()
+    b.appels = apposes
+    W._traiter(b, _job("start"), provider=None)   # ne lève PAS
+    assert ("append", "assistant") in apposes and ("complete", True, "r-NEUF") in apposes
+
+
+def test_lappose_du_fil_est_rejouee_avant_de_tuer(monkeypatch):
+    """L'appose EST la persistance : 2 rejeux espacés avant d'abandonner
+    (un 502 de « balle perdue » du pool Caddy ne vaut pas un run mort)."""
+    from oto_runner.backend import BackendError
+
+    monkeypatch.setattr(W, "McpSession", FauxMcp)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    class BackendAppendFragile(FauxBackend):
+        rates = 0
+
+        def thread_append(self, run_id, role, content, provider_raw=None):
+            if self.rates < 2:
+                self.rates += 1
+                raise BackendError("/api → 502 : bad gateway", status=502)
+            return super().thread_append(run_id, role, content, provider_raw)
+
+    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None):
+        on_turn("assistant", {"content": "t"}, {"role": "assistant"})
+        from oto_runner.agent_runtime import AgentResult
+        return AgentResult(reply="fini", stopped="end_turn")
+
+    monkeypatch.setattr(W.agent_runtime, "run", faux_run)
+    b = BackendAppendFragile()
+    W._traiter(b, _job("start"), provider=None)
+    assert b.rates == 2 and ("append", "assistant") in b.appels, \
+        "2 échecs absorbés, le 3e essai a écrit"

@@ -130,3 +130,21 @@ def test_toute_requete_sortante_a_une_deadline_dure(monkeypatch):
     monkeypatch.setattr(D, "_DEFAULT_WALL_S", 1)
     with pytest.raises(D.DeadlineExceeded):
         D._with_deadline(lambda url, **k: _t.sleep(5), "http://lent", wall_s=1)
+
+
+def test_un_tools_list_vide_echoue_net(monkeypatch):
+    """Un tools/list en erreur (502 en vol) laissait un cache VIDE — le
+    fail-safe ne posait plus aucun jeton et le job mourait sur une erreur
+    MÉTIER trompeuse jamais rejouée (« Aucune doctrine (scope org) », vécu
+    job 27). Session dégradée = échec NET, le retry de job fait le reste."""
+    import pytest
+
+    def _post(self, corps, avec_entetes=False):
+        if corps.get("method") == "initialize":
+            return ({"mcp-session-id": "s1"}, {}) if avec_entetes else {}
+        return {"_brut": "502 Bad Gateway"}
+
+    monkeypatch.setattr(McpSession, "_post", _post)
+    s = McpSession(url="http://x", token="t")
+    with pytest.raises(RuntimeError, match="session dégradée"):
+        s.schemas(frozenset())
