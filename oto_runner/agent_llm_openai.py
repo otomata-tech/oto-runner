@@ -166,7 +166,13 @@ def complete(*, system: str, messages: list, tools: list[dict],
             args = {}
         calls.append(ToolCall(id=tc.get("id") or "", name=f.get("name") or "",
                               arguments=args if isinstance(args, dict) else {}))
-    return Turn(text=(msg.get("content") or "").strip(),
+    contenu = msg.get("content") or ""
+    if isinstance(contenu, list):
+        # Mistral rend parfois le contenu en LISTE de blocs typés au lieu
+        # d'une chaîne (vécu, job 52 — AttributeError au .strip()).
+        contenu = "\n".join(b.get("text", "") for b in contenu
+                            if isinstance(b, dict) and b.get("type") == "text")
+    return Turn(text=contenu.strip(),
                 tool_calls=tuple(calls),
                 stop_reason="end_turn" if fin in ("stop", "tool_calls") else fin,
                 raw_content=msg, usage=usage)

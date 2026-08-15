@@ -118,3 +118,26 @@ def test_le_plafond_wall_clock_coupe_un_serveur_qui_goutte(monkeypatch):
     with pytest.raises(LlmUnavailable) as e:
         P.complete(system="s", messages=[], tools=[], api_key="k")
     assert "wall-clock" in str(e.value)
+
+
+def test_un_contenu_en_liste_de_blocs_est_normalise(monkeypatch):
+    """Mistral rend parfois `content` en LISTE de blocs typés au lieu d'une
+    chaîne (vécu, job 52 : AttributeError au .strip() — déterministe au rejeu
+    tant que la réponse garde cette forme)."""
+    import oto_runner.agent_llm_openai as A
+
+    class _R:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": [
+                        {"type": "text", "text": "première partie"},
+                        {"type": "text", "text": "seconde"}]},
+                     "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 2}}
+
+    monkeypatch.setattr(A, "_post_borne", lambda url, corps, entetes: _R)
+    t = A.complete(system="s", messages=[A.user_message("go")], tools=[],
+                   api_key="k")
+    assert t.text == "première partie\nseconde"
