@@ -26,7 +26,8 @@ from .backend import Backend, BackendError
 logger = logging.getLogger("oto_runner.fleet")
 
 _POLL_S = 20
-_MAX_FAILED_CONSECUTIFS = 3   # au-delà, enfiler encore = payer pour re-crasher
+_MAX_FAILED_CONSECUTIFS = 3
+_MAX_ERREURS_BACKEND = 10   # ~3-4 min de panne DENSE (reset au 1er succès)
 # ⚠️ Le message de lancement NOMME la file : un agent à qui on dit « la file de
 # travail » sans la nommer DEVINE des noms de tableaux (vécu : entreprises,
 # projet_220, data… tous inconnus, puis des SIREN hallucinés et une conclusion
@@ -125,6 +126,12 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
     en_vol: set[int] = set()
     dernier_depart: Optional[float] = None
     failed_consecutifs = 0
+    # Les erreurs BACKEND consécutives du driver lui-même (count/enqueue) : un
+    # 502 isolé sur l'enfilement a TUÉ un vol entier (lot C, 16/08 — la rafale
+    # #352 ; 30 min de flotte figée avant détection humaine). Le driver tolère
+    # et retente ; seule une panne DENSE et continue l'arrête, PROPREMENT, avec
+    # un bilan — jamais un traceback. Les workers en vol, eux, continuent.
+    erreurs_backend = 0
     logger.info("flotte %s : %d ligne(s) à traiter, concurrence %d, rampe %ds",
                 spec.namespace, bilan.lignes_initiales, spec.concurrency,
                 spec.ramp_seconds)
@@ -150,8 +157,22 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                 failed_consecutifs += 1
                 logger.warning("job %s FAILED : %s", jid, job.get("last_error"))
 
-        restantes = backend.count_rows(spec.namespace, filter=spec.filter,
-                                       org=spec.org)
+        try:
+            restantes = backend.count_rows(spec.namespace, filter=spec.filter,
+                                           org=spec.org)
+        except BackendError as e:
+            erreurs_backend += 1
+            if erreurs_backend >= _MAX_ERREURS_BACKEND:
+                bilan.arret = (f"backend indisponible ({erreurs_backend} erreurs "
+                               "consécutives du driver)")
+                logger.warning("flotte arrêtée : %s — %d done, %d failed",
+                               bilan.arret, bilan.done, bilan.failed)
+                return bilan
+            logger.warning("count_rows toléré (%d/%d) : %s",
+                           erreurs_backend, _MAX_ERREURS_BACKEND, e)
+            sleep(poll_s)
+            continue
+        erreurs_backend = 0
         bilan.lignes_restantes = restantes
         traitees = max(0, bilan.lignes_initiales - restantes)
 
@@ -182,7 +203,21 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
         if (len(en_vol) < spec.concurrency
                 and (dernier_depart is None
                      or clock() - dernier_depart >= spec.ramp_seconds)):
-            jid = backend.enqueue("start", _payload(spec))
+            try:
+                jid = backend.enqueue("start", _payload(spec))
+            except BackendError as e:
+                erreurs_backend += 1
+                if erreurs_backend >= _MAX_ERREURS_BACKEND:
+                    bilan.arret = (f"backend indisponible ({erreurs_backend} "
+                                   "erreurs consécutives du driver)")
+                    logger.warning("flotte arrêtée : %s — %d done, %d failed",
+                                   bilan.arret, bilan.done, bilan.failed)
+                    return bilan
+                logger.warning("enqueue toléré (%d/%d) : %s",
+                               erreurs_backend, _MAX_ERREURS_BACKEND, e)
+                sleep(poll_s)
+                continue
+            erreurs_backend = 0
             en_vol.add(jid)
             dernier_depart = clock()
             logger.info("job %s enfilé (%d/%d en vol)", jid, len(en_vol),

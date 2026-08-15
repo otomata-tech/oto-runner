@@ -205,3 +205,40 @@ def test_le_filtre_de_flotte_accepte_les_lots_nommes():
     clauses = _json.loads(captures["params"]["filters"])
     assert {"field": "siren", "op": "in", "value": ["1", "2", "3"]} in clauses
     assert {"field": "statut", "op": "eq", "value": "a_enrichir"} in clauses
+
+
+def test_un_502_isole_du_driver_ne_tue_pas_la_flotte():
+    """Un 502 sur l'ENFILEMENT a tué un vol entier (lot C, 16/08 — rafale
+    #352, 30 min de flotte figée). Le driver tolère et retente au tour
+    suivant ; le vol continue."""
+    from oto_runner.backend import BackendError
+
+    class BackendUn502(FauxBackend):
+        rates = 0
+
+        def enqueue(self, kind, payload, run_id=None):
+            if self.rates < 2:
+                self.rates += 1
+                raise BackendError("/api → 502 : bad gateway", status=502)
+            return super().enqueue(kind, payload, run_id)
+
+    b = BackendUn502(counts=[2, 2, 2, 2, 0, 0])
+    bilan = _run(_spec(ramp_seconds=0), b)
+    assert bilan.arret == "file vide", "le vol a survécu aux 502 isolés"
+    assert b.rates == 2 and bilan.done >= 1
+
+
+def test_une_panne_dense_arrete_le_driver_proprement():
+    """Backend durablement mort : arrêt PROPRE avec bilan — jamais un
+    traceback qui laisse une flotte figée sans un mot."""
+    from oto_runner.backend import BackendError
+
+    class BackendMort(FauxBackend):
+        def count_rows(self, namespace, filter=None, org=None):
+            if self.counts:      # le count initial passe (le vol démarre)
+                return self.counts.pop(0)
+            raise BackendError("/api → 502", status=502)
+
+    b = BackendMort(counts=[100])
+    bilan = _run(_spec(ramp_seconds=0), b)
+    assert "backend indisponible" in bilan.arret
