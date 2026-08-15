@@ -113,7 +113,12 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         procedure = mcp.outil("oto_procedure", {"op": "get", "slug": p["procedure"]})
         d = mcp.outil("run_start", {"label": p.get("label") or f"run hébergé — {p['procedure']}",
                                     "doctrine": p["procedure"]})
-        run_id = d["run_id"]
+        run_id = d.get("run_id")
+        if not run_id:
+            # Un blip transport peut rendre un succès au contenu dégradé (le
+            # parse rend {"_texte": …} sans lever) — le KeyError brut qui
+            # suivait maquillait un transitoire en mystère (vécu, job 49).
+            raise RuntimeError(f"run_start sans run_id : réponse dégradée {str(d)[:200]}")
         backend.bind_run(job["id"], run_id)
         historique: list = []
         prompt = p.get("input") or "Exécute la procédure."

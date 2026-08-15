@@ -268,3 +268,20 @@ def test_un_segment_incomplet_en_milieu_de_fil_saute_entier():
         {"role": "user", "content": "go"},
         {"role": "assistant", "tool_calls": [{"id": "c"}]},
         {"role": "tool", "tool_call_id": "c", "content": "ok"}]
+
+
+def test_un_run_start_degrade_echoue_avec_une_erreur_parlante(monkeypatch):
+    """Un blip transport rend un run_start au contenu dégradé ({"_texte": …}
+    sans isError) : le KeyError brut qui suivait maquillait un transitoire en
+    mystère (vécu, job 49). Erreur NETTE, le retry de job fait le reste."""
+    import pytest
+
+    class McpDegrade(FauxMcp):
+        def outil(self, name, args=None):
+            if name == "run_start":
+                return {"_texte": ""}
+            return super().outil(name, args)
+
+    monkeypatch.setattr(W, "McpSession", McpDegrade)
+    with pytest.raises(RuntimeError, match="run_start sans run_id"):
+        W._traiter(FauxBackend(), _job("start"), provider=None)
