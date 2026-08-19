@@ -104,8 +104,12 @@ def run_once(*, instructions: str, inputs: str, tools,
     url = f"{base}/v1/conversations"
     derniere = None
     for essai in range(3):
+        # read 660 s : une conversation exécute ses outils côté Mistral SANS
+        # streamer — un silence de >5 min y est normal, pas une panne (vécu :
+        # un run légitime coupé à read=300 dès la 3e fiche de campagne). La
+        # deadline MURALE (900 s) reste le seul vrai couperet.
         r = post_with_deadline(url, json=corps, headers=entetes,
-                               timeout=(10, 300), wall_s=_WALL_S)
+                               timeout=(10, 660), wall_s=_WALL_S)
         if r.status_code in _TRANSITOIRE:
             derniere = f"{r.status_code} : {r.text[:200]}"
             logger.warning("conversations %s (essai %s/3)", derniere, essai + 1)
