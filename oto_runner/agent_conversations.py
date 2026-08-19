@@ -113,11 +113,23 @@ def run_once(*, instructions: str, inputs: str, tools,
             continue
         if r.status_code >= 400:
             raise RuntimeError(f"conversations → {r.status_code} : {r.text[:300]}")
-        return _parse(r.json())
+        return _parse(r.json(), tools)
     raise RuntimeError(f"conversations → transitoire persistant ({derniere})")
 
 
-def _parse(d: dict) -> AgentResult:
+def _nom_outil(name: str, tools) -> str:
+    """Le connecteur Mistral PRÉFIXE les noms d'outils de son propre nom
+    (`oto-11aout_data_write`) : sans normalisation, les `tool_counts` du bilan
+    ne matchent plus les noms de la plateforme — 13 jobs à « zéro data_write »
+    alors que les fiches étaient écrites (vécu à l'essai des 20). On normalise
+    par l'ALLOWLIST du job : exacte, courte, jamais une devinette de préfixe."""
+    for t in tools or ():
+        if name == t or name.endswith("_" + t):
+            return t
+    return name
+
+
+def _parse(d: dict, tools=()) -> AgentResult:
     """Les `outputs` d'une conversation → le contrat AgentResult du worker.
 
     Défensif sur la forme (chunks texte ou chaîne nue) — le banc fige ce qui est
@@ -127,7 +139,8 @@ def _parse(d: dict) -> AgentResult:
     for e in d.get("outputs") or []:
         typ = (e or {}).get("type") or ""
         if typ == "tool.execution":
-            steps.append(AgentStep(tool=e.get("name") or "?", ok=True, duration_ms=0))
+            steps.append(AgentStep(tool=_nom_outil(e.get("name") or "?", tools),
+                                   ok=True, duration_ms=0))
         elif typ.startswith("message"):
             contenu = e.get("content")
             if isinstance(contenu, list):
@@ -139,7 +152,8 @@ def _parse(d: dict) -> AgentResult:
             # Un connecteur bien configuré exécute côté serveur ; un function.call
             # NU qui remonte signifierait « à toi de jouer » — ce chemin ne joue
             # pas : il le COMPTE comme un pas non exécuté, visible au bilan.
-            steps.append(AgentStep(tool=e.get("name") or "?", ok=False,
+            steps.append(AgentStep(tool=_nom_outil(e.get("name") or "?", tools),
+                                   ok=False,
                                    duration_ms=0, error="function.call non exécuté"))
     u = d.get("usage") or {}
     usage = {"input_tokens": int(u.get("prompt_tokens") or 0),

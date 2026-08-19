@@ -161,3 +161,19 @@ def test_une_base_openai_avec_v1_ne_double_pas_le_chemin(monkeypatch):
                         lambda url, **kw: vu.update(url=url) or _R(corps=_REPONSE))
     C.run_once(instructions="p", inputs="i", tools=())
     assert vu["url"] == "https://api.mistral.ai/v1/conversations"
+
+
+def test_les_noms_prefixes_par_le_connecteur_sont_normalises(monkeypatch):
+    """Le connecteur Mistral préfixe les outils de son nom (oto-11aout_data_write) :
+    sans normalisation, le bilan disait « zéro data_write » sur des fiches
+    écrites (vécu). L'allowlist du job normalise — exacte, jamais une devinette."""
+    _env(monkeypatch)
+    rep = {"outputs": [
+        {"type": "tool.execution", "name": "oto-11aout_data_claim_next"},
+        {"type": "tool.execution", "name": "oto-11aout_data_write"},
+        {"type": "message.output", "content": "ok"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    monkeypatch.setattr(C, "post_with_deadline", lambda url, **kw: _R(corps=rep))
+    res = C.run_once(instructions="p", inputs="i",
+                     tools=("data_claim_next", "data_write"))
+    assert [s.tool for s in res.steps] == ["data_claim_next", "data_write"]
