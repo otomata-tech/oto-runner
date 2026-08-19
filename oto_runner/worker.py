@@ -160,8 +160,26 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             # re-claim par un pair reprend le fil — c'est le design.
             logger.warning("extend %s toléré : %s", job["id"], e)
 
-    res = agent_runtime.run(spec, mcp, provider, prompt=prompt,
-                            history=historique, on_turn=apposer)
+    if getattr(provider, "ONE_SHOT", False):
+        # Chemin CONVERSATIONS (décision Alexis 19/08) : la boucle d'outils tourne
+        # chez Mistral, le worker reçoit le résultat — pas de tours à apposer ni de
+        # heartbeat intermédiaire (d'où le bail élargi au claim, cf. main). La
+        # reprise d'un start re-claimé REJOUE l'ordre du payload : chaque
+        # conversation est neuve, les baux de lignes rendent le rejeu inoffensif.
+        ordre = prompt or p.get("input") or "Exécute la procédure."
+        res = provider.run_once(instructions=spec.system, inputs=ordre,
+                                tools=p.get("tools") or ())
+        # Le fil garde l'ORDRE et la SYNTHÈSE (l'observabilité au grain run) — le
+        # verbatim des tours vit et meurt chez Mistral (store=False, conformité).
+        releve = ", ".join(f"{s.tool}{'' if s.ok else ' (non exécuté)'}"
+                           for s in res.steps) or "aucun appel d'outil"
+        apposer("user", {"content": ordre}, {"role": "user", "content": ordre})
+        apposer("assistant",
+                {"content": res.reply, "tool_relevé": releve},
+                {"role": "assistant", "content": res.reply})
+    else:
+        res = agent_runtime.run(spec, mcp, provider, prompt=prompt,
+                                history=historique, on_turn=apposer)
 
     outcome = "done" if res.stopped in ("end_turn",) else "blocked"
     jetons = res.usage.get("input_tokens", 0) + res.usage.get("output_tokens", 0)
@@ -198,11 +216,15 @@ def main() -> None:
     backend = Backend()
     provider = get_provider()
     provider.resolve_key()    # échoue FORT au boot si la clé manque, pas au 1er job
+    # En one-shot, AUCUN heartbeat pendant la conversation (elle tourne chez
+    # Mistral, deadline murale 900 s) : le bail doit la couvrir ENTIÈRE, sinon un
+    # pair re-claime un job dont l'exécution court encore.
+    lease_s = 1800 if getattr(provider, "ONE_SHOT", False) else _LEASE_S
     logger.info("worker armé — file de %s · provider %s · modèle %s",
                 backend.base, provider.__name__.rsplit('_', 1)[-1], provider.model())
     while True:
         try:
-            job = backend.claim(lease_seconds=_LEASE_S)
+            job = backend.claim(lease_seconds=lease_s)
         except BackendError as e:
             logger.warning("claim : %s", e)
             time.sleep(_POLL_S)

@@ -19,4 +19,8 @@ def get_provider():
     if nom == "openai":
         from . import agent_llm_openai
         return agent_llm_openai
-    raise SystemExit(f"OTO_RUNNER_PROVIDER inconnu : `{nom}` (anthropic | openai)")
+    if nom == "conversations":
+        from . import agent_conversations
+        return agent_conversations
+    raise SystemExit(
+        f"OTO_RUNNER_PROVIDER inconnu : `{nom}` (anthropic | openai | conversations)")
