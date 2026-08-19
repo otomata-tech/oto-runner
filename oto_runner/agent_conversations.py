@@ -96,6 +96,11 @@ def run_once(*, instructions: str, inputs: str, tools,
     entetes = {"Authorization": f"Bearer {api_key or resolve_key()}",
                "Content-Type": "application/json"}
     base = (os.environ.get(_ENV_BASE) or _DEFAULT_BASE).rstrip("/")
+    if base.endswith("/v1"):
+        # La base openai-compat porte déjà /v1 (l'env existante de la box) : la
+        # réutiliser telle quelle donnait /v1/v1/conversations → 404 « no Route
+        # matched » (vécu au premier appel réel de l'essai).
+        base = base[:-3]
     url = f"{base}/v1/conversations"
     derniere = None
     for essai in range(3):

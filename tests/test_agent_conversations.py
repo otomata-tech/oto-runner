@@ -149,3 +149,15 @@ def test_le_worker_one_shot_appose_ordre_et_synthese(monkeypatch):
     result = next(a for a in b.appels if a[0] == "complete_result")[1]
     assert result["tool_counts"] == {"data_write": 1}
     assert result["usage_tokens"] == 20500
+
+
+def test_une_base_openai_avec_v1_ne_double_pas_le_chemin(monkeypatch):
+    """L'env de la box porte la base openai-compat AVEC /v1 : la réutiliser
+    donnait /v1/v1/conversations → 404 « no Route matched » (vécu, job 274)."""
+    _env(monkeypatch)
+    monkeypatch.setenv("OTO_RUNNER_OPENAI_BASE", "https://api.mistral.ai/v1")
+    vu = {}
+    monkeypatch.setattr(C, "post_with_deadline",
+                        lambda url, **kw: vu.update(url=url) or _R(corps=_REPONSE))
+    C.run_once(instructions="p", inputs="i", tools=())
+    assert vu["url"] == "https://api.mistral.ai/v1/conversations"
