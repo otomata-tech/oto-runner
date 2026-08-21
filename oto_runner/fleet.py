@@ -226,6 +226,16 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
         sleep(poll_s)
 
 
+# Les motifs d'arrêt NORMAUX — la campagne a fini son travail ou sa borne
+# planifiée. Tout AUTRE motif (échecs consécutifs, backend indisponible) est une
+# PANNE : le process sort en échec pour que systemd (Restart=on-failure +
+# RestartSec long) relance la campagne tout seul quand la panne passe — vécu le
+# 20/08 : un 402 Mistral (crédit épuisé) a arrêté proprement la flotte à 604
+# fiches, et 26 h ont passé avant qu'un humain ne la relance. Le coût d'une
+# relance sous panne persistante est quasi nul (les jobs 402 ne consomment pas).
+_ARRETS_NORMAUX = ("file vide", "volume atteint", "budget atteint")
+
+
 def main() -> None:
     import sys
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -234,6 +244,8 @@ def main() -> None:
     spec = load_spec(sys.argv[1])
     bilan = run_fleet(spec, Backend())
     logger.info("bilan : %s", bilan)
+    if not any(bilan.arret.startswith(m) for m in _ARRETS_NORMAUX):
+        sys.exit(1)   # panne → systemd relance (jamais sur une fin normale)
 
 
 if __name__ == "__main__":

@@ -242,3 +242,29 @@ def test_une_panne_dense_arrete_le_driver_proprement():
     b = BackendMort(counts=[100])
     bilan = _run(_spec(ramp_seconds=0), b)
     assert "backend indisponible" in bilan.arret
+
+
+def test_un_arret_anormal_sort_en_echec_pour_que_systemd_relance(monkeypatch):
+    """Un 402 provider (crédit épuisé) a arrêté la flotte à 604/7921 fiches et
+    26 h ont passé avant relance humaine : un arrêt ANORMAL sort en exit 1 —
+    systemd (Restart=on-failure, RestartSec long) relance quand la panne passe.
+    Une fin NORMALE (file vide, volume, budget) sort en 0 : pas de relance."""
+    import sys
+
+    import pytest as _pt
+
+    from oto_runner import fleet as F
+
+    def _main_avec(arret):
+        monkeypatch.setattr(sys, "argv", ["fleet", "x.yaml"])
+        monkeypatch.setattr(F, "load_spec", lambda p: _spec())
+        monkeypatch.setattr(F, "Backend", lambda: None)
+        monkeypatch.setattr(F, "run_fleet",
+                            lambda spec, b: F.FleetBilan(arret=arret))
+        return F.main
+
+    with _pt.raises(SystemExit) as e:
+        _main_avec("4 échecs consécutifs — enfiler encore, c'est payer")()
+    assert e.value.code == 1
+    _main_avec("file vide")()          # ne lève pas : fin normale
+    _main_avec("budget atteint (…)")()
