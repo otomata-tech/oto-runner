@@ -217,9 +217,13 @@ def main() -> None:
     provider = get_provider()
     provider.resolve_key()    # échoue FORT au boot si la clé manque, pas au 1er job
     # En one-shot, AUCUN heartbeat pendant la conversation (elle tourne chez
-    # Mistral, deadline murale 900 s) : le bail doit la couvrir ENTIÈRE, sinon un
-    # pair re-claime un job dont l'exécution court encore.
-    lease_s = 1800 if getattr(provider, "ONE_SHOT", False) else _LEASE_S
+    # Mistral, deadline murale 900 s) : le bail doit la couvrir ENTIÈRE (960 >
+    # 900), sinon un pair re-claime un job dont l'exécution court encore — mais
+    # PAS PLUS : ~30 % des conversations concluent sans écrire (faux départ du
+    # modèle, mesuré en campagne), et chaque ligne ainsi réservée reste bloquée
+    # tout le bail avant de revenir au pot. 1800 s doublait cette latence pour
+    # rien.
+    lease_s = 960 if getattr(provider, "ONE_SHOT", False) else _LEASE_S
     logger.info("worker armé — file de %s · provider %s · modèle %s",
                 backend.base, provider.__name__.rsplit('_', 1)[-1], provider.model())
     while True:
