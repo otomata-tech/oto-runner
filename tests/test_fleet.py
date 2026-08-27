@@ -75,7 +75,8 @@ class Horloge:
 
 
 def _spec(**kw):
-    base = dict(procedure="p", namespace="ns", tools=("data_claim_next",),
+    base = dict(procedure="p", namespace="ns", name="flotte-demo",
+                tools=("data_claim_next",),
                 filter={"statut": "a_traiter"}, concurrency=3, ramp_seconds=60)
     base.update(kw)
     return FleetSpec(**base)
@@ -187,8 +188,7 @@ def test_le_payload_porte_le_contrat_du_run():
     p = _payload(_spec(project=220, max_steps=48))
     assert p["procedure"] == "p" and p["project_id"] == 220
     assert p["max_steps"] == 48 and "data_claim_next" in p["tools"]
-    assert p["fleet"] == "ns", \
-        "hors déclaration, le nom de la flotte retombe sur le namespace"
+    assert p["fleet"] == "flotte-demo", "chaque job porte le nom de sa flotte"
 
 
 def test_lorg_de_la_declaration_scope_le_comptage():
@@ -441,6 +441,14 @@ def test_la_declaration_porte_le_rendement_et_nomme_la_flotte(tmp_path):
     assert spec.jetons_par_ecriture_max == 40_000 and spec.rendement_fenetre == 25
     assert spec.name == "campagne-demo"
     assert _payload(spec)["fleet"] == "campagne-demo"
+
+
+def test_une_flotte_sans_nom_leve():
+    """Le tag `fleet` ne se devine pas : ni repli sur le namespace (deux
+    flottes peuvent drainer la même file), ni tag vide qui rendrait les jobs
+    d'une campagne introuvables. Une spec sans nom ne se construit pas."""
+    with pytest.raises(ValueError, match="nom de flotte vide"):
+        _spec(name="")
 
 
 def test_le_rendement_est_absent_par_defaut(tmp_path):

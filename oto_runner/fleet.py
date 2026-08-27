@@ -63,6 +63,12 @@ class FleetSpec:
     procedure: str
     namespace: str
     tools: tuple
+    # Le nom de la flotte : le TAG apposé à chaque job (`fleet`), par lequel on
+    # retrouve les jobs d'une campagne — plus par « id ≥ N ». `load_spec` le
+    # tire du nom du fichier de déclaration ; une spec construite en code le
+    # DÉCLARE. Aucun repli sur le namespace : deux flottes peuvent drainer la
+    # même file, et un tag deviné est un tag faux — pire qu'un tag absent.
+    name: str
     filter: dict = field(default_factory=dict)   # ce qui est encore à traiter
     project: Optional[int] = None
     org: Optional[int] = None       # l'org de la MISSION (le namespace y vit)
@@ -79,14 +85,14 @@ class FleetSpec:
     # une fenêtre glissante de jobs conclus. Absent ⟹ borne inactive.
     jetons_par_ecriture_max: Optional[int] = None
     rendement_fenetre: int = 10
-    # Le nom de la flotte : le TAG apposé à chaque job (`fleet`), par lequel on
-    # retrouve les jobs d'une campagne — plus par « id ≥ N ». Il vient du nom du
-    # fichier de déclaration sans son extension ; à défaut, du namespace.
-    name: str = ""
 
     def __post_init__(self):
         if not self.name:
-            object.__setattr__(self, "name", self.namespace)
+            raise ValueError(
+                "nom de flotte vide : c'est le tag `fleet` de chaque job, ce "
+                "par quoi on retrouve une campagne. Il vient du nom du fichier "
+                "de déclaration (`campagne.yaml` ⟹ `campagne`) ou se déclare "
+                "explicitement — il ne se devine pas.")
 
 
 def load_spec(path: str) -> FleetSpec:
