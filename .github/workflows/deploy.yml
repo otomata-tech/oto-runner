@@ -1,0 +1,102 @@
+# Déploiement d'oto-runner sur oto-platform, après un `test` vert sur main (issue #1).
+#
+# ⚠️ La commande envoyée par ssh est IGNORÉE : le serveur exécute
+# /opt/deploy/oto-runner.sh (forced-command sur la clé `oto-runner-ci` du user
+# `deploy`). Modifier ce YAML ne change jamais ce qui est déployé — c'est le
+# script serveur qu'il faut éditer (documenté dans otomata-tech/infra,
+# docs/oto-platform-state.md). Le script fait une seule chose : fetch +
+# reset --hard origin/main, pip install -e ., restart des 3 workers, puis
+# attend « worker armé » dans le journal de chacun (60 s) — sinon retour au
+# commit précédent et exit 1.
+#
+# Montage : runner GitHub hosted → cloudflared (service token Cloudflare Access)
+# → tunnel ssh-oto-platform.oto.zone (le port 22 de la box est fermé au public)
+# → sshd → forced-command. Secrets : OTO_RUNNER_DEPLOY_KEY, CF_ACCESS_CLIENT_ID,
+# CF_ACCESS_CLIENT_SECRET ; variable : OTO_RUNNER_DEPLOY_KNOWN_HOSTS (host key
+# ed25519 d'oto-platform, épinglée — le tunnel est transparent).
+#
+# Déclencheurs : la fin du workflow `test` (test.yml) sur main — on ne déploie
+# que s'il a RÉUSSI, sur le commit qu'il a testé — et workflow_dispatch (test
+# manuel : déploie origin/main tel quel). JAMAIS pull_request ni
+# pull_request_target : le dépôt est public, aucun code de PR ne doit approcher
+# les secrets de deploy. Gardes : dépôt = otomata-tech/oto-runner (pas de fork),
+# run `test` issu d'un `push` de CE dépôt (pas d'une PR dont la branche
+# s'appellerait `main`), et le commit testé doit encore être la tête de main
+# au moment du deploy (sinon on laisse le run suivant faire, sortie 0).
+name: deploy
+
+on:
+  workflow_run:
+    workflows: [test]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-oto-runner
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: >-
+      github.repository == 'otomata-tech/oto-runner' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.head_repository.full_name == 'otomata-tech/oto-runner'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install cloudflared
+        run: |
+          curl -fsSL -o cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+          cloudflared --version
+
+      - name: Le commit testé est-il encore la tête de main ?
+        env:
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          main_sha=$(git ls-remote https://github.com/otomata-tech/oto-runner.git refs/heads/main | cut -f1)
+          test -n "$main_sha" || { echo "impossible de lire origin/main"; exit 1; }
+          echo "origin/main = $main_sha"
+          if [ -z "$TESTED_SHA" ]; then
+            echo "workflow_dispatch : déploiement de origin/main tel quel"
+            echo "expected=${main_sha:0:7}" >> "$GITHUB_OUTPUT"
+          elif [ "$TESTED_SHA" = "$main_sha" ]; then
+            echo "test vert sur $TESTED_SHA = tête de main → déploiement"
+            echo "expected=${TESTED_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          else
+            echo "test vert sur $TESTED_SHA mais main est déjà à $main_sha → on ne déploie pas, le run du commit suivant s'en charge"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+        id: gate
+
+      - name: Deploy oto-runner on oto-platform
+        if: steps.gate.outputs.skip != '1'
+        env:
+          EXPECTED: ${{ steps.gate.outputs.expected }}
+          DEPLOY_KEY: ${{ secrets.OTO_RUNNER_DEPLOY_KEY }}
+          KNOWN_HOSTS: ${{ vars.OTO_RUNNER_DEPLOY_KNOWN_HOSTS }}
+          TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          test -n "$DEPLOY_KEY" || { echo "secret OTO_RUNNER_DEPLOY_KEY absent"; exit 1; }
+          test -n "$KNOWN_HOSTS" || { echo "variable OTO_RUNNER_DEPLOY_KNOWN_HOSTS absente"; exit 1; }
+          test -n "$TUNNEL_SERVICE_TOKEN_ID" || { echo "secret CF_ACCESS_CLIENT_ID absent"; exit 1; }
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "$KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          echo "$DEPLOY_KEY" > key && chmod 600 key
+          trap 'rm -f key' EXIT
+          # « deploy » ci-dessous est ignoré par le serveur : forced-command → /opt/deploy/oto-runner.sh
+          ssh -i key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=30 \
+              -o StrictHostKeyChecking=yes \
+              -o ProxyCommand='cloudflared access ssh --hostname %h' \
+              deploy@ssh-oto-platform.oto.zone deploy 2>&1 | tee deploy.log
+          test "${PIPESTATUS[0]}" -eq 0
+          # le serveur annonce le commit qu'il a effectivement déployé : il doit être celui attendu
+          grep -q "deploy oto-runner OK ($EXPECTED)" deploy.log || {
+            echo "le serveur n'a pas déployé $EXPECTED (voir la sortie ci-dessus)"; exit 1; }
