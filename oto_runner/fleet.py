@@ -4,7 +4,8 @@ Un client ordinaire de l'API jobs — aucun kind serveur, aucune boucle d'agent
 ici : la boucle vit dans le worker, le claim de ligne vit dans la PROCÉDURE.
 Le driver ne fait que trois choses : enfiler des jobs `start` avec une rampe,
 maintenir la concurrence déclarée, et s'arrêter proprement sur l'une des
-bornes — file vide, volume, budget de jetons, ou trop d'échecs consécutifs.
+bornes — file vide, volume, budget de jetons, rendement effondré, ou trop
+d'échecs consécutifs.
 
 La déclaration est un YAML par flotte (cf. `docs/fleet-example.yaml`) — jamais
 un secret dedans : le jeton et la clé de modèle viennent de l'environnement.
@@ -15,7 +16,9 @@ est logué puis ignoré, pour que la divergence soit VISIBLE, jamais silencieuse
 from __future__ import annotations
 
 import logging
+import os
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -52,7 +55,7 @@ DEFAULT_INPUT = ("Ta file de travail est le tableau `{namespace}` : réserve cha
 # écrite pour un autre harnais reste lisible ici, sans mensonge silencieux).
 _CHAMPS = {"procedure", "namespace", "filter", "project", "org", "tools", "concurrency",
            "ramp_seconds", "volume", "budget_tokens", "max_steps", "input",
-           "critical_tools"}
+           "critical_tools", "jetons_par_ecriture_max", "rendement_fenetre"}
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,18 @@ class FleetSpec:
     # Les outils sans lesquels un job « done » est un job FAUX : leur panne
     # arrête la flotte (arrêt ANORMAL ⟹ relance auto quand ils reviennent).
     critical_tools: tuple = ()
+    # Le RENDEMENT : plafond de jetons dépensés par écriture produite, jugé sur
+    # une fenêtre glissante de jobs conclus. Absent ⟹ borne inactive.
+    jetons_par_ecriture_max: Optional[int] = None
+    rendement_fenetre: int = 10
+    # Le nom de la flotte : le TAG apposé à chaque job (`fleet`), par lequel on
+    # retrouve les jobs d'une campagne — plus par « id ≥ N ». Il vient du nom du
+    # fichier de déclaration sans son extension ; à défaut, du namespace.
+    name: str = ""
+
+    def __post_init__(self):
+        if not self.name:
+            object.__setattr__(self, "name", self.namespace)
 
 
 def load_spec(path: str) -> FleetSpec:
@@ -98,7 +113,10 @@ def load_spec(path: str) -> FleetSpec:
         budget_tokens=raw.get("budget_tokens"),
         max_steps=int(raw.get("max_steps") or 40),
         input=raw.get("input") or DEFAULT_INPUT,
-        critical_tools=tuple(raw.get("critical_tools") or ()))
+        critical_tools=tuple(raw.get("critical_tools") or ()),
+        jetons_par_ecriture_max=raw.get("jetons_par_ecriture_max"),
+        rendement_fenetre=int(raw.get("rendement_fenetre") or 10),
+        name=os.path.splitext(os.path.basename(path))[0])
 
 
 def _payload(spec: FleetSpec) -> dict:
@@ -111,6 +129,7 @@ def _payload(spec: FleetSpec) -> dict:
     return {"procedure": spec.procedure, "tools": list(spec.tools),
             "project_id": spec.project, "org_id": spec.org,
             "namespace": spec.namespace,
+            "fleet": spec.name,
             "max_steps": spec.max_steps,
             "input": message,
             "label": f"flotte {spec.namespace} — {spec.procedure}"}
@@ -157,6 +176,29 @@ def _outil_critique_en_panne(spec, backend, clock) -> "str | None":
 _outil_critique_en_panne.dernier = {}
 
 
+# La borne de RENDEMENT (27/08). « Outil critique » ne couvre qu'un cas : un
+# outil qui répond en erreur. Une campagne peut payer le prix plein sans rien
+# produire pour dix autres raisons — file qui ne rend que des lignes
+# intraitables, procédure qui analyse et conclut en prose, modèle qui tourne en
+# rond — et rien ne le voit : les jobs sont « done ». Le rendement rapporte donc
+# le coût à la SORTIE réelle (les écritures), sur une FENÊTRE : un job cher sans
+# écriture est banal, dix d'affilée sont une panne.
+
+
+def _rendement_effondre(spec: FleetSpec, fenetre) -> "str | None":
+    """Le motif de borne si la fenêtre a coûté plus de
+    `spec.jetons_par_ecriture_max` jetons par écriture, sinon None. La fenêtre
+    ne juge qu'une fois PLEINE : un début de vol n'a pas de verdict."""
+    if spec.jetons_par_ecriture_max is None or len(fenetre) < fenetre.maxlen:
+        return None
+    jetons = sum(j for j, _ in fenetre)
+    writes = sum(w for _, w in fenetre)
+    if jetons <= spec.jetons_par_ecriture_max * max(1, writes):
+        return None
+    return (f"rendement effondré ({jetons} jetons pour {writes} écriture(s) "
+            f"sur {len(fenetre)} jobs)")
+
+
 @dataclass
 class FleetBilan:
     done: int = 0
@@ -181,6 +223,8 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
     dernier_depart: Optional[float] = None
     failed_consecutifs = 0
     faux_departs_consecutifs = 0
+    # (jetons, écritures) des derniers jobs conclus — la matière du rendement.
+    fenetre: deque = deque(maxlen=max(1, spec.rendement_fenetre))
     # Les erreurs BACKEND consécutives du driver lui-même (count/enqueue) : un
     # 502 isolé sur l'enfilement a TUÉ un vol entier (lot C, 16/08 — la rafale
     # #352 ; 30 min de flotte figée avant détection humaine). Le driver tolère
@@ -203,17 +247,31 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
             if st not in ("done", "failed"):
                 continue
             en_vol.discard(jid)
-            bilan.usage_tokens += int((job.get("result") or {}).get("usage_tokens") or 0)
+            resultat = job.get("result") or {}
+            jetons_du_job = int(resultat.get("usage_tokens") or 0)
+            bilan.usage_tokens += jetons_du_job
             if st == "done":
                 bilan.done += 1
                 failed_consecutifs = 0
-                tc = (job.get("result") or {}).get("tool_counts") or {}
-                claims = sum(v for k, v in tc.items() if k.endswith("data_claim_next"))
+                # ⚠️ Le connecteur MCP peut PRÉFIXER les noms d'outils
+                # (`<connecteur>_data_write`) : l'appartenance se teste par
+                # SUFFIXE, jamais par égalité.
+                tc = resultat.get("tool_counts") or {}
                 writes = sum(v for k, v in tc.items() if k.endswith("data_write"))
-                if claims and not writes:
+                fenetre.append((jetons_du_job, writes))
+                # Le faux départ est DÉCLARÉ par le worker — le seul à avoir vu
+                # les appels. Un résultat qui ne le porte pas vient d'un worker
+                # trop ancien : on lève, on ne redevine pas en silence.
+                if "faux_depart" not in resultat:
+                    raise RuntimeError(
+                        f"job {jid} : résultat sans `faux_depart` — worker trop "
+                        "ancien pour cette flotte (le marqueur est posé à la "
+                        "conclusion du job). Mets à jour les workers.")
+                if resultat["faux_depart"]:
                     faux_departs_consecutifs += 1
-                    logger.warning("job %s : faux départ (%d claim, 0 write) — %d d'affilée",
-                                   jid, claims, faux_departs_consecutifs)
+                    logger.warning("job %s : faux départ (réservation sans "
+                                   "écriture) — %d d'affilée",
+                                   jid, faux_departs_consecutifs)
                 else:
                     faux_departs_consecutifs = 0
             else:
@@ -254,6 +312,8 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
         elif faux_departs_consecutifs >= _MAX_FAUX_DEPARTS_CONSECUTIFS:
             borne = (f"{faux_departs_consecutifs} faux départs consécutifs (réservation "
                      "sans écriture) — la flotte tourne à vide")
+        elif (effondrement := _rendement_effondre(spec, fenetre)):
+            borne = effondrement
         elif restantes == 0:
             borne = "file vide"
 

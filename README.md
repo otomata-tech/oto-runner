@@ -43,6 +43,39 @@ joue la boucle sur un fil neuf. `continue` : `{run_id, input?}` — il recharge 
 fil et continue ; `input` absent = reprise pure après une mort en plein tour.
 Un job porte des **références, jamais un secret**.
 
+## La flotte
+
+`python -m oto_runner.fleet flotte.yaml` enfile des jobs `start` sur une file de
+travail datastore et s'arrête sur une **borne** (déclaration complète :
+`docs/fleet-example.yaml`). Le **nom du fichier** sans son extension est le nom
+de la flotte : il est apposé à chaque job (`fleet`), et c'est par lui qu'on
+retrouve les jobs d'une campagne — plus par « id ≥ N ».
+
+Bornes **normales** (exit 0) : file vide, volume atteint, budget atteint. Toute
+autre borne est une **panne** — exit 1, pour que systemd relance la campagne
+quand la panne passe : échecs consécutifs, backend indisponible, outil critique
+en échec, faux départs en série, **rendement effondré**.
+
+Le rendement est la borne GÉNÉRALE du prix de la sortie. « Outil critique » ne
+couvre qu'un outil qui répond en erreur ; une campagne peut payer le prix plein
+sans rien produire pour dix autres raisons, et rien ne le voit puisque les jobs
+concluent « done » :
+
+```yaml
+jetons_par_ecriture_max: 40000   # plafond de jetons par écriture (absent ⟹ inactif)
+rendement_fenetre: 10            # fenêtre glissante de jobs conclus (défaut 10)
+```
+
+Sur les `rendement_fenetre` derniers jobs conclus, si la somme des jetons
+dépasse `jetons_par_ecriture_max × max(1, écritures)`, la flotte s'arrête. La
+fenêtre ne juge qu'une fois **pleine** : un début de vol n'a pas de verdict.
+
+Chaque job conclu déclare son coût et sa sortie (`usage_tokens`, `tool_counts`,
+`claims`, `writes`, `faux_depart`) : c'est ce que l'ordonnanceur lit, sans jamais
+ouvrir un fil. Le verdict de faux départ (réserver une ligne sans rien écrire)
+appartient au worker, qui a vu les appels — un résultat qui ne le porte pas vient
+d'un worker trop ancien, et la flotte lève plutôt que de le redeviner.
+
 ## Tests
 
 ```bash

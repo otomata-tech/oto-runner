@@ -39,10 +39,28 @@ class FauxBackend:
     def get_job(self, jid):
         self._age[jid] += 1
         if self._age[jid] >= self.duree:
+            # Le résultat est celui d'un worker À JOUR : il DÉCLARE son faux
+            # départ, le driver ne le redevine pas (cf. le test dédié).
             self.jobs[jid] = {"status": self.statut,
-                              "result": {"usage_tokens": self.usage},
+                              "result": {"usage_tokens": self.usage,
+                                         "faux_depart": False},
                               "last_error": "boom" if self.statut == "failed" else None}
         return self.jobs[jid]
+
+
+class BackendRendement(FauxBackend):
+    """Des jobs conclus dont on choisit le coût et la SORTIE (nombre
+    d'écritures). Les noms d'outils sont préfixés par le connecteur, comme en
+    vol : le driver ne doit reconnaître une écriture qu'au suffixe."""
+
+    writes = 1
+
+    def get_job(self, jid):
+        j = super().get_job(jid)
+        if j["status"] == "done":
+            j["result"]["tool_counts"] = {"demo-connecteur_data_claim_next": 1,
+                                          "demo-connecteur_data_write": self.writes}
+        return j
 
 
 class Horloge:
@@ -169,6 +187,8 @@ def test_le_payload_porte_le_contrat_du_run():
     p = _payload(_spec(project=220, max_steps=48))
     assert p["procedure"] == "p" and p["project_id"] == 220
     assert p["max_steps"] == 48 and "data_claim_next" in p["tools"]
+    assert p["fleet"] == "ns", \
+        "hors déclaration, le nom de la flotte retombe sur le namespace"
 
 
 def test_lorg_de_la_declaration_scope_le_comptage():
@@ -340,9 +360,92 @@ def test_des_faux_departs_en_serie_arretent_la_flotte():
             j = super().get_job(jid)
             if j["status"] == "done":
                 j["result"]["tool_counts"] = {"data_claim_next": 1, "fr_get": 2}
+                j["result"]["faux_depart"] = True
             return j
 
     b = BackendFauxDeparts(counts=[100, 100])
     bilan = _run(_spec(ramp_seconds=0), b)
     assert "faux départs consécutifs" in bilan.arret
     assert not any(bilan.arret.startswith(m) for m in F._ARRETS_NORMAUX)
+
+
+def test_un_resultat_sans_marqueur_de_faux_depart_leve():
+    """Le marqueur est posé par le WORKER — le seul à avoir vu les appels. Un
+    résultat qui ne le porte pas vient d'un worker trop ancien : on lève. Le
+    recalculer ici ferait passer une flotte mal appariée pour une flotte
+    saine, et le contrat resterait invisible jusqu'au prochain vol à vide."""
+
+    class BackendAncien(FauxBackend):
+        def get_job(self, jid):
+            j = super().get_job(jid)
+            (j.get("result") or {}).pop("faux_depart", None)
+            return j
+
+    b = BackendAncien(counts=[100, 100])
+    with pytest.raises(RuntimeError, match="faux_depart"):
+        _run(_spec(ramp_seconds=0), b)
+
+
+def test_le_rendement_effondre_arrete_la_flotte():
+    """La borne GÉNÉRALE du prix de la sortie : une campagne a tourné quatre
+    jours en payant le prix plein pour des fiches vides — jobs « done », outils
+    debout, aucune borne. Le rendement rapporte le coût aux ÉCRITURES."""
+    from oto_runner import fleet as F
+
+    b = BackendRendement(counts=[100, 100], usage_par_job=20_000)
+    bilan = _run(_spec(ramp_seconds=0, jetons_par_ecriture_max=5_000,
+                       rendement_fenetre=10), b)
+    assert bilan.arret == ("rendement effondré (200000 jetons pour 10 "
+                           "écriture(s) sur 10 jobs)")
+    assert not any(bilan.arret.startswith(m) for m in F._ARRETS_NORMAUX), \
+        "arrêt ANORMAL : systemd relance quand la campagne est corrigée"
+
+
+def test_une_fenetre_incomplete_ne_juge_pas():
+    """Quelques jobs ne font pas une tendance : sous la taille de fenêtre, aucun
+    verdict — sinon le premier job cher d'un vol arrêterait la campagne."""
+    b = BackendRendement(counts=[100, 100, 100, 100, 0, 0], usage_par_job=20_000)
+    bilan = _run(_spec(ramp_seconds=0, jetons_par_ecriture_max=1,
+                       rendement_fenetre=20), b)
+    assert bilan.arret == "file vide", "fenêtre non pleine ⟹ pas de verdict"
+
+
+def test_un_rendement_sain_laisse_la_flotte_tourner():
+    """Fenêtre PLEINE et rendement dans le plafond : la flotte va jusqu'au
+    bout de sa file — la borne ne doit pas mordre sur une campagne qui produit."""
+    b = BackendRendement(counts=[100] * 12 + [0], usage_par_job=20_000)
+    bilan = _run(_spec(ramp_seconds=0, jetons_par_ecriture_max=50_000,
+                       rendement_fenetre=10), b)
+    assert bilan.arret == "file vide"
+    assert bilan.done >= 10, "la fenêtre s'est remplie sans borner"
+
+
+def test_sans_plafond_declare_le_rendement_ne_borne_pas():
+    """La borne est OPT-IN : sans `jetons_par_ecriture_max`, même un million de
+    jetons par écriture ne l'arrête pas (la fenêtre est pleine ici)."""
+    b = BackendRendement(counts=[100, 100, 100, 0, 0], usage_par_job=1_000_000)
+    bilan = _run(_spec(ramp_seconds=0, rendement_fenetre=2), b)
+    assert bilan.arret == "file vide"
+
+
+def test_la_declaration_porte_le_rendement_et_nomme_la_flotte(tmp_path):
+    """Les deux champs de rendement se lisent au YAML, et le nom du FICHIER
+    (sans extension) devient le nom de la flotte : c'est le tag `fleet` de
+    chaque job, par lequel on retrouve une campagne sans deviner un « id ≥ N »."""
+    from oto_runner.fleet import _payload
+
+    f = tmp_path / "campagne-demo.yaml"
+    f.write_text("procedure: p\nnamespace: demo\n"
+                 "jetons_par_ecriture_max: 40000\nrendement_fenetre: 25\n")
+    spec = load_spec(str(f))
+    assert spec.jetons_par_ecriture_max == 40_000 and spec.rendement_fenetre == 25
+    assert spec.name == "campagne-demo"
+    assert _payload(spec)["fleet"] == "campagne-demo"
+
+
+def test_le_rendement_est_absent_par_defaut(tmp_path):
+    f = tmp_path / "flotte.yaml"
+    f.write_text("procedure: p\nnamespace: demo\n")
+    spec = load_spec(str(f))
+    assert spec.jetons_par_ecriture_max is None, "borne inactive sans déclaration"
+    assert spec.rendement_fenetre == 10, "défaut runner : 10 jobs"

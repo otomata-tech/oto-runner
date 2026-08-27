@@ -217,19 +217,27 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         except Exception as e:  # noqa: BLE001 — la clôture du run est best-effort,
             # sur SA connexion : jamais dans la transaction d'un autre (cf. #333).
             logger.warning("run_finish %s : %s", run_id, e)
-    # Le résultat DÉCLARÉ (R5) : ce que l'ordonnanceur de flotte lit pour sa
-    # garde budget — un résumé, jamais du contenu de fil. `tool_counts` rend le
-    # TOUR PERDU lisible d'un coup d'œil : un agent qui analyse et conclut en
-    # prose SANS écrire ne produit aucune erreur — la seule trace est l'écart
-    # entre ses mots et ses appels. Le compte par outil le montre au grain job
-    # (des claims sans writes), sans lire le fil.
+    # Le résultat DÉCLARÉ (R5) : ce que l'ordonnanceur de flotte lit pour ses
+    # gardes — un résumé, jamais du contenu de fil. `tool_counts` rend le TOUR
+    # PERDU lisible d'un coup d'œil : un agent qui analyse et conclut en prose
+    # SANS écrire ne produit aucune erreur — la seule trace est l'écart entre
+    # ses mots et ses appels. Le compte par outil le montre au grain job (des
+    # claims sans writes), sans lire le fil. `claims`/`writes`/`faux_depart` en
+    # sont la lecture ARRÊTÉE ICI : le verdict appartient au worker, qui a vu
+    # les appels, pas à l'ordonnanceur qui devrait le redériver à chaque tour.
+    # ⚠️ Le connecteur MCP peut PRÉFIXER les noms (`<connecteur>_data_write`) :
+    # l'appartenance se teste par SUFFIXE, jamais par égalité.
     compte: dict = {}
     for s in res.steps:
         if s.ok:
             compte[s.tool] = compte.get(s.tool, 0) + 1
+    claims = sum(v for k, v in compte.items() if k.endswith("data_claim_next"))
+    writes = sum(v for k, v in compte.items() if k.endswith("data_write"))
     backend.complete(job["id"], ok=True, run_id=run_id,
                      result={"usage_tokens": jetons, "stopped": res.stopped,
-                             "steps": len(res.steps), "tool_counts": compte})
+                             "steps": len(res.steps), "tool_counts": compte,
+                             "claims": claims, "writes": writes,
+                             "faux_depart": claims > 0 and writes == 0})
     logger.info("job %s : %s (%s)", job["id"], outcome, note)
 
 

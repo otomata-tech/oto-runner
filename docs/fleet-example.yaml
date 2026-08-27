@@ -5,6 +5,8 @@
 # Lancer : python -m oto_runner.fleet flotte.yaml
 # Le modèle vient de l'env du WORKER (OTO_RUNNER_MODEL) — un champ `model`
 # ici serait logué puis ignoré : le pool de workers est homogène.
+# Le NOM DU FICHIER sans son extension est le nom de la flotte : il est apposé
+# à chaque job (`fleet`), et c'est par lui qu'on retrouve une campagne.
 
 procedure: enrichissement-fiche   # la procédure (doctrine) que chaque run déroule
 namespace: prospects-demo         # la file : le tableau datastore à drainer
@@ -23,3 +25,9 @@ volume: épuisement                # ou un entier : plafond TOTAL de lignes
 budget_tokens: 5000000            # cap de sécurité — la flotte s'arrête PROPREMENT
 max_steps: 40                     # tours de modèle par run ; le run se ré-enfile
                                   # via la flotte tant que la file n'est pas vide
+
+# Le RENDEMENT : ce que la campagne PRODUIT rapporté à ce qu'elle coûte. Sans
+# `jetons_par_ecriture_max`, la borne est inactive.
+jetons_par_ecriture_max: 40000    # plafond de jetons par écriture, sur la fenêtre
+rendement_fenetre: 10             # fenêtre glissante de jobs conclus (défaut 10) ;
+                                  # tant qu'elle n'est pas pleine, aucun verdict

@@ -134,6 +134,39 @@ def test_le_resultat_declare_compte_les_appels_par_outil(monkeypatch):
         "un claim sans write se lit ici sans ouvrir le fil"
 
 
+def test_le_resultat_declare_claims_writes_et_faux_depart(monkeypatch):
+    """Le faux départ (réserver une ligne puis conclure en prose) est un
+    VERDICT du worker, pas une déduction de l'ordonnanceur : lui seul a vu les
+    appels. ⚠️ le connecteur MCP préfixe les noms d'outils — l'appartenance se
+    teste par SUFFIXE, jamais par égalité (13 jobs comptés « zéro écriture »
+    alors que les fiches partaient)."""
+    import oto_runner.worker as W2
+    from oto_runner.agent_runtime import AgentResult, AgentStep
+
+    def _resultat(*outils):
+        etapes = [AgentStep(tool=t, ok=True, duration_ms=1) for t in outils]
+
+        def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None):
+            return AgentResult(reply="fini", stopped="end_turn", steps=etapes)
+
+        monkeypatch.setattr(W2.agent_runtime, "run", faux_run)
+        monkeypatch.setattr(W2, "McpSession", FauxMcp)
+        b = FauxBackend()
+        W2._traiter(b, _job("start"), provider=None)
+        return next(a for a in b.appels if a[0] == "complete_result")[1]
+
+    r = _resultat("demo-connecteur_data_claim_next", "demo-connecteur_data_write",
+                  "demo-connecteur_data_write")
+    assert (r["claims"], r["writes"], r["faux_depart"]) == (1, 2, False)
+
+    r = _resultat("demo-connecteur_data_claim_next", "serper_search")
+    assert (r["claims"], r["writes"], r["faux_depart"]) == (1, 0, True), \
+        "une ligne réservée, rien d'écrit : un job « done » qui n'a rien produit"
+
+    r = _resultat("serper_search")
+    assert r["faux_depart"] is False, "sans réservation, pas de faux départ"
+
+
 def test_la_reprise_tronque_un_fil_finissant_par_assistant(monkeypatch):
     """Mort entre l'appose du tour assistant et celle de ses résultats : le fil
     finit par assistant, que les API de complétion refusent. Le transport est
