@@ -20,3 +20,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["oto_runner"]
+
+[tool.pytest.ini_options]
+# La racine sur le sys.path de la collecte : un module de test en importe un
+# autre (`from tests.…`), et sans ça la collecte s'interrompt AVANT le premier
+# test — la CI était rouge depuis le 19/08 sans qu'aucune vérification tourne.
+pythonpath = ["."]
