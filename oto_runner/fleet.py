@@ -25,6 +25,8 @@ from typing import Callable, Optional
 import yaml
 
 from .backend import Backend, BackendError
+from .bilan import PERIODE_S as _BILAN_PERIODE_S
+from .bilan import ecrire_bilan
 
 logger = logging.getLogger("oto_runner.fleet")
 
@@ -55,7 +57,8 @@ DEFAULT_INPUT = ("Ta file de travail est le tableau `{namespace}` : réserve cha
 # écrite pour un autre harnais reste lisible ici, sans mensonge silencieux).
 _CHAMPS = {"procedure", "namespace", "filter", "project", "org", "tools", "concurrency",
            "ramp_seconds", "volume", "budget_tokens", "max_steps", "input",
-           "critical_tools", "jetons_par_ecriture_max", "rendement_fenetre"}
+           "critical_tools", "jetons_par_ecriture_max", "rendement_fenetre",
+           "bilan_periode_s"}
 
 
 @dataclass(frozen=True)
@@ -85,6 +88,8 @@ class FleetSpec:
     # une fenêtre glissante de jobs conclus. Absent ⟹ borne inactive.
     jetons_par_ecriture_max: Optional[int] = None
     rendement_fenetre: int = 10
+    bilan_periode_s: int = _BILAN_PERIODE_S   # cadence du bilan intermédiaire
+    source: str = ""              # la déclaration : le bilan JSON se pose à côté
 
     def __post_init__(self):
         if not self.name:
@@ -122,6 +127,8 @@ def load_spec(path: str) -> FleetSpec:
         critical_tools=tuple(raw.get("critical_tools") or ()),
         jetons_par_ecriture_max=raw.get("jetons_par_ecriture_max"),
         rendement_fenetre=int(raw.get("rendement_fenetre") or 10),
+        bilan_periode_s=int(raw.get("bilan_periode_s") or _BILAN_PERIODE_S),
+        source=path,
         name=os.path.splitext(os.path.basename(path))[0])
 
 
@@ -237,128 +244,150 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
     # et retente ; seule une panne DENSE et continue l'arrête, PROPREMENT, avec
     # un bilan — jamais un traceback. Les workers en vol, eux, continuent.
     erreurs_backend = 0
+    # La matière du BILAN : les jobs conclus (statut + résultat déclaré, jamais
+    # leur payload). « Aboutie » se mesure au TABLEAU (départ − restantes), pas
+    # au nombre de jobs « done » — le relevé de départ est déjà en `bilan`.
+    conclus: dict[int, dict] = {}
+    t0 = dernier_bilan = clock()
     logger.info("flotte %s : %d ligne(s) à traiter, concurrence %d, rampe %ds",
                 spec.namespace, bilan.lignes_initiales, spec.concurrency,
                 spec.ramp_seconds)
 
-    while True:
-        # 1. Moissonner les jobs conclus — leur résultat DÉCLARÉ porte le coût.
-        for jid in sorted(en_vol):
-            try:
-                job = backend.get_job(jid)
-            except BackendError as e:
-                logger.warning("get_job %s : %s", jid, e)
-                continue
-            st = job.get("status")
-            if st not in ("done", "failed"):
-                continue
-            en_vol.discard(jid)
-            resultat = job.get("result") or {}
-            jetons_du_job = int(resultat.get("usage_tokens") or 0)
-            bilan.usage_tokens += jetons_du_job
-            if st == "done":
-                bilan.done += 1
-                failed_consecutifs = 0
-                # ⚠️ Le connecteur MCP peut PRÉFIXER les noms d'outils
-                # (`<connecteur>_data_write`) : l'appartenance se teste par
-                # SUFFIXE, jamais par égalité.
-                tc = resultat.get("tool_counts") or {}
-                writes = sum(v for k, v in tc.items() if k.endswith("data_write"))
-                fenetre.append((jetons_du_job, writes))
-                # Le faux départ est DÉCLARÉ par le worker — le seul à avoir vu
-                # les appels. Un résultat qui ne le porte pas vient d'un worker
-                # trop ancien : on lève, on ne redevine pas en silence.
-                if "faux_depart" not in resultat:
-                    raise RuntimeError(
-                        f"job {jid} : résultat sans `faux_depart` — worker trop "
-                        "ancien pour cette flotte (le marqueur est posé à la "
-                        "conclusion du job). Mets à jour les workers.")
-                if resultat["faux_depart"]:
-                    faux_departs_consecutifs += 1
-                    logger.warning("job %s : faux départ (réservation sans "
-                                   "écriture) — %d d'affilée",
-                                   jid, faux_departs_consecutifs)
+    try:
+        while True:
+            # 1. Moissonner les jobs conclus — leur résultat DÉCLARÉ porte le coût.
+            for jid in sorted(en_vol):
+                try:
+                    job = backend.get_job(jid)
+                except BackendError as e:
+                    logger.warning("get_job %s : %s", jid, e)
+                    continue
+                st = job.get("status")
+                if st not in ("done", "failed"):
+                    continue
+                en_vol.discard(jid)
+                resultat = job.get("result") or {}
+                conclus[jid] = {"status": st, "result": resultat}
+                jetons_du_job = int(resultat.get("usage_tokens") or 0)
+                bilan.usage_tokens += jetons_du_job
+                if st == "done":
+                    bilan.done += 1
+                    failed_consecutifs = 0
+                    # ⚠️ Le connecteur MCP peut PRÉFIXER les noms d'outils
+                    # (`<connecteur>_data_write`) : l'appartenance se teste par
+                    # SUFFIXE, jamais par égalité.
+                    tc = resultat.get("tool_counts") or {}
+                    writes = sum(v for k, v in tc.items() if k.endswith("data_write"))
+                    fenetre.append((jetons_du_job, writes))
+                    # Le faux départ est DÉCLARÉ par le worker — le seul à avoir vu
+                    # les appels. Un résultat qui ne le porte pas vient d'un worker
+                    # trop ancien : on lève, on ne redevine pas en silence.
+                    if "faux_depart" not in resultat:
+                        raise RuntimeError(
+                            f"job {jid} : résultat sans `faux_depart` — worker trop "
+                            "ancien pour cette flotte (le marqueur est posé à la "
+                            "conclusion du job). Mets à jour les workers.")
+                    if resultat["faux_depart"]:
+                        faux_departs_consecutifs += 1
+                        logger.warning("job %s : faux départ (réservation sans "
+                                       "écriture) — %d d'affilée",
+                                       jid, faux_departs_consecutifs)
+                    else:
+                        faux_departs_consecutifs = 0
                 else:
-                    faux_departs_consecutifs = 0
-            else:
-                bilan.failed += 1
-                failed_consecutifs += 1
-                logger.warning("job %s FAILED : %s", jid, job.get("last_error"))
+                    bilan.failed += 1
+                    failed_consecutifs += 1
+                    logger.warning("job %s FAILED : %s", jid, job.get("last_error"))
 
-        try:
-            restantes = backend.count_rows(spec.namespace, filter=spec.filter,
-                                           org=spec.org)
-        except BackendError as e:
-            erreurs_backend += 1
-            if erreurs_backend >= _MAX_ERREURS_BACKEND:
-                bilan.arret = (f"backend indisponible ({erreurs_backend} erreurs "
-                               "consécutives du driver)")
-                logger.warning("flotte arrêtée : %s — %d done, %d failed",
-                               bilan.arret, bilan.done, bilan.failed)
-                return bilan
-            logger.warning("count_rows toléré (%d/%d) : %s",
-                           erreurs_backend, _MAX_ERREURS_BACKEND, e)
-            sleep(poll_s)
-            continue
-        erreurs_backend = 0
-        bilan.lignes_restantes = restantes
-        traitees = max(0, bilan.lignes_initiales - restantes)
-
-        # 2. Les bornes — chacune arrête l'ENFILEMENT ; les jobs en vol finissent.
-        borne = None
-        if spec.budget_tokens is not None and bilan.usage_tokens >= spec.budget_tokens:
-            borne = f"budget atteint ({bilan.usage_tokens} ≥ {spec.budget_tokens} jetons)"
-        elif spec.volume is not None and traitees >= spec.volume:
-            borne = f"volume atteint ({traitees} ≥ {spec.volume} lignes)"
-        elif failed_consecutifs >= _MAX_FAILED_CONSECUTIFS:
-            borne = (f"{failed_consecutifs} échecs consécutifs — enfiler encore, "
-                     "c'est payer pour re-crasher")
-        elif (panne := _outil_critique_en_panne(spec, backend, clock)):
-            borne = panne
-        elif faux_departs_consecutifs >= _MAX_FAUX_DEPARTS_CONSECUTIFS:
-            borne = (f"{faux_departs_consecutifs} faux départs consécutifs (réservation "
-                     "sans écriture) — la flotte tourne à vide")
-        elif (effondrement := _rendement_effondre(spec, fenetre)):
-            borne = effondrement
-        elif restantes == 0:
-            borne = "file vide"
-
-        if borne:
-            if en_vol:
-                logger.info("borne (%s) : %d job(s) en vol finissent, plus un "
-                            "n'est enfilé", borne, len(en_vol))
-                sleep(poll_s)
-                continue
-            bilan.arret = borne
-            logger.info("flotte arrêtée : %s — %d done, %d failed, %d jetons",
-                        borne, bilan.done, bilan.failed, bilan.usage_tokens)
-            return bilan
-
-        # 3. Enfiler, sous la rampe — un départ au plus par tour de boucle.
-        if (len(en_vol) < spec.concurrency
-                and (dernier_depart is None
-                     or clock() - dernier_depart >= spec.ramp_seconds)):
             try:
-                jid = backend.enqueue("start", _payload(spec))
+                restantes = backend.count_rows(spec.namespace, filter=spec.filter,
+                                               org=spec.org)
             except BackendError as e:
                 erreurs_backend += 1
                 if erreurs_backend >= _MAX_ERREURS_BACKEND:
-                    bilan.arret = (f"backend indisponible ({erreurs_backend} "
-                                   "erreurs consécutives du driver)")
+                    bilan.arret = (f"backend indisponible ({erreurs_backend} erreurs "
+                                   "consécutives du driver)")
                     logger.warning("flotte arrêtée : %s — %d done, %d failed",
                                    bilan.arret, bilan.done, bilan.failed)
                     return bilan
-                logger.warning("enqueue toléré (%d/%d) : %s",
+                logger.warning("count_rows toléré (%d/%d) : %s",
                                erreurs_backend, _MAX_ERREURS_BACKEND, e)
                 sleep(poll_s)
                 continue
             erreurs_backend = 0
-            en_vol.add(jid)
-            dernier_depart = clock()
-            logger.info("job %s enfilé (%d/%d en vol)", jid, len(en_vol),
-                        spec.concurrency)
+            bilan.lignes_restantes = restantes
+            traitees = max(0, bilan.lignes_initiales - restantes)
 
-        sleep(poll_s)
+            # Le bilan INTERMÉDIAIRE : une campagne se pilote PENDANT qu'elle
+            # tourne, pas après. Tout le calcul vit dans bilan.py.
+            if clock() - dernier_bilan >= spec.bilan_periode_s:
+                dernier_bilan = clock()
+                ecrire_bilan(spec, backend, conclus, secondes=clock() - t0,
+                             lignes_initiales=bilan.lignes_initiales)
+
+            # 2. Les bornes — chacune arrête l'ENFILEMENT ; les jobs en vol finissent.
+            borne = None
+            if spec.budget_tokens is not None and bilan.usage_tokens >= spec.budget_tokens:
+                borne = f"budget atteint ({bilan.usage_tokens} ≥ {spec.budget_tokens} jetons)"
+            elif spec.volume is not None and traitees >= spec.volume:
+                borne = f"volume atteint ({traitees} ≥ {spec.volume} lignes)"
+            elif failed_consecutifs >= _MAX_FAILED_CONSECUTIFS:
+                borne = (f"{failed_consecutifs} échecs consécutifs — enfiler encore, "
+                         "c'est payer pour re-crasher")
+            elif (panne := _outil_critique_en_panne(spec, backend, clock)):
+                borne = panne
+            elif faux_departs_consecutifs >= _MAX_FAUX_DEPARTS_CONSECUTIFS:
+                borne = (f"{faux_departs_consecutifs} faux départs consécutifs (réservation "
+                         "sans écriture) — la flotte tourne à vide")
+            elif (effondrement := _rendement_effondre(spec, fenetre)):
+                borne = effondrement
+            elif restantes == 0:
+                borne = "file vide"
+
+            if borne:
+                if en_vol:
+                    logger.info("borne (%s) : %d job(s) en vol finissent, plus un "
+                                "n'est enfilé", borne, len(en_vol))
+                    sleep(poll_s)
+                    continue
+                bilan.arret = borne
+                logger.info("flotte arrêtée : %s — %d done, %d failed, %d jetons",
+                            borne, bilan.done, bilan.failed, bilan.usage_tokens)
+                return bilan
+
+            # 3. Enfiler, sous la rampe — un départ au plus par tour de boucle.
+            if (len(en_vol) < spec.concurrency
+                    and (dernier_depart is None
+                         or clock() - dernier_depart >= spec.ramp_seconds)):
+                try:
+                    jid = backend.enqueue("start", _payload(spec))
+                except BackendError as e:
+                    erreurs_backend += 1
+                    if erreurs_backend >= _MAX_ERREURS_BACKEND:
+                        bilan.arret = (f"backend indisponible ({erreurs_backend} "
+                                       "erreurs consécutives du driver)")
+                        logger.warning("flotte arrêtée : %s — %d done, %d failed",
+                                       bilan.arret, bilan.done, bilan.failed)
+                        return bilan
+                    logger.warning("enqueue toléré (%d/%d) : %s",
+                                   erreurs_backend, _MAX_ERREURS_BACKEND, e)
+                    sleep(poll_s)
+                    continue
+                erreurs_backend = 0
+                en_vol.add(jid)
+                dernier_depart = clock()
+                logger.info("job %s enfilé (%d/%d en vol)", jid, len(en_vol),
+                            spec.concurrency)
+
+            sleep(poll_s)
+
+    finally:
+        # Le bilan de FIN tombe quelle que soit la borne — panne et interruption
+        # comprises : un pilotage qui n'existe que sur une sortie propre n'existe
+        # pas les jours où il sert.
+        ecrire_bilan(spec, backend, conclus, secondes=clock() - t0,
+                     lignes_initiales=bilan.lignes_initiales,
+                     arret=bilan.arret or "interrompu")
 
 
 # Les motifs d'arrêt NORMAUX — la campagne a fini son travail ou sa borne

@@ -76,6 +76,31 @@ ouvrir un fil. Le verdict de faux départ (réserver une ligne sans rien écrire
 appartient au worker, qui a vu les appels — un résultat qui ne le porte pas vient
 d'un worker trop ancien, et la flotte lève plutôt que de le redeviner.
 
+### Le bilan de la campagne
+
+Le driver rend lui-même le **bilan** de sa flotte : à la cadence
+`bilan_periode_s` (600 s par défaut) pendant qu'elle tourne, et une fois à la
+fin **quelle que soit la borne** — panne et interruption comprises, parce que
+c'est précisément ces jours-là qu'on le lit.
+
+```
+bilan flotte prospects-demo : abouties 12/30 · faux départs 2 · 1,8 M jetons · 150,0 k/aboutie · data_write 14 appels, 0 refusé
+```
+
+Le même bilan se pose en JSON à côté de la déclaration (`flotte.yaml` →
+`flotte.bilan.json`, réécrit atomiquement à chaque fois) : lignes
+(départ / restantes / abouties), jobs (terminés / échoués / faux départs),
+jetons (total, par job, par ligne aboutie), écritures (réservations et
+écritures), et refus d'écriture.
+
+⚠️ **« Aboutie » se lit au TABLEAU, jamais aux jobs** : c'est une ligne qui ne
+correspond PLUS au `filter` de réservation. Le coût par ligne aboutie vaut
+`null` tant que rien n'a abouti — jamais un chiffre calculé sur zéro. Les refus
+d'écriture (`data_write` refusé par RBAC, quota ou schéma : le job conclut
+« done » sans une ligne écrite) se lisent au journal des appels de l'org, ce qui
+demande un `org:` dans la déclaration ; sans lui le poste est omis, et le bilan
+dit pourquoi.
+
 ## Tests
 
 ```bash
