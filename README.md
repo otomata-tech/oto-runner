@@ -33,7 +33,15 @@ OTO_TOKEN=oto_…                      # jeton non porté du compte worker (une 
 ANTHROPIC_API_KEY=…                  # la clé de modèle = qui paie
 OTO_RUNNER_MODEL=claude-sonnet-5     # défaut assumé (coût) ; Opus par flotte si justifié
 OTO_RUNNER_ARMED=1                   # cf. ci-dessus
+OTO_RUNNER_FAUX_DEPARTS_DIR=…        # optionnel : où déposer la sortie d'un faux départ
 ```
+
+Le dépôt des faux départs est un outil de diagnostic qu'on arme : variable
+absente, rien n'est écrit. Posée, chaque job conclu en faux départ y laisse un
+`<job_id>.json` — outils appelés et **texte final intégral** de l'agent, la
+seule pièce qui dise s'il a rédigé sa fiche en prose sans appeler l'écriture ou
+s'il a renoncé. ⚠️ Ce fichier porte de la **donnée de la file de travail** : il
+est écrit en 0600, et **se purge après lecture**.
 
 ## Un job
 

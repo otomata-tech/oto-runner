@@ -19,9 +19,11 @@ recharge le fil, et continue — c'est le scénario prouvé au spike du 12/08.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 from . import agent_runtime
@@ -114,6 +116,36 @@ def _ordre_one_shot(ordre: str, run_id: str, payload: dict) -> str:
                      f"`namespace: \"{ns}\"` tel quel — jamais `slot:…`, jamais "
                      f"une variante.")
     return identite + "\n\n" + ordre
+
+
+def _conserver_faux_depart(job: dict, payload: dict, res) -> None:
+    """Le texte final d'un faux départ est le SEUL renseignement qui dise
+    LEQUEL c'est : l'agent a rédigé sa fiche en prose sans appeler l'écriture,
+    ou il a renoncé. Les conversations tournent sans stockage chez le
+    fournisseur et le fil ne garde qu'une synthèse — hors de ce dépôt, ce texte
+    n'existe nulle part. `OTO_RUNNER_FAUX_DEPARTS_DIR` absent ⟹ rien n'est
+    écrit. ⚠️ Le fichier porte de la donnée de la file de travail : 0600, et il
+    se purge après lecture."""
+    dossier = os.environ.get("OTO_RUNNER_FAUX_DEPARTS_DIR")
+    if not dossier:
+        return
+    chemin = os.path.join(dossier, f"{job['id']}.json")
+    trace = {"job_id": job.get("id"),
+             "horodatage": datetime.now(timezone.utc).isoformat(),
+             "procedure": payload.get("procedure"),
+             "namespace": payload.get("namespace"),
+             "steps": [s.tool for s in res.steps],
+             "reply": res.reply}
+    try:
+        os.makedirs(dossier, exist_ok=True)
+        fd = os.open(chemin, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(trace, f, ensure_ascii=False, indent=2)
+    except Exception as e:  # noqa: BLE001 — SEULE tolérance du chemin : un
+        # diagnostic ne casse jamais un job que la production a déjà payé.
+        logger.warning("faux départ %s non conservé : %s", job.get("id"), e)
+        return
+    logger.info("job %s : faux départ conservé dans %s", job.get("id"), chemin)
 
 
 def _spec_du_job(job: dict, procedure_md: str) -> AgentSpec:
@@ -233,11 +265,14 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             compte[s.tool] = compte.get(s.tool, 0) + 1
     claims = sum(v for k, v in compte.items() if k.endswith("data_claim_next"))
     writes = sum(v for k, v in compte.items() if k.endswith("data_write"))
+    faux_depart = claims > 0 and writes == 0
+    if faux_depart:
+        _conserver_faux_depart(job, p, res)
     backend.complete(job["id"], ok=True, run_id=run_id,
                      result={"usage_tokens": jetons, "stopped": res.stopped,
                              "steps": len(res.steps), "tool_counts": compte,
                              "claims": claims, "writes": writes,
-                             "faux_depart": claims > 0 and writes == 0})
+                             "faux_depart": faux_depart})
     logger.info("job %s : %s (%s)", job["id"], outcome, note)
 
 
