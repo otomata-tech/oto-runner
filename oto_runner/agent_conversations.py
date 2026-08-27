@@ -35,9 +35,17 @@ stocké, le fil se rejoue donc entier par ses `inputs`. La référence de l'API
 (docs.mistral.ai/api — `ConversationRequest.inputs`, type `ConversationInputs`)
 accepte au choix une chaîne ou une liste d'entrées `InputEntries`, union de
 `MessageInputEntry`, `MessageOutputEntry`, `FunctionResultEntry`,
-`FunctionCallEntry`, `ToolExecutionEntry` et `AgentHandoffEntry` : les `outputs`
-reçus y RETOURNENT tels quels, suivis d'une `FunctionResultEntry`
-(`tool_call_id` + `result`, tous deux requis) par appel renvoyé.
+`FunctionCallEntry`, `ToolExecutionEntry` et `AgentHandoffEntry` — les quatre
+derniers types étant précisément ceux que rendent les `outputs`. Ils y
+RETOURNENT donc, suivis d'une `FunctionResultEntry` (`tool_call_id` + `result`,
+tous deux requis) par appel renvoyé.
+
+⚠️ Mais PAS tels quels : une entrée sortante porte des champs POSÉS PAR LE
+SERVEUR — `id`, `created_at`, `completed_at`, `agent_id`, `model` — et l'API les
+REFUSE en entrée : 422 « Input entries send by the user can't specify ids » au
+premier cas réel. Chaque entrée est donc dépouillée sur la liste blanche de son
+type (`_CHAMPS_ENTREE`), qui ne garde que les champs de FOND. `tool_call_id`
+n'en est pas un champ serveur : c'est la clé que cite la réponse, elle reste.
 
 ## La version RÉSOLUE du modèle
 
@@ -78,6 +86,21 @@ DEFAULT_MODEL = "mistral-large-latest"
 # large — mais TOUJOURS plus courte que le bail one-shot du worker (1800 s), sinon
 # un pair re-claimerait un job dont la conversation tourne encore.
 _WALL_S = 900
+
+# Les champs de FOND acceptés en entrée, par type (référence API — modèles
+# `InputEntries` du SDK). Tout le reste est posé par le serveur (`id`,
+# `created_at`, `completed_at`, `agent_id`, `model`) et fait échouer le POST.
+_CHAMPS_ENTREE = {
+    "message.input": ("object", "type", "role", "content", "prefix"),
+    "message.output": ("object", "type", "role", "content"),
+    "function.call": ("object", "type", "tool_call_id", "name", "arguments"),
+    "function.result": ("object", "type", "tool_call_id", "result"),
+    # `info` porte ce que l'outil a RENDU : sans lui le fil relancé ne sait plus
+    # ce qu'il a déjà obtenu et refait le travail déjà payé.
+    "tool.execution": ("object", "type", "name", "arguments", "info"),
+    "agent.handoff": ("object", "type", "previous_agent_id", "previous_agent_name",
+                      "next_agent_id", "next_agent_name"),
+}
 
 _CONSIGNE_APPEL_RENVOYE = (
     "Cet outil n'existe pas. Les outils sont exécutés par le connecteur : "
@@ -298,9 +321,20 @@ def _entree_initiale(inputs) -> list:
     return list(inputs)
 
 
+def _depouiller(entree: dict) -> dict:
+    """Une entrée du fil, réduite à ce que l'API accepte d'un client."""
+    typ = (entree or {}).get("type") or ""
+    champs = _CHAMPS_ENTREE.get(typ)
+    if champs is None:
+        raise RuntimeError(
+            f"conversations → entrée de type {typ!r} inconnue : le fil ne peut "
+            "pas être renvoyé sans savoir ce qui s'y envoie")
+    return {c: entree[c] for c in champs if c in entree}
+
+
 def _entrees_de_relance(inputs, d: dict, renvoyes: list) -> list:
-    """Le fil rejoué : l'ordre initial, les outputs reçus tels quels, puis la
-    réponse à chaque appel rendu."""
+    """Le fil rejoué : l'ordre initial, les outputs reçus, puis la réponse à
+    chaque appel rendu — chaque entrée dépouillée de ses champs serveur."""
     entrees = _entree_initiale(inputs) + list(d.get("outputs") or [])
     for appel in renvoyes:
         tid = appel.get("tool_call_id")
@@ -311,7 +345,7 @@ def _entrees_de_relance(inputs, d: dict, renvoyes: list) -> list:
         entrees.append({"object": "entry", "type": "function.result",
                         "tool_call_id": tid,
                         "result": _CONSIGNE_APPEL_RENVOYE})
-    return entrees
+    return [_depouiller(e) for e in entrees]
 
 
 def _cumuler(cumul: Optional[AgentResult], passe: AgentResult) -> AgentResult:

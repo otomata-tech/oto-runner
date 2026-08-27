@@ -260,16 +260,21 @@ def test_le_worker_one_shot_impose_lidentite_de_run_et_le_nom_du_tableau(monkeyp
 
 _CALL_BIDON = {
     "type": "function.call", "object": "entry", "id": "e-9",
+    "created_at": "2026-08-27T21:00:00Z", "completed_at": "2026-08-27T21:00:01Z",
+    "agent_id": None, "model": "un-modele",
     "tool_call_id": "call-abc",
     "name": "--- **Bilan** — je poursuis, prochaine étape : vérifier.",
     "arguments": "{}",
 }
+_EXECUTION = {"type": "tool.execution", "object": "entry", "id": "e-8",
+              "created_at": "2026-08-27T20:59:00Z", "model": "un-modele",
+              "name": "demo_lookup", "arguments": "{}",
+              "info": {"resultat": "trois lignes"}}
+_CHAMPS_SERVEUR = ("id", "created_at", "completed_at", "agent_id", "model")
 
 
 def _reponse_avec_appel_renvoye():
-    return {"outputs": [{"type": "tool.execution", "name": "demo_lookup",
-                         "arguments": "{}", "id": "e-8"},
-                        dict(_CALL_BIDON)],
+    return {"outputs": [dict(_EXECUTION), dict(_CALL_BIDON)],
             "usage": {"prompt_tokens": 1000, "completion_tokens": 100}}
 
 
@@ -320,8 +325,13 @@ def test_une_relance_rejoue_le_fil_avec_un_function_result(monkeypatch):
     entrees = corps[1]["inputs"]
     assert entrees[0] == {"object": "entry", "type": "message.input",
                           "role": "user", "content": "vas-y"}
-    assert entrees[1]["type"] == "tool.execution"
-    assert entrees[2] == _CALL_BIDON, "les outputs repartent VERBATIM"
+    assert entrees[1] == {"object": "entry", "type": "tool.execution",
+                          "name": "demo_lookup", "arguments": "{}",
+                          "info": {"resultat": "trois lignes"}}, \
+        "ce que l'outil a rendu (`info`) repart : sans lui le fil refait le travail"
+    assert entrees[2] == {"object": "entry", "type": "function.call",
+                          "tool_call_id": "call-abc", "name": _CALL_BIDON["name"],
+                          "arguments": "{}"}, "le fond de l'appel, sans les champs serveur"
     assert entrees[-1] == {"object": "entry", "type": "function.result",
                            "tool_call_id": "call-abc",
                            "result": C._CONSIGNE_APPEL_RENVOYE}
@@ -412,3 +422,47 @@ def test_le_faux_depart_conserve_les_entrees_brutes(monkeypatch, tmp_path):
     W._conserver_faux_depart({"id": 7}, {"procedure": "demo"}, res)
     trace = json.loads((depot / "7.json").read_text(encoding="utf-8"))
     assert trace["raw_outputs"] == [_CALL_BIDON]
+
+
+def test_aucune_entree_renvoyee_ne_porte_de_champ_serveur(monkeypatch):
+    """« Input entries send by the user can't specify ids » — 422 au premier cas
+    réel : `id`, `created_at`, `completed_at`, `agent_id` et `model` sont posés
+    par le serveur et refusés d'un client. Le `tool_call_id`, lui, n'en est pas
+    un : c'est la clé que cite la réponse à l'appel."""
+    _env(monkeypatch)
+    monkeypatch.setenv("OTO_RUNNER_RELANCES_MAX", "1")
+    fin = {"outputs": [{"type": "message.output", "content": "ok"}],
+           "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    corps = _suite(monkeypatch, [_reponse_avec_appel_renvoye(), fin])
+    C.run_once(instructions="p", inputs="i", tools=())
+    entrees = corps[1]["inputs"]
+    for entree in entrees:
+        assert not [c for c in _CHAMPS_SERVEUR if c in entree], entree
+    appel = next(e for e in entrees if e["type"] == "function.call")
+    resultat = next(e for e in entrees if e["type"] == "function.result")
+    assert appel["tool_call_id"] == resultat["tool_call_id"] == "call-abc"
+
+
+def test_une_entree_de_type_inconnu_leve(monkeypatch):
+    """Renvoyer un type qu'on ne sait pas dépouiller, c'est un 422 opaque à
+    l'arrivée : on lève ici, en nommant le type."""
+    _env(monkeypatch)
+    monkeypatch.setenv("OTO_RUNNER_RELANCES_MAX", "1")
+    exotique = {"outputs": [{"type": "tool.autre.chose", "id": "e-1"},
+                            dict(_CALL_BIDON)],
+                "usage": {}}
+    _suite(monkeypatch, [exotique])
+    with pytest.raises(RuntimeError, match="tool.autre.chose"):
+        C.run_once(instructions="p", inputs="i", tools=())
+
+
+def test_le_message_de_lordre_initial_ne_porte_que_son_fond(monkeypatch):
+    """L'entrée initiale est FABRIQUÉE ici : elle passe par le même
+    dépouillement que les autres — une seule règle, pas deux chemins."""
+    _env(monkeypatch)
+    monkeypatch.setenv("OTO_RUNNER_RELANCES_MAX", "1")
+    fin = {"outputs": [{"type": "message.output", "content": "ok"}], "usage": {}}
+    corps = _suite(monkeypatch, [_reponse_avec_appel_renvoye(), fin])
+    C.run_once(instructions="p", inputs="vas-y", tools=())
+    assert corps[1]["inputs"][0] == {"object": "entry", "type": "message.input",
+                                     "role": "user", "content": "vas-y"}
