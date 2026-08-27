@@ -54,6 +54,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from typing import Optional
 
@@ -149,25 +150,41 @@ def _lister_modeles() -> list:
     return (r.json() or {}).get("data") or []
 
 
+def _rang(mid: str) -> int:
+    """Le millésime d'un id (`mistral-large-2512` → 2512), -1 s'il n'en a pas."""
+    m = re.search(r"-(\d{4})$", mid)
+    return int(m.group(1)) if m else -1
+
+
 def _version_concrete(nom: str, data: list) -> Optional[str]:
     """`mistral-large-latest` → `mistral-large-2512`.
 
-    Le catalogue porte les DEUX formes, et l'entrée d'un alias porte des
-    `aliases` comme les autres : c'est donc l'ENSEMBLE des noms cités en alias
-    qui dit lesquels flottent. Un `nom` absent de cet ensemble est déjà une
-    version concrète — il se rend tel quel. Sinon la version est l'entrée qui
-    le cite en alias et dont l'`id` ne flotte pas lui-même.
+    ⚠️ Le catalogue réel est SYMÉTRIQUE — relevé le 27/08 sur `/v1/models` :
+    `{"id": "mistral-large-2512", "aliases": ["mistral-large-latest"]}` ET
+    `{"id": "mistral-large-latest", "aliases": ["mistral-large-2512"]}`. Une
+    règle qui déduit « ce nom flotte » du seul fait qu'il est CITÉ en alias
+    fait donc flotter la version concrète elle-même, et ne laisse aucun
+    candidat (vécu en prod : « introuvable au catalogue (56 modèles) »). Ce qui
+    distingue les deux formes n'est pas la citation, c'est le SUFFIXE `-latest`.
 
-    Un nom que le catalogue ne connaît nulle part ne se devine pas : None."""
-    flottants = {a for e in data for a in ((e or {}).get("aliases") or [])}
-    ids = {(e or {}).get("id") for e in data}
-    if nom not in flottants:
-        return nom if nom in ids else None
-    for e in data:
-        eid = (e or {}).get("id")
-        if eid and eid not in flottants and nom in ((e or {}).get("aliases") or []):
-            return eid
-    return None
+    Candidat = un `id` ≠ `nom` qui cite `nom` en alias, ou que `nom` cite en
+    alias ; les `-latest` sont écartés. Aucun candidat et `nom` ne finit pas par
+    `-latest` ⟹ `nom` est déjà concret. Plusieurs candidats (un même alias a
+    connu plusieurs millésimes) ⟹ le millésime le plus grand, journalisé."""
+    cites = {a for e in data
+             if (e or {}).get("id") == nom
+             for a in ((e or {}).get("aliases") or [])}
+    candidats = sorted({
+        eid for e in data
+        if (eid := (e or {}).get("id"))
+        and eid != nom and not eid.endswith("-latest")
+        and (nom in ((e or {}).get("aliases") or []) or eid in cites)})
+    if not candidats:
+        return None if nom.endswith("-latest") else nom
+    if len(candidats) > 1:
+        logger.info("alias %s : %s millésimes candidats (%s) — retenu le plus "
+                    "récent", nom, len(candidats), ", ".join(candidats))
+    return max(candidats, key=lambda m: (_rang(m), m))
 
 
 def modele_resolu(nom: str) -> Optional[str]:

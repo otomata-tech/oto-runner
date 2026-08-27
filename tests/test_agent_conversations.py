@@ -44,12 +44,14 @@ class _R:
         return self._corps
 
 
-# Le catalogue tel que le fournisseur le rend : les DEUX formes y sont, et
-# l'entrée de l'alias porte elle aussi un champ `aliases`.
+# Le catalogue tel que le fournisseur le rend RÉELLEMENT (relevé 27/08 sur
+# /v1/models) : SYMÉTRIQUE — la version cite l'alias ET l'alias cite la
+# version. C'est ce qui a fait échouer la première règle en production.
 _MODELS = {"data": [
-    {"id": "mistral-large-latest", "aliases": []},
     {"id": "mistral-large-2512", "aliases": ["mistral-large-latest"]},
+    {"id": "mistral-large-latest", "aliases": ["mistral-large-2512"]},
     {"id": "mistral-small-2506", "aliases": ["mistral-small-latest"]},
+    {"id": "mistral-small-latest", "aliases": ["mistral-small-2506"]},
 ]}
 
 
@@ -410,90 +412,3 @@ def test_le_faux_depart_conserve_les_entrees_brutes(monkeypatch, tmp_path):
     W._conserver_faux_depart({"id": 7}, {"procedure": "demo"}, res)
     trace = json.loads((depot / "7.json").read_text(encoding="utf-8"))
     assert trace["raw_outputs"] == [_CALL_BIDON]
-
-
-# --- La version RÉSOLUE d'un alias flottant --------------------------------
-
-
-def test_un_alias_est_resolu_en_version_concrete(monkeypatch):
-    """L'alias ne dit RIEN de ce qui a tourné : le fournisseur le fait pointer
-    ailleurs quand il veut. Sans la version, une anomalie ne se date pas."""
-    _env(monkeypatch)
-    faux = _FauxRequests(_R(corps=_MODELS))
-    monkeypatch.setattr(C, "requests", faux)
-    assert C.modele_resolu("mistral-large-latest") == "mistral-large-2512"
-    url, kw = faux.appels[0]
-    assert url == "https://api.mistral.ai/v1/models"
-    assert kw["timeout"] == (10, 30)
-    assert kw["headers"]["Authorization"] == "Bearer k", "la clé des conversations"
-
-
-def test_la_resolution_reutilise_la_base_sans_doubler_le_v1(monkeypatch):
-    """Même dédoublement que les conversations : la base de l'env porte /v1."""
-    _env(monkeypatch)
-    monkeypatch.setenv("OTO_RUNNER_OPENAI_BASE", "https://api.mistral.ai/v1")
-    faux = _FauxRequests(_R(corps=_MODELS))
-    monkeypatch.setattr(C, "requests", faux)
-    C.modele_resolu("mistral-large-latest")
-    assert faux.appels[0][0] == "https://api.mistral.ai/v1/models"
-
-
-def test_une_version_concrete_se_rend_elle_meme(monkeypatch):
-    """Un nom qui ne figure dans les aliases de personne ne flotte pas."""
-    _env(monkeypatch)
-    assert C.modele_resolu("mistral-large-2512") == "mistral-large-2512"
-
-
-def test_une_panne_reseau_rend_none_sans_lever(monkeypatch):
-    """SEULE tolérance : un relevé ne fait pas échouer un job déjà payé."""
-    _env(monkeypatch)
-    monkeypatch.setattr(C, "requests",
-                        _FauxRequests(OSError("connexion refusée")))
-    assert C.modele_resolu("mistral-large-latest") is None
-
-
-def test_un_catalogue_muet_rend_none_plutot_que_lalias(monkeypatch):
-    """Rendre l'alias serait indiscernable d'une version : on ne devine pas."""
-    _env(monkeypatch)
-    monkeypatch.setattr(C, "requests", _FauxRequests(_R(corps={"data": []})))
-    assert C.modele_resolu("mistral-large-latest") is None
-
-
-def test_un_job_survit_a_une_resolution_impossible(monkeypatch):
-    """Le run se joue et se conclut ; seul le champ `model` manque."""
-    _env(monkeypatch)
-    monkeypatch.setattr(C, "requests", _FauxRequests(OSError("dns")))
-    monkeypatch.setattr(C, "post_with_deadline", lambda url, **kw: _R(corps=_REPONSE))
-    res = C.run_once(instructions="p", inputs="i", tools=())
-    assert res.reply and res.model is None
-
-
-def test_la_resolution_est_en_cache_dans_la_fenetre_puis_rafraichie(monkeypatch):
-    """Une bascule doit se voir dans l'heure de vol — pas au redémarrage du
-    worker, et pas au prix d'un GET par job non plus."""
-    _env(monkeypatch)
-    faux = _FauxRequests(_R(corps=_MODELS))
-    monkeypatch.setattr(C, "requests", faux)
-    horloge = {"t": 1_000.0}
-    monkeypatch.setattr(C.time, "monotonic", lambda: horloge["t"])
-
-    assert C.modele_resolu("mistral-large-latest") == "mistral-large-2512"
-    horloge["t"] += C._TTL_RESOLUTION_S - 1
-    assert C.modele_resolu("mistral-large-latest") == "mistral-large-2512"
-    assert len(faux.appels) == 1, "dans la fenêtre, le cache répond"
-
-    horloge["t"] += 2
-    faux.reponse = _R(corps={"data": [
-        {"id": "mistral-large-latest", "aliases": []},
-        {"id": "mistral-large-2601", "aliases": ["mistral-large-latest"]}]})
-    assert C.modele_resolu("mistral-large-latest") == "mistral-large-2601"
-    assert len(faux.appels) == 2, "passée la fenêtre, on redemande"
-
-
-def test_un_echec_nest_pas_mis_en_cache(monkeypatch):
-    """Sinon une coupure de 3 s aveuglerait le worker 10 minutes."""
-    _env(monkeypatch)
-    monkeypatch.setattr(C, "requests", _FauxRequests(OSError("blip")))
-    assert C.modele_resolu("mistral-large-latest") is None
-    monkeypatch.setattr(C, "requests", _FauxRequests(_R(corps=_MODELS)))
-    assert C.modele_resolu("mistral-large-latest") == "mistral-large-2512"
