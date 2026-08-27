@@ -271,11 +271,15 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     faux_depart = claims > 0 and writes == 0
     if faux_depart:
         _conserver_faux_depart(job, p, res)
+    # `model` = la version CONCRÈTE derrière l'alias configuré, relevée à
+    # l'appel. Un alias flotte : sans ce champ, une anomalie de campagne ne se
+    # date pas — on ne sait pas quels jobs ont tourné avant la bascule et
+    # lesquels après. None quand le provider ne sait pas la résoudre.
     backend.complete(job["id"], ok=True, run_id=run_id,
                      result={"usage_tokens": jetons, "stopped": res.stopped,
                              "steps": len(res.steps), "tool_counts": compte,
                              "claims": claims, "writes": writes,
-                             "faux_depart": faux_depart})
+                             "faux_depart": faux_depart, "model": res.model})
     logger.info("job %s : %s (%s)", job["id"], outcome, note)
 
 
@@ -297,8 +301,13 @@ def main() -> None:
     # tout le bail avant de revenir au pot. 1800 s doublait cette latence pour
     # rien.
     lease_s = 960 if getattr(provider, "ONE_SHOT", False) else _LEASE_S
-    logger.info("worker armé — file de %s · provider %s · modèle %s",
-                backend.base, provider.__name__.rsplit('_', 1)[-1], provider.model())
+    # L'alias configuré ET ce qu'il résout : deux workers lancés de part et
+    # d'autre d'une bascule le disent au journal, sans qu'on ait à le deviner.
+    nom_modele = provider.model()
+    resolu = getattr(provider, "modele_resolu", lambda _n: None)(nom_modele)
+    logger.info("worker armé — file de %s · provider %s · modèle %s%s",
+                backend.base, provider.__name__.rsplit('_', 1)[-1], nom_modele,
+                f" (= {resolu})" if resolu and resolu != nom_modele else "")
     while True:
         try:
             job = backend.claim(lease_seconds=lease_s)

@@ -3,8 +3,9 @@
 Ce que le banc fige : le PARSE des outputs (le bilan de surveillance en dérive —
 usage, pas, tool_counts), les rejeux transitoires explicites (le SDK ne rejoue
 pas, et on ne l'utilise pas : son timeout est troué — basesdk.py:227, 20 h de
-gel sur la boucle locale), la conformité `store=False`, et le chemin worker
-complet (fil à deux tours, bilan déclaré). L'essai réel des 20 fiches valide
+gel sur la boucle locale), la conformité `store=False`, la RÉSOLUTION de
+l'alias de modèle en version concrète, et le chemin worker complet (fil à deux
+tours, bilan déclaré). L'essai réel des 20 fiches valide
 contre le service ce que le banc ne peut pas savoir.
 """
 from __future__ import annotations
@@ -43,9 +44,45 @@ class _R:
         return self._corps
 
 
+# Le catalogue tel que le fournisseur le rend : les DEUX formes y sont, et
+# l'entrée de l'alias porte elle aussi un champ `aliases`.
+_MODELS = {"data": [
+    {"id": "mistral-large-latest", "aliases": []},
+    {"id": "mistral-large-2512", "aliases": ["mistral-large-latest"]},
+    {"id": "mistral-small-2506", "aliases": ["mistral-small-latest"]},
+]}
+
+
+class _FauxRequests:
+    """Le `requests` du module, simulé. La résolution de version est le SEUL
+    appel qui y passe — les conversations vont par `post_with_deadline`."""
+
+    def __init__(self, reponse):
+        self.reponse = reponse
+        self.appels = []
+
+    def get(self, url, **kw):
+        self.appels.append((url, kw))
+        if isinstance(self.reponse, Exception):
+            raise self.reponse
+        return self.reponse
+
+
+@pytest.fixture(autouse=True)
+def _catalogue(monkeypatch):
+    """AUCUN test ne sort : `run_once` résout l'alias au début de chaque job.
+    Le cache est un état de MODULE — il se vide entre deux tests, sinon le
+    premier décide pour les suivants."""
+    C._resolutions.clear()
+    monkeypatch.setattr(C, "requests", _FauxRequests(_R(corps=_MODELS)))
+    yield
+    C._resolutions.clear()
+
+
 def _env(monkeypatch):
     monkeypatch.setenv("OTO_RUNNER_OPENAI_API_KEY", "k")
     monkeypatch.setenv("OTO_RUNNER_CONNECTOR_ID", "conn-1")
+    monkeypatch.delenv("OTO_RUNNER_MODEL", raising=False)   # DEFAULT_MODEL, l'alias
 
 
 def test_le_bilan_de_surveillance_derive_des_outputs(monkeypatch):
@@ -67,6 +104,8 @@ def test_le_bilan_de_surveillance_derive_des_outputs(monkeypatch):
         "data_claim_next", "serper_search", "serper_search",
         "data_write", "data_release"]
     assert vu["url"].endswith("/v1/conversations")
+    assert vu["corps"]["model"] == C.DEFAULT_MODEL, "l'ALIAS est ce qu'on appelle"
+    assert res.model == "mistral-large-2512", "la VERSION est ce qu'on enregistre"
 
 
 def test_store_false_est_toujours_envoye(monkeypatch):
@@ -128,6 +167,7 @@ def test_le_worker_one_shot_appose_ordre_et_synthese(monkeypatch):
             from oto_runner.agent_runtime import AgentResult, AgentStep
             assert "la procédure" in instructions
             return AgentResult(reply="fait", stopped="end_turn",
+                               model="mistral-large-2512",
                                usage={"input_tokens": 20000, "output_tokens": 500},
                                steps=[AgentStep(tool="data_write", ok=True,
                                                 duration_ms=0)])
@@ -151,6 +191,8 @@ def test_le_worker_one_shot_appose_ordre_et_synthese(monkeypatch):
     result = next(a for a in b.appels if a[0] == "complete_result")[1]
     assert result["tool_counts"] == {"data_write": 1}
     assert result["usage_tokens"] == 20500
+    assert result["model"] == "mistral-large-2512", \
+        "le job porte la version, pas l'alias : une bascule se date"
 
 
 def test_une_base_openai_avec_v1_ne_double_pas_le_chemin(monkeypatch):
@@ -368,3 +410,90 @@ def test_le_faux_depart_conserve_les_entrees_brutes(monkeypatch, tmp_path):
     W._conserver_faux_depart({"id": 7}, {"procedure": "demo"}, res)
     trace = json.loads((depot / "7.json").read_text(encoding="utf-8"))
     assert trace["raw_outputs"] == [_CALL_BIDON]
+
+
+# --- La version RÉSOLUE d'un alias flottant --------------------------------
+
+
+def test_un_alias_est_resolu_en_version_concrete(monkeypatch):
+    """L'alias ne dit RIEN de ce qui a tourné : le fournisseur le fait pointer
+    ailleurs quand il veut. Sans la version, une anomalie ne se date pas."""
+    _env(monkeypatch)
+    faux = _FauxRequests(_R(corps=_MODELS))
+    monkeypatch.setattr(C, "requests", faux)
+    assert C.modele_resolu("mistral-large-latest") == "mistral-large-2512"
+    url, kw = faux.appels[0]
+    assert url == "https://api.mistral.ai/v1/models"
+    assert kw["timeout"] == (10, 30)
+    assert kw["headers"]["Authorization"] == "Bearer k", "la clé des conversations"
+
+
+def test_la_resolution_reutilise_la_base_sans_doubler_le_v1(monkeypatch):
+    """Même dédoublement que les conversations : la base de l'env porte /v1."""
+    _env(monkeypatch)
+    monkeypatch.setenv("OTO_RUNNER_OPENAI_BASE", "https://api.mistral.ai/v1")
+    faux = _FauxRequests(_R(corps=_MODELS))
+    monkeypatch.setattr(C, "requests", faux)
+    C.modele_resolu("mistral-large-latest")
+    assert faux.appels[0][0] == "https://api.mistral.ai/v1/models"
+
+
+def test_une_version_concrete_se_rend_elle_meme(monkeypatch):
+    """Un nom qui ne figure dans les aliases de personne ne flotte pas."""
+    _env(monkeypatch)
+    assert C.modele_resolu("mistral-large-2512") == "mistral-large-2512"
+
+
+def test_une_panne_reseau_rend_none_sans_lever(monkeypatch):
+    """SEULE tolérance : un relevé ne fait pas échouer un job déjà payé."""
+    _env(monkeypatch)
+    monkeypatch.setattr(C, "requests",
+                        _FauxRequests(OSError("connexion refusée")))
+    assert C.modele_resolu("mistral-large-latest") is None
+
+
+def test_un_catalogue_muet_rend_none_plutot_que_lalias(monkeypatch):
+    """Rendre l'alias serait indiscernable d'une version : on ne devine pas."""
+    _env(monkeypatch)
+    monkeypatch.setattr(C, "requests", _FauxRequests(_R(corps={"data": []})))
+    assert C.modele_resolu("mistral-large-latest") is None
+
+
+def test_un_job_survit_a_une_resolution_impossible(monkeypatch):
+    """Le run se joue et se conclut ; seul le champ `model` manque."""
+    _env(monkeypatch)
+    monkeypatch.setattr(C, "requests", _FauxRequests(OSError("dns")))
+    monkeypatch.setattr(C, "post_with_deadline", lambda url, **kw: _R(corps=_REPONSE))
+    res = C.run_once(instructions="p", inputs="i", tools=())
+    assert res.reply and res.model is None
+
+
+def test_la_resolution_est_en_cache_dans_la_fenetre_puis_rafraichie(monkeypatch):
+    """Une bascule doit se voir dans l'heure de vol — pas au redémarrage du
+    worker, et pas au prix d'un GET par job non plus."""
+    _env(monkeypatch)
+    faux = _FauxRequests(_R(corps=_MODELS))
+    monkeypatch.setattr(C, "requests", faux)
+    horloge = {"t": 1_000.0}
+    monkeypatch.setattr(C.time, "monotonic", lambda: horloge["t"])
+
+    assert C.modele_resolu("mistral-large-latest") == "mistral-large-2512"
+    horloge["t"] += C._TTL_RESOLUTION_S - 1
+    assert C.modele_resolu("mistral-large-latest") == "mistral-large-2512"
+    assert len(faux.appels) == 1, "dans la fenêtre, le cache répond"
+
+    horloge["t"] += 2
+    faux.reponse = _R(corps={"data": [
+        {"id": "mistral-large-latest", "aliases": []},
+        {"id": "mistral-large-2601", "aliases": ["mistral-large-latest"]}]})
+    assert C.modele_resolu("mistral-large-latest") == "mistral-large-2601"
+    assert len(faux.appels) == 2, "passée la fenêtre, on redemande"
+
+
+def test_un_echec_nest_pas_mis_en_cache(monkeypatch):
+    """Sinon une coupure de 3 s aveuglerait le worker 10 minutes."""
+    _env(monkeypatch)
+    monkeypatch.setattr(C, "requests", _FauxRequests(OSError("blip")))
+    assert C.modele_resolu("mistral-large-latest") is None
+    monkeypatch.setattr(C, "requests", _FauxRequests(_R(corps=_MODELS)))
+    assert C.modele_resolu("mistral-large-latest") == "mistral-large-2512"

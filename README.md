@@ -87,10 +87,19 @@ dépasse `jetons_par_ecriture_max × max(1, écritures)`, la flotte s'arrête. L
 fenêtre ne juge qu'une fois **pleine** : un début de vol n'a pas de verdict.
 
 Chaque job conclu déclare son coût et sa sortie (`usage_tokens`, `tool_counts`,
-`claims`, `writes`, `faux_depart`) : c'est ce que l'ordonnanceur lit, sans jamais
-ouvrir un fil. Le verdict de faux départ (réserver une ligne sans rien écrire)
-appartient au worker, qui a vu les appels — un résultat qui ne le porte pas vient
-d'un worker trop ancien, et la flotte lève plutôt que de le redeviner.
+`claims`, `writes`, `faux_depart`, `model`) : c'est ce que l'ordonnanceur lit,
+sans jamais ouvrir un fil.
+
+`model` porte la **version concrète** derrière l'alias configuré
+(`mistral-large-latest` → `mistral-large-2512`), relevée au moment de l'appel :
+un alias flotte quand le fournisseur le décide, et sans ce champ une anomalie de
+campagne ne se date pas — on ignore quels jobs ont tourné avant la bascule et
+lesquels après. `null` quand le provider ne sait pas la résoudre, ou quand le
+catalogue est injoignable (le relevé ne fait jamais échouer un job).
+
+Le verdict de faux départ (réserver une ligne sans rien écrire) appartient au
+worker, qui a vu les appels — un résultat qui ne le porte pas vient d'un worker
+trop ancien, et la flotte lève plutôt que de le redeviner.
 
 ### Le bilan de la campagne
 

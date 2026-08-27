@@ -91,6 +91,9 @@ class AgentResult:
     raw_outputs: Optional[list] = None   # les entrées BRUTES du fournisseur,
     # quand il en rend (chemin Conversations) — de quoi diagnostiquer un run
     # dont le fil ne garde qu'une synthèse. Les autres providers laissent None.
+    model: Optional[str] = None          # la version CONCRÈTE qui a tourné,
+    # quand le provider sait la résoudre (chemin Conversations) : un alias
+    # flottant ne se date pas après coup. Les autres providers laissent None.
 
 
 # `on_turn(role, content_neutre, provider_raw)` : le point d'ancrage du FIL (R1).

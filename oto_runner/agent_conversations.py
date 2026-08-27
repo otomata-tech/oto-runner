@@ -38,6 +38,16 @@ accepte au choix une chaîne ou une liste d'entrées `InputEntries`, union de
 `FunctionCallEntry`, `ToolExecutionEntry` et `AgentHandoffEntry` : les `outputs`
 reçus y RETOURNENT tels quels, suivis d'une `FunctionResultEntry`
 (`tool_call_id` + `result`, tous deux requis) par appel renvoyé.
+
+## La version RÉSOLUE du modèle
+
+Le modèle est nommé par un ALIAS (`mistral-large-latest`) : le fournisseur le
+fait pointer ailleurs quand il le décide, sans préavis. Une anomalie de
+campagne ne se date alors PAS — on ignore quel modèle a réellement tourné, et
+sur quels jobs. `modele_resolu()` interroge `/v1/models` et rend la version
+concrète derrière l'alias ; `run_once` la pose sur chaque `AgentResult`, et le
+worker la déclare au job. C'est un relevé d'observabilité : il ne fait jamais
+échouer un run que la campagne a payé.
 """
 from __future__ import annotations
 
@@ -46,6 +56,8 @@ import logging
 import os
 import time
 from typing import Optional
+
+import requests
 
 from .agent_runtime import AgentResult, AgentStep
 from .deadline import DeadlineExceeded, post_with_deadline  # noqa: F401 — DeadlineExceeded
@@ -111,6 +123,77 @@ def relances_max() -> int:
 
 _TRANSITOIRE = (429, 500, 502, 503, 504)
 
+# La résolution d'alias est mise en cache AVEC UNE DURÉE : une bascule doit se
+# voir dans l'heure de vol, pas au prochain redémarrage du worker.
+_TTL_RESOLUTION_S = 600
+_resolutions: dict = {}      # nom d'alias → (instant monotone, version concrète)
+
+
+def base_api() -> str:
+    """La base du service, SANS `/v1`.
+
+    La base openai-compat de l'env de la box le porte déjà : la réutiliser
+    telle quelle donnait `/v1/v1/conversations` → 404 « no Route matched »
+    (vécu au premier appel réel de l'essai)."""
+    base = (os.environ.get(_ENV_BASE) or _DEFAULT_BASE).rstrip("/")
+    return base[:-3].rstrip("/") if base.endswith("/v1") else base
+
+
+def _lister_modeles() -> list:
+    """Le catalogue du fournisseur — `data`, une entrée par modèle."""
+    r = requests.get(f"{base_api()}/v1/models",
+                     headers={"Authorization": f"Bearer {resolve_key()}"},
+                     timeout=(10, 30))
+    if r.status_code >= 400:
+        raise RuntimeError(f"models → {r.status_code} : {r.text[:200]}")
+    return (r.json() or {}).get("data") or []
+
+
+def _version_concrete(nom: str, data: list) -> Optional[str]:
+    """`mistral-large-latest` → `mistral-large-2512`.
+
+    Le catalogue porte les DEUX formes, et l'entrée d'un alias porte des
+    `aliases` comme les autres : c'est donc l'ENSEMBLE des noms cités en alias
+    qui dit lesquels flottent. Un `nom` absent de cet ensemble est déjà une
+    version concrète — il se rend tel quel. Sinon la version est l'entrée qui
+    le cite en alias et dont l'`id` ne flotte pas lui-même.
+
+    Un nom que le catalogue ne connaît nulle part ne se devine pas : None."""
+    flottants = {a for e in data for a in ((e or {}).get("aliases") or [])}
+    ids = {(e or {}).get("id") for e in data}
+    if nom not in flottants:
+        return nom if nom in ids else None
+    for e in data:
+        eid = (e or {}).get("id")
+        if eid and eid not in flottants and nom in ((e or {}).get("aliases") or []):
+            return eid
+    return None
+
+
+def modele_resolu(nom: str) -> Optional[str]:
+    """La version concrète derrière `nom`, ou None si elle ne s'établit pas.
+
+    SEULE tolérance de ce chemin : une panne réseau (ou un catalogue muet) rend
+    None, journalisé en warning — un relevé d'observabilité ne fait jamais
+    échouer un job que la campagne a déjà payé. L'échec n'est PAS mis en cache :
+    le job suivant retente."""
+    fige = _resolutions.get(nom)
+    if fige is not None and time.monotonic() - fige[0] < _TTL_RESOLUTION_S:
+        return fige[1]
+    try:
+        data = _lister_modeles()
+    except Exception as e:  # noqa: BLE001 — cf. docstring
+        logger.warning("version de %s non résolue (%s) : le job ne la portera pas",
+                       nom, e)
+        return None
+    resolu = _version_concrete(nom, data)
+    if resolu is None:
+        logger.warning("version de %s introuvable au catalogue (%s modèles) : "
+                       "le job ne la portera pas", nom, len(data))
+        return None
+    _resolutions[nom] = (time.monotonic(), resolu)
+    return resolu
+
 
 def run_once(*, instructions: str, inputs: str, tools,
              api_key: Optional[str] = None) -> AgentResult:
@@ -122,9 +205,13 @@ def run_once(*, instructions: str, inputs: str, tools,
 
     Un fil qui rend un `function.call` au client est relancé au plus
     `OTO_RUNNER_RELANCES_MAX` fois ; les passes forment UN bilan (pas
-    concaténés, jetons additionnés)."""
+    concaténés, jetons additionnés).
+
+    Le bilan porte la version CONCRÈTE que l'alias résolvait au moment de
+    l'appel : sans elle, une bascule d'alias ne se date pas après coup."""
+    nom = model()
     corps = {
-        "model": model(),
+        "model": nom,
         "inputs": inputs,
         "instructions": instructions,
         "tools": [{"type": "connector", "connector_id": connector_id(),
@@ -134,24 +221,22 @@ def run_once(*, instructions: str, inputs: str, tools,
     }
     entetes = {"Authorization": f"Bearer {api_key or resolve_key()}",
                "Content-Type": "application/json"}
-    base = (os.environ.get(_ENV_BASE) or _DEFAULT_BASE).rstrip("/")
-    if base.endswith("/v1"):
-        # La base openai-compat porte déjà /v1 (l'env existante de la box) : la
-        # réutiliser telle quelle donnait /v1/v1/conversations → 404 « no Route
-        # matched » (vécu au premier appel réel de l'essai).
-        base = base[:-3]
-    url = f"{base}/v1/conversations"
+    url = f"{base_api()}/v1/conversations"
     maxi = relances_max()
+    # Relevé AVANT le premier POST : c'est la version en vigueur au moment de
+    # l'appel qu'on enregistre, pas celle d'après un run d'un quart d'heure.
+    resolu = modele_resolu(nom)
     cumul: Optional[AgentResult] = None
     for relance in range(maxi + 1):
         d = _poster(url, corps, entetes)
         cumul = _cumuler(cumul, _parse(d, tools))
         renvoyes = _appels_renvoyes(d)
         if not renvoyes or relance == maxi:
-            return cumul
+            break
         logger.info("conversation relancée (%s/%s) : function.call renvoyé « %s »",
                     relance + 1, maxi, str(renvoyes[0].get("name") or "?")[:60])
         corps = dict(corps, inputs=_entrees_de_relance(inputs, d, renvoyes))
+    cumul.model = resolu
     return cumul
 
 
