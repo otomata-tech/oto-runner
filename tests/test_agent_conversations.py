@@ -325,11 +325,12 @@ def test_une_relance_rejoue_le_fil_avec_un_function_result(monkeypatch):
     entrees = corps[1]["inputs"]
     assert entrees[0] == {"object": "entry", "type": "message.input",
                           "role": "user", "content": "vas-y"}
-    assert entrees[1] == {"object": "entry", "type": "tool.execution",
-                          "name": "demo_lookup", "arguments": "{}",
-                          "info": {"resultat": "trois lignes"}}, \
-        "ce que l'outil a rendu (`info`) repart : sans lui le fil refait le travail"
-    assert entrees[2] == {"object": "entry", "type": "function.call",
+    assert entrees[1]["type"] == "function.call" and entrees[1]["name"] == "demo_lookup"
+    assert entrees[2] == {"object": "entry", "type": "function.result",
+                          "tool_call_id": entrees[1]["tool_call_id"],
+                          "result": '{"resultat":"trois lignes"}'}, \
+        "ce que l'outil a rendu repart : sans lui le fil refait le travail"
+    assert entrees[3] == {"object": "entry", "type": "function.call",
                           "tool_call_id": "call-abc", "name": _CALL_BIDON["name"],
                           "arguments": "{}"}, "le fond de l'appel, sans les champs serveur"
     assert entrees[-1] == {"object": "entry", "type": "function.result",
@@ -438,9 +439,8 @@ def test_aucune_entree_renvoyee_ne_porte_de_champ_serveur(monkeypatch):
     entrees = corps[1]["inputs"]
     for entree in entrees:
         assert not [c for c in _CHAMPS_SERVEUR if c in entree], entree
-    appel = next(e for e in entrees if e["type"] == "function.call")
-    resultat = next(e for e in entrees if e["type"] == "function.result")
-    assert appel["tool_call_id"] == resultat["tool_call_id"] == "call-abc"
+    appel = next(e for e in entrees if e.get("name") == _CALL_BIDON["name"])
+    assert appel["tool_call_id"] == entrees[-1]["tool_call_id"] == "call-abc"
 
 
 def test_une_entree_de_type_inconnu_leve(monkeypatch):
@@ -466,3 +466,67 @@ def test_le_message_de_lordre_initial_ne_porte_que_son_fond(monkeypatch):
     C.run_once(instructions="p", inputs="vas-y", tools=())
     assert corps[1]["inputs"][0] == {"object": "entry", "type": "message.input",
                                      "role": "user", "content": "vas-y"}
+
+
+def test_une_execution_doutil_est_redite_en_paire_appel_resultat(monkeypatch):
+    """Sondé le 27/08 : le service REFUSE un `tool.execution` en entrée (422
+    « Input should be 'message.input' »), avec ou sans `info`, mais accepte un
+    `function.call` suivi de son `function.result`. Le travail déjà payé reste
+    donc dans le fil, sous la seule forme qui passe."""
+    _env(monkeypatch)
+    monkeypatch.setenv("OTO_RUNNER_RELANCES_MAX", "1")
+    debut = {"outputs": [dict(_EXECUTION),
+                         dict(_EXECUTION, name="demo_write",
+                              info={"ecrit": 1}, id="e-7"),
+                         dict(_CALL_BIDON)],
+             "usage": {"prompt_tokens": 10, "completion_tokens": 1}}
+    fin = {"outputs": [{"type": "message.output", "content": "ok"}], "usage": {}}
+    corps = _suite(monkeypatch, [debut, fin])
+    C.run_once(instructions="p", inputs="vas-y", tools=())
+
+    entrees = corps[1]["inputs"]
+    assert [e["type"] for e in entrees] == [
+        "message.input", "function.call", "function.result",
+        "function.call", "function.result",
+        "function.call", "function.result"]
+    assert not [e for e in entrees if e["type"] == "tool.execution"], \
+        "aucune exécution ne repart telle quelle"
+    assert [e.get("name") for e in entrees if e["type"] == "function.call"] == [
+        "demo_lookup", "demo_write", _CALL_BIDON["name"]]
+
+    synthetises = [entrees[1]["tool_call_id"], entrees[3]["tool_call_id"]]
+    assert all(len(t) == 9 and t.isalnum() for t in synthetises), synthetises
+    assert len(set(synthetises)) == 2, "un identifiant par appel, jamais partagé"
+    assert entrees[2]["tool_call_id"] == entrees[1]["tool_call_id"]
+    assert entrees[4] == {"object": "entry", "type": "function.result",
+                          "tool_call_id": entrees[3]["tool_call_id"],
+                          "result": '{"ecrit":1}'}
+    assert entrees[6] == {"object": "entry", "type": "function.result",
+                          "tool_call_id": "call-abc",
+                          "result": C._CONSIGNE_APPEL_RENVOYE}, \
+        "l'appel RENDU garde son identifiant : c'est lui que cite sa réponse"
+
+
+def test_une_execution_sans_info_le_dit(monkeypatch):
+    """Le fournisseur ne conserve pas toujours ce que l'outil a rendu : on le
+    DIT au modèle, plutôt que de lui présenter un résultat vide qu'il lira
+    comme « l'outil n'a rien trouvé »."""
+    _env(monkeypatch)
+    monkeypatch.setenv("OTO_RUNNER_RELANCES_MAX", "1")
+    muette = dict(_EXECUTION)
+    muette.pop("info")
+    debut = {"outputs": [muette, dict(_CALL_BIDON)], "usage": {}}
+    fin = {"outputs": [{"type": "message.output", "content": "ok"}], "usage": {}}
+    corps = _suite(monkeypatch, [debut, fin])
+    C.run_once(instructions="p", inputs="i", tools=())
+    assert corps[1]["inputs"][2]["result"] == C._RESULTAT_NON_CONSERVE
+
+
+def test_une_execution_sans_name_leve(monkeypatch):
+    _env(monkeypatch)
+    monkeypatch.setenv("OTO_RUNNER_RELANCES_MAX", "1")
+    debut = {"outputs": [{"type": "tool.execution", "arguments": "{}"},
+                         dict(_CALL_BIDON)], "usage": {}}
+    _suite(monkeypatch, [debut])
+    with pytest.raises(RuntimeError, match="tool.execution sans name"):
+        C.run_once(instructions="p", inputs="i", tools=())

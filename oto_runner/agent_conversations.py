@@ -40,12 +40,30 @@ derniers types étant précisément ceux que rendent les `outputs`. Ils y
 RETOURNENT donc, suivis d'une `FunctionResultEntry` (`tool_call_id` + `result`,
 tous deux requis) par appel renvoyé.
 
-⚠️ Mais PAS tels quels : une entrée sortante porte des champs POSÉS PAR LE
-SERVEUR — `id`, `created_at`, `completed_at`, `agent_id`, `model` — et l'API les
-REFUSE en entrée : 422 « Input entries send by the user can't specify ids » au
-premier cas réel. Chaque entrée est donc dépouillée sur la liste blanche de son
-type (`_CHAMPS_ENTREE`), qui ne garde que les champs de FOND. `tool_call_id`
-n'en est pas un champ serveur : c'est la clé que cite la réponse, elle reste.
+⚠️ Mais PAS tels quels, et pas tous : les modèles du client Python décrivent
+une union `InputEntries` PLUS LARGE que ce que le service accepte réellement.
+Deux refus successifs en production, puis une SONDE de l'API depuis la box
+(requêtes minuscules, `store=False`, le 27/08) — c'est ce relevé empirique qui
+fait foi, pas les modèles :
+
+- `[message.input]` → 200 ;
+- `[message.input, message.output, message.input]` → 200 ;
+- `[message.input, function.call, function.result]` → 200 — un `name` inconnu
+  du service (`demo_lookup`) passe, avec un `tool_call_id` de 9 alphanumériques ;
+- `[message.input, tool.execution(name, arguments, info), message.input]` →
+  **422** « Input should be 'message.input' » ; **idem sans `info`** ;
+- `[message.input, function.result]` sans son `function.call` → **400**.
+
+D'où les deux règles de construction du fil rejoué. **(1)** Une entrée sortante
+porte des champs POSÉS PAR LE SERVEUR — `id`, `created_at`, `completed_at`,
+`agent_id`, `model` — refusés en entrée (422 « Input entries send by the user
+can't specify ids ») : chaque entrée est dépouillée sur la liste blanche de son
+type (`_CHAMPS_ENTREE`). `tool_call_id` n'en est pas un champ serveur : c'est la
+clé que cite la réponse, elle reste. **(2)** Un `tool.execution` ne se renvoie
+JAMAIS : il se CONVERTIT en la paire que le service accepte — un
+`function.call` portant son nom et ses arguments, sous un `tool_call_id`
+synthétisé, suivi du `function.result` qui porte son `info`. Le travail déjà
+fait reste donc dans le fil, sous la seule forme qui passe.
 
 ## La version RÉSOLUE du modèle
 
@@ -62,7 +80,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
+import string
 import time
 from typing import Optional
 
@@ -95,12 +115,11 @@ _CHAMPS_ENTREE = {
     "message.output": ("object", "type", "role", "content"),
     "function.call": ("object", "type", "tool_call_id", "name", "arguments"),
     "function.result": ("object", "type", "tool_call_id", "result"),
-    # `info` porte ce que l'outil a RENDU : sans lui le fil relancé ne sait plus
-    # ce qu'il a déjà obtenu et refait le travail déjà payé.
-    "tool.execution": ("object", "type", "name", "arguments", "info"),
-    "agent.handoff": ("object", "type", "previous_agent_id", "previous_agent_name",
-                      "next_agent_id", "next_agent_name"),
 }
+
+_ALPHABET_APPEL = string.ascii_lowercase + string.digits
+_LONGUEUR_APPEL = 9                  # la forme qu'accepte le service, sondée
+_RESULTAT_NON_CONSERVE = "(résultat non conservé par le fournisseur)"
 
 _CONSIGNE_APPEL_RENVOYE = (
     "Cet outil n'existe pas. Les outils sont exécutés par le connecteur : "
@@ -332,10 +351,48 @@ def _depouiller(entree: dict) -> dict:
     return {c: entree[c] for c in champs if c in entree}
 
 
+def _identifiant_dappel(deja: set) -> str:
+    while True:
+        tid = "".join(random.choices(_ALPHABET_APPEL, k=_LONGUEUR_APPEL))
+        if tid not in deja:
+            deja.add(tid)
+            return tid
+
+
+def _execution_en_paire(sortie: dict, deja: set) -> list:
+    """Une exécution d'outil, dite dans la seule forme que le service accepte
+    d'un client : l'appel, puis son résultat. Un `tool.execution` renvoyé tel
+    quel est refusé (422), et le taire ferait refaire un travail déjà payé."""
+    nom = sortie.get("name")
+    if not nom:
+        raise RuntimeError(
+            "conversations → tool.execution sans name : l'exécution ne peut "
+            "pas être redite au modèle")
+    info = sortie.get("info")
+    tid = _identifiant_dappel(deja)
+    return [
+        {"object": "entry", "type": "function.call", "tool_call_id": tid,
+         "name": nom,
+         # L'appel est de l'HISTOIRE : il a déjà eu lieu, ses arguments ne
+         # rejouent rien. Ce qui compte est le résultat, juste dessous.
+         "arguments": sortie.get("arguments") or "{}"},
+        {"object": "entry", "type": "function.result", "tool_call_id": tid,
+         "result": json.dumps(info, ensure_ascii=False, separators=(",", ":"))
+         if info else _RESULTAT_NON_CONSERVE},
+    ]
+
+
 def _entrees_de_relance(inputs, d: dict, renvoyes: list) -> list:
-    """Le fil rejoué : l'ordre initial, les outputs reçus, puis la réponse à
-    chaque appel rendu — chaque entrée dépouillée de ses champs serveur."""
-    entrees = _entree_initiale(inputs) + list(d.get("outputs") or [])
+    """Le fil rejoué : l'ordre initial, les outputs reçus — exécutions d'outils
+    converties en paires appel/résultat —, puis la réponse à chaque appel rendu.
+    Chaque entrée est dépouillée de ses champs serveur."""
+    deja = {a.get("tool_call_id") for a in renvoyes}
+    entrees = [_depouiller(e) for e in _entree_initiale(inputs)]
+    for sortie in d.get("outputs") or []:
+        if ((sortie or {}).get("type") or "") == "tool.execution":
+            entrees.extend(_execution_en_paire(sortie, deja))
+        else:
+            entrees.append(_depouiller(sortie))
     for appel in renvoyes:
         tid = appel.get("tool_call_id")
         if not tid:
@@ -345,7 +402,7 @@ def _entrees_de_relance(inputs, d: dict, renvoyes: list) -> list:
         entrees.append({"object": "entry", "type": "function.result",
                         "tool_call_id": tid,
                         "result": _CONSIGNE_APPEL_RENVOYE})
-    return [_depouiller(e) for e in entrees]
+    return entrees
 
 
 def _cumuler(cumul: Optional[AgentResult], passe: AgentResult) -> AgentResult:
