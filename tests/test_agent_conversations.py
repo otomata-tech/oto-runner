@@ -9,6 +9,8 @@ contre le service ce que le banc ne peut pas savoir.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import oto_runner.agent_conversations as C
@@ -210,3 +212,159 @@ def test_le_worker_one_shot_impose_lidentite_de_run_et_le_nom_du_tableau(monkeyp
     assert '_run_id: "r-ID"' in vu["inputs"] and 'worker: "r-ID"' in vu["inputs"]
     assert 'namespace: "edition-vivier"' in vu["inputs"]
     assert vu["inputs"].endswith("Vas-y."), "l'ordre de la flotte suit, intact"
+
+
+_CALL_BIDON = {
+    "type": "function.call", "object": "entry", "id": "e-9",
+    "tool_call_id": "call-abc",
+    "name": "--- **Bilan** — je poursuis, prochaine étape : vérifier.",
+    "arguments": "{}",
+}
+
+
+def _reponse_avec_appel_renvoye():
+    return {"outputs": [{"type": "tool.execution", "name": "demo_lookup",
+                         "arguments": "{}", "id": "e-8"},
+                        dict(_CALL_BIDON)],
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 100}}
+
+
+def _suite(monkeypatch, reponses):
+    """Un POST = une réponse de la liste ; les corps envoyés sont conservés."""
+    corps = []
+
+    def post(url, **kw):
+        corps.append(kw["json"])
+        return _R(corps=reponses[len(corps) - 1])
+
+    monkeypatch.setattr(C, "post_with_deadline", post)
+    return corps
+
+
+def test_sans_la_variable_un_appel_renvoye_narrete_quun_seul_post(monkeypatch):
+    """La relance est un cran qu'on arme : variable absente ⟹ le comportement
+    d'avant à l'octet près — un POST, l'appel rendu compté non exécuté."""
+    _env(monkeypatch)
+    monkeypatch.delenv("OTO_RUNNER_RELANCES_MAX", raising=False)
+    corps = _suite(monkeypatch, [_reponse_avec_appel_renvoye()])
+    res = C.run_once(instructions="p", inputs="i", tools=("demo_lookup",))
+    assert len(corps) == 1, "aucune relance"
+    assert corps[0]["inputs"] == "i"
+    assert [(s.tool, s.ok) for s in res.steps][-1][1] is False
+    assert res.steps[-1].error == "function.call non exécuté"
+
+
+def test_une_relance_rejoue_le_fil_avec_un_function_result(monkeypatch):
+    """Le fil rejoué porte l'ordre initial, les outputs REÇUS tels quels, puis
+    la réponse à l'appel rendu — c'est ce qui remet l'agent au travail au lieu
+    de perdre la ligne pour le prix d'un run entier."""
+    _env(monkeypatch)
+    monkeypatch.setenv("OTO_RUNNER_RELANCES_MAX", "2")
+    fin = {"outputs": [{"type": "tool.execution", "name": "demo_write",
+                        "arguments": "{}"},
+                       {"type": "message.output", "content": "fiche écrite"}],
+           "usage": {"prompt_tokens": 500, "completion_tokens": 50}}
+    corps = _suite(monkeypatch, [_reponse_avec_appel_renvoye(), fin])
+    res = C.run_once(instructions="la procédure", inputs="vas-y",
+                     tools=("demo_lookup", "demo_write"))
+
+    assert len(corps) == 2, "un second POST, pas un /restart (store=False)"
+    assert corps[1]["store"] is False
+    assert corps[1]["instructions"] == corps[0]["instructions"]
+    assert corps[1]["tools"] == corps[0]["tools"]
+
+    entrees = corps[1]["inputs"]
+    assert entrees[0] == {"object": "entry", "type": "message.input",
+                          "role": "user", "content": "vas-y"}
+    assert entrees[1]["type"] == "tool.execution"
+    assert entrees[2] == _CALL_BIDON, "les outputs repartent VERBATIM"
+    assert entrees[-1] == {"object": "entry", "type": "function.result",
+                           "tool_call_id": "call-abc",
+                           "result": C._CONSIGNE_APPEL_RENVOYE}
+
+    assert res.usage == {"input_tokens": 1500, "output_tokens": 150}, \
+        "le prix payé est la somme des passes"
+    assert [(s.tool, s.ok) for s in res.steps] == [
+        ("demo_lookup", True), (_CALL_BIDON["name"], False),
+        ("demo_write", True)], "l'appel rendu reste visible au bilan"
+    assert res.reply == "fiche écrite"
+    assert res.raw_outputs == fin["outputs"], "les entrées brutes de la DERNIÈRE passe"
+
+
+def test_le_maximum_borne_les_relances(monkeypatch):
+    """Un fil qui rend un appel à chaque passe s'arrête au plafond : la relance
+    est bornée, jamais une boucle qui re-paie le run indéfiniment."""
+    _env(monkeypatch)
+    monkeypatch.setenv("OTO_RUNNER_RELANCES_MAX", "2")
+    corps = _suite(monkeypatch, [_reponse_avec_appel_renvoye() for _ in range(3)])
+    res = C.run_once(instructions="p", inputs="i", tools=("demo_lookup",))
+    assert len(corps) == 3, "1 passe + 2 relances, puis stop"
+    assert res.usage == {"input_tokens": 3000, "output_tokens": 300}
+    assert len(res.steps) == 6
+    assert corps[2]["inputs"][-1]["type"] == "function.result"
+
+
+def test_une_relance_repond_a_chaque_appel_de_la_traine(monkeypatch):
+    """Le fournisseur peut en rendre plusieurs d'affilée : chacun reçoit sa
+    réponse, sur SON tool_call_id — un appel sans réponse bloque le fil."""
+    _env(monkeypatch)
+    monkeypatch.setenv("OTO_RUNNER_RELANCES_MAX", "1")
+    second = dict(_CALL_BIDON, tool_call_id="call-def", id="e-10")
+    debut = {"outputs": [dict(_CALL_BIDON), second],
+             "usage": {"prompt_tokens": 10, "completion_tokens": 1}}
+    fin = {"outputs": [{"type": "message.output", "content": "ok"}],
+           "usage": {"prompt_tokens": 10, "completion_tokens": 1}}
+    corps = _suite(monkeypatch, [debut, fin])
+    C.run_once(instructions="p", inputs="i", tools=())
+    resultats = [e for e in corps[1]["inputs"] if e["type"] == "function.result"]
+    assert [e["tool_call_id"] for e in resultats] == ["call-abc", "call-def"]
+
+
+def test_un_appel_sans_tool_call_id_leve(monkeypatch):
+    """Répondre à un appel exige son identifiant : une réponse qui n'en porte
+    pas est mal formée — elle lève, elle ne se devine pas."""
+    _env(monkeypatch)
+    monkeypatch.setenv("OTO_RUNNER_RELANCES_MAX", "1")
+    muet = {"outputs": [{"type": "function.call", "name": "x", "arguments": "{}"}],
+            "usage": {}}
+    _suite(monkeypatch, [muet])
+    with pytest.raises(RuntimeError, match="sans tool_call_id"):
+        C.run_once(instructions="p", inputs="i", tools=())
+
+
+def test_une_valeur_de_relance_non_entiere_leve(monkeypatch):
+    _env(monkeypatch)
+    monkeypatch.setenv("OTO_RUNNER_RELANCES_MAX", "beaucoup")
+    with pytest.raises(C.LlmUnavailable, match="OTO_RUNNER_RELANCES_MAX"):
+        C.run_once(instructions="p", inputs="i", tools=())
+
+
+def test_un_transitoire_est_rejoue_a_chaque_passe(monkeypatch):
+    """Les rejeux HTTP valent pour la relance comme pour la première passe."""
+    _env(monkeypatch)
+    monkeypatch.setenv("OTO_RUNNER_RELANCES_MAX", "1")
+    monkeypatch.setattr(C.time, "sleep", lambda s: None)
+    fin = {"outputs": [{"type": "message.output", "content": "ok"}],
+           "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    suite = [_R(corps=_reponse_avec_appel_renvoye()),
+             _R(status=503, texte="unavailable"),
+             _R(corps=fin)]
+    monkeypatch.setattr(C, "post_with_deadline",
+                        lambda url, **kw: suite.pop(0))
+    res = C.run_once(instructions="p", inputs="i", tools=())
+    assert suite == [] and res.reply == "ok"
+
+
+def test_le_faux_depart_conserve_les_entrees_brutes(monkeypatch, tmp_path):
+    """Ce que l'agent a RÉELLEMENT fait avant de s'arrêter ne survit qu'ici :
+    le fil ne garde qu'une synthèse, et rien n'est stocké chez le fournisseur."""
+    from oto_runner.agent_runtime import AgentResult, AgentStep
+    depot = tmp_path / "faux-departs"
+    monkeypatch.setenv("OTO_RUNNER_FAUX_DEPARTS_DIR", str(depot))
+    res = AgentResult(reply="prose", stopped="end_turn",
+                      steps=[AgentStep(tool="data_claim_next", ok=True,
+                                       duration_ms=0)],
+                      raw_outputs=[dict(_CALL_BIDON)])
+    W._conserver_faux_depart({"id": 7}, {"procedure": "demo"}, res)
+    trace = json.loads((depot / "7.json").read_text(encoding="utf-8"))
+    assert trace["raw_outputs"] == [_CALL_BIDON]

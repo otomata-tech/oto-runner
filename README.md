@@ -34,14 +34,22 @@ ANTHROPIC_API_KEY=…                  # la clé de modèle = qui paie
 OTO_RUNNER_MODEL=claude-sonnet-5     # défaut assumé (coût) ; Opus par flotte si justifié
 OTO_RUNNER_ARMED=1                   # cf. ci-dessus
 OTO_RUNNER_FAUX_DEPARTS_DIR=…        # optionnel : où déposer la sortie d'un faux départ
+OTO_RUNNER_RELANCES_MAX=0            # relances d'un fil qui rend un appel au client
 ```
 
 Le dépôt des faux départs est un outil de diagnostic qu'on arme : variable
 absente, rien n'est écrit. Posée, chaque job conclu en faux départ y laisse un
-`<job_id>.json` — outils appelés et **texte final intégral** de l'agent, la
-seule pièce qui dise s'il a rédigé sa fiche en prose sans appeler l'écriture ou
-s'il a renoncé. ⚠️ Ce fichier porte de la **donnée de la file de travail** : il
-est écrit en 0600, et **se purge après lecture**.
+`<job_id>.json` — outils appelés, **texte final intégral** de l'agent, et les
+entrées brutes du fournisseur quand il en rend : de quoi dire s'il a rédigé sa
+fiche en prose sans appeler l'écriture, s'il a renoncé, ou où le fil s'est
+arrêté. ⚠️ Ce fichier porte de la **donnée de la file de travail** : il est
+écrit en 0600, et **se purge après lecture**.
+
+En mode Conversations, les outils sont exécutés par le connecteur : un appel
+d'outil qui REVIENT au client interrompt le fil, et le job conclut sans avoir
+rien écrit après avoir payé le run entier. `OTO_RUNNER_RELANCES_MAX` (défaut
+**0**, donc inactif) autorise autant de relances du fil — on répond à l'appel
+rendu et on repart de là.
 
 ## Un job
 

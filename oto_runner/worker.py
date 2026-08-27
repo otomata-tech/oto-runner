@@ -123,8 +123,9 @@ def _conserver_faux_depart(job: dict, payload: dict, res) -> None:
     LEQUEL c'est : l'agent a rédigé sa fiche en prose sans appeler l'écriture,
     ou il a renoncé. Les conversations tournent sans stockage chez le
     fournisseur et le fil ne garde qu'une synthèse — hors de ce dépôt, ce texte
-    n'existe nulle part. `OTO_RUNNER_FAUX_DEPARTS_DIR` absent ⟹ rien n'est
-    écrit. ⚠️ Le fichier porte de la donnée de la file de travail : 0600, et il
+    n'existe nulle part. Quand le fournisseur rend ses entrées brutes, elles
+    accompagnent le texte : ce sont elles qui disent OÙ le fil s'est arrêté.
+    `OTO_RUNNER_FAUX_DEPARTS_DIR` absent ⟹ rien n'est écrit. ⚠️ Le fichier porte de la donnée de la file de travail : 0600, et il
     se purge après lecture."""
     dossier = os.environ.get("OTO_RUNNER_FAUX_DEPARTS_DIR")
     if not dossier:
@@ -136,6 +137,8 @@ def _conserver_faux_depart(job: dict, payload: dict, res) -> None:
              "namespace": payload.get("namespace"),
              "steps": [s.tool for s in res.steps],
              "reply": res.reply}
+    if res.raw_outputs:
+        trace["raw_outputs"] = res.raw_outputs
     try:
         os.makedirs(dossier, exist_ok=True)
         fd = os.open(chemin, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

@@ -20,6 +20,24 @@ réglage de confort).
 reçu (basesdk.py:227) — 20 heures de gel silencieux sur la boucle locale le
 18/08. Le SDK ne rejoue pas non plus les transitoires sur cet appel : les
 rejeux sont ICI, explicites.
+
+## L'appel RENVOYÉ au client, et la relance du fil
+
+En mode connecteur, aucun appel d'outil n'a à revenir au client : le
+fournisseur les exécute. Un `function.call` en fin d'`outputs` est donc un fil
+INTERROMPU — le fournisseur ne connaît pas l'outil demandé et rend la main. Sans
+relance, le job conclut sans avoir rien écrit, tout en ayant payé le run entier.
+
+`OTO_RUNNER_RELANCES_MAX` (entier, défaut 0 = jamais) autorise N relances. Une
+relance est un NOUVEAU POST `/v1/conversations` : `store=False` interdit
+`/restart`, qui repart d'une entrée STOCKÉE chez le fournisseur — rien n'est
+stocké, le fil se rejoue donc entier par ses `inputs`. La référence de l'API
+(docs.mistral.ai/api — `ConversationRequest.inputs`, type `ConversationInputs`)
+accepte au choix une chaîne ou une liste d'entrées `InputEntries`, union de
+`MessageInputEntry`, `MessageOutputEntry`, `FunctionResultEntry`,
+`FunctionCallEntry`, `ToolExecutionEntry` et `AgentHandoffEntry` : les `outputs`
+reçus y RETOURNENT tels quels, suivis d'une `FunctionResultEntry`
+(`tool_call_id` + `result`, tous deux requis) par appel renvoyé.
 """
 from __future__ import annotations
 
@@ -39,6 +57,7 @@ ONE_SHOT = True                      # le worker choisit le chemin là-dessus
 
 _ENV_KEY = "OTO_RUNNER_OPENAI_API_KEY"   # même clé que le mode openai (La Plateforme)
 _ENV_BASE = "OTO_RUNNER_OPENAI_BASE"
+_ENV_RELANCES = "OTO_RUNNER_RELANCES_MAX"
 _DEFAULT_BASE = "https://api.mistral.ai"
 DEFAULT_MODEL = "mistral-large-latest"
 
@@ -46,6 +65,11 @@ DEFAULT_MODEL = "mistral-large-latest"
 # large — mais TOUJOURS plus courte que le bail one-shot du worker (1800 s), sinon
 # un pair re-claimerait un job dont la conversation tourne encore.
 _WALL_S = 900
+
+_CONSIGNE_APPEL_RENVOYE = (
+    "Cet outil n'existe pas. Les outils sont exécutés par le connecteur : "
+    "appelle-les par leur nom exact, sans rédiger dans le nom de l'appel. "
+    "Reprends là où tu en étais.")
 
 
 class LlmUnavailable(RuntimeError):
@@ -74,6 +98,17 @@ def connector_id() -> str:
     return cid
 
 
+def relances_max() -> int:
+    """Combien de fois relancer un fil qui rend un appel au client. 0 = aucune."""
+    brut = os.environ.get(_ENV_RELANCES, "").strip()
+    if not brut:
+        return 0
+    if not brut.isdigit():
+        raise LlmUnavailable(
+            f"{_ENV_RELANCES} = {brut!r} : un entier positif ou nul est attendu")
+    return int(brut)
+
+
 _TRANSITOIRE = (429, 500, 502, 503, 504)
 
 
@@ -83,7 +118,11 @@ def run_once(*, instructions: str, inputs: str, tools,
 
     Rejeux : 2, espacés, sur les seuls TRANSITOIRES HTTP — un DeadlineExceeded
     (>15 min murales) remonte tel quel : le retry de JOB décide, re-payer
-    aveuglément un run entier n'est pas une politique de rejeu."""
+    aveuglément un run entier n'est pas une politique de rejeu.
+
+    Un fil qui rend un `function.call` au client est relancé au plus
+    `OTO_RUNNER_RELANCES_MAX` fois ; les passes forment UN bilan (pas
+    concaténés, jetons additionnés)."""
     corps = {
         "model": model(),
         "inputs": inputs,
@@ -102,6 +141,22 @@ def run_once(*, instructions: str, inputs: str, tools,
         # matched » (vécu au premier appel réel de l'essai).
         base = base[:-3]
     url = f"{base}/v1/conversations"
+    maxi = relances_max()
+    cumul: Optional[AgentResult] = None
+    for relance in range(maxi + 1):
+        d = _poster(url, corps, entetes)
+        cumul = _cumuler(cumul, _parse(d, tools))
+        renvoyes = _appels_renvoyes(d)
+        if not renvoyes or relance == maxi:
+            return cumul
+        logger.info("conversation relancée (%s/%s) : function.call renvoyé « %s »",
+                    relance + 1, maxi, str(renvoyes[0].get("name") or "?")[:60])
+        corps = dict(corps, inputs=_entrees_de_relance(inputs, d, renvoyes))
+    return cumul
+
+
+def _poster(url: str, corps: dict, entetes: dict) -> dict:
+    """UN POST vers /v1/conversations, rejeux transitoires compris → son JSON."""
     derniere = None
     for essai in range(3):
         # read 660 s : une conversation exécute ses outils côté Mistral SANS
@@ -117,8 +172,59 @@ def run_once(*, instructions: str, inputs: str, tools,
             continue
         if r.status_code >= 400:
             raise RuntimeError(f"conversations → {r.status_code} : {r.text[:300]}")
-        return _parse(r.json(), tools)
+        return r.json()
     raise RuntimeError(f"conversations → transitoire persistant ({derniere})")
+
+
+def _appels_renvoyes(d: dict) -> list:
+    """La TRAÎNE de `function.call` qui termine les outputs — les appels rendus
+    au client. En mode connecteur aucun n'a lieu d'être, quel qu'en soit le nom :
+    tous se répondent, aucun ne se joue."""
+    traine = []
+    for e in reversed(d.get("outputs") or []):
+        if ((e or {}).get("type") or "") != "function.call":
+            break
+        traine.append(e)
+    traine.reverse()
+    return traine
+
+
+def _entree_initiale(inputs) -> list:
+    if isinstance(inputs, str):
+        return [{"object": "entry", "type": "message.input",
+                 "role": "user", "content": inputs}]
+    return list(inputs)
+
+
+def _entrees_de_relance(inputs, d: dict, renvoyes: list) -> list:
+    """Le fil rejoué : l'ordre initial, les outputs reçus tels quels, puis la
+    réponse à chaque appel rendu."""
+    entrees = _entree_initiale(inputs) + list(d.get("outputs") or [])
+    for appel in renvoyes:
+        tid = appel.get("tool_call_id")
+        if not tid:
+            raise RuntimeError(
+                "conversations → function.call sans tool_call_id : la réponse "
+                "ne permet pas de répondre à l'appel")
+        entrees.append({"object": "entry", "type": "function.result",
+                        "tool_call_id": tid,
+                        "result": _CONSIGNE_APPEL_RENVOYE})
+    return entrees
+
+
+def _cumuler(cumul: Optional[AgentResult], passe: AgentResult) -> AgentResult:
+    """Les passes d'un même job font UN bilan : le prix payé est leur somme, et
+    le relevé des pas doit montrer l'appel rendu autant que ce qui l'a suivi."""
+    if cumul is None:
+        return passe
+    textes = [t for t in (cumul.reply, passe.reply) if t]
+    return AgentResult(
+        reply="\n".join(textes),
+        steps=list(cumul.steps) + list(passe.steps),
+        stopped=passe.stopped,
+        usage={c: int(cumul.usage.get(c) or 0) + int(passe.usage.get(c) or 0)
+               for c in ("input_tokens", "output_tokens")},
+        raw_outputs=passe.raw_outputs)
 
 
 def _nom_outil(name: str, tools) -> str:
@@ -154,8 +260,8 @@ def _parse(d: dict, tools=()) -> AgentResult:
                 textes.append(str(contenu))
         elif typ == "function.call":
             # Un connecteur bien configuré exécute côté serveur ; un function.call
-            # NU qui remonte signifierait « à toi de jouer » — ce chemin ne joue
-            # pas : il le COMPTE comme un pas non exécuté, visible au bilan.
+            # NU qui remonte signifie « à toi de jouer » — le pas est compté non
+            # exécuté, visible au bilan, et la relance y répond quand elle est armée.
             steps.append(AgentStep(tool=_nom_outil(e.get("name") or "?", tools),
                                    ok=False,
                                    duration_ms=0, error="function.call non exécuté"))
@@ -163,4 +269,5 @@ def _parse(d: dict, tools=()) -> AgentResult:
     usage = {"input_tokens": int(u.get("prompt_tokens") or 0),
              "output_tokens": int(u.get("completion_tokens") or 0)}
     return AgentResult(reply="\n".join(textes).strip(), steps=steps,
-                       stopped="end_turn", usage=usage)
+                       stopped="end_turn", usage=usage,
+                       raw_outputs=d.get("outputs"))
