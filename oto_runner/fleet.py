@@ -44,7 +44,8 @@ DEFAULT_INPUT = ("Ta file de travail est le tableau `{namespace}` : réserve cha
 # Champs de déclaration reconnus ; le reste est logué puis ignoré (une flotte
 # écrite pour un autre harnais reste lisible ici, sans mensonge silencieux).
 _CHAMPS = {"procedure", "namespace", "filter", "project", "org", "tools", "concurrency",
-           "ramp_seconds", "volume", "budget_tokens", "max_steps", "input"}
+           "ramp_seconds", "volume", "budget_tokens", "max_steps", "input",
+           "critical_tools"}
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,9 @@ class FleetSpec:
     budget_tokens: Optional[int] = None
     max_steps: int = 40
     input: str = DEFAULT_INPUT
+    # Les outils sans lesquels un job « done » est un job FAUX : leur panne
+    # arrête la flotte (arrêt ANORMAL ⟹ relance auto quand ils reviennent).
+    critical_tools: tuple = ()
 
 
 def load_spec(path: str) -> FleetSpec:
@@ -86,7 +90,8 @@ def load_spec(path: str) -> FleetSpec:
         volume=volume,
         budget_tokens=raw.get("budget_tokens"),
         max_steps=int(raw.get("max_steps") or 40),
-        input=raw.get("input") or DEFAULT_INPUT)
+        input=raw.get("input") or DEFAULT_INPUT,
+        critical_tools=tuple(raw.get("critical_tools") or ()))
 
 
 def _payload(spec: FleetSpec) -> dict:
@@ -102,6 +107,47 @@ def _payload(spec: FleetSpec) -> dict:
             "max_steps": spec.max_steps,
             "input": message,
             "label": f"flotte {spec.namespace} — {spec.procedure}"}
+
+
+# La borne « outil critique en échec » (27/08). Un job dont les outils
+# échouent conclut quand même « done » — bornes, budget et heartbeat disaient
+# « ça tourne » pendant que la flotte marquait 2 395 fiches « enrichies » sans
+# une recherche web réussie (Serper à sec, 4 jours). La mesure vient du
+# JOURNAL des appels (fenêtre glissante de 15 min) : à la relance après panne,
+# aucun appel récent ⟹ pas de verdict, on laisse partir des jobs qui
+# ré-alimentent la mesure — sans quoi les vieux échecs re-borneraient à vide.
+_SANTE_FENETRE_MIN = 15
+_SANTE_MIN_APPELS = 12
+_SANTE_TAUX_KO = 0.9
+_SANTE_PERIODE_S = 60
+
+
+def _outil_critique_en_panne(spec, backend, clock) -> "str | None":
+    """Le motif de borne si un outil critique échoue massivement, sinon None.
+    Sondé au plus toutes les _SANTE_PERIODE_S ; toute erreur de sonde = pas de
+    verdict (une sonde en panne n'arrête pas une campagne saine)."""
+    if not spec.critical_tools or spec.org is None:
+        return None
+    now = clock()
+    if now - _outil_critique_en_panne.dernier.get("t", -1e9) < _SANTE_PERIODE_S:
+        return _outil_critique_en_panne.dernier.get("verdict")
+    verdict = None
+    for outil in spec.critical_tools:
+        try:
+            n, ko = backend.tool_health(spec.org, outil, minutes=_SANTE_FENETRE_MIN)
+        except Exception as e:  # noqa: BLE001 — la sonde ne tue pas la flotte
+            logger.warning("santé de %s illisible : %s", outil, e)
+            continue
+        if n >= _SANTE_MIN_APPELS and ko / n >= _SANTE_TAUX_KO:
+            verdict = (f"outil critique `{outil}` en échec ({ko}/{n} appels "
+                       f"sur {_SANTE_FENETRE_MIN} min) — chaque job « done » "
+                       "serait faux")
+            break
+    _outil_critique_en_panne.dernier = {"t": now, "verdict": verdict}
+    return verdict
+
+
+_outil_critique_en_panne.dernier = {}
 
 
 @dataclass
@@ -186,6 +232,8 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
         elif failed_consecutifs >= _MAX_FAILED_CONSECUTIFS:
             borne = (f"{failed_consecutifs} échecs consécutifs — enfiler encore, "
                      "c'est payer pour re-crasher")
+        elif (panne := _outil_critique_en_panne(spec, backend, clock)):
+            borne = panne
         elif restantes == 0:
             borne = "file vide"
 

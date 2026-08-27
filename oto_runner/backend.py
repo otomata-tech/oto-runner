@@ -70,6 +70,34 @@ class Backend:
                                status=r.status_code)
         return r.json() if r.content else {}
 
+    # ── la santé d'un OUTIL, lue au journal des appels (la source de vérité) ──
+    def tool_health(self, org: int, tool: str, *, minutes: int = 15,
+                    limit: int = 20) -> tuple[int, int]:
+        """(appels, échecs) de `tool` dans l'org sur les `minutes` dernières.
+
+        Lu au journal backend des appels (monitoring d'org), jamais déduit du
+        résultat déclaré des jobs : en Conversations les exécutions d'outils
+        ne portent pas leur statut, et un agent dont les outils échouent
+        conclut « done » — 2 395 fiches « enrichies » sans une recherche web
+        réussie (Serper à sec du 23 au 27/08), aucune borne ne l'a vu."""
+        from datetime import datetime, timedelta, timezone
+        d = self._get(f"/api/orgs/{org}/monitoring/calls",
+                      {"tool": tool, "limit": limit})
+        seuil = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+        n = ko = 0
+        for c in d.get("calls") or []:
+            quand = str(c.get("called_at") or "")[:19].replace("T", " ")
+            try:
+                t = datetime.strptime(quand, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if t < seuil:
+                continue
+            n += 1
+            if not c.get("ok"):
+                ko += 1
+        return n, ko
+
     # ── la file de jobs (runner.jobs, R2) ────────────────────────────────────
     def claim(self, lease_seconds: int = 600) -> Optional[dict]:
         return self._post("/api/me/runner/jobs",

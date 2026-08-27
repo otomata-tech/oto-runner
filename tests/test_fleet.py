@@ -291,3 +291,39 @@ def test_une_erreur_reseau_du_backend_est_une_backenderror(monkeypatch):
     monkeypatch.setattr(B, "post_with_deadline", _timeout)
     with pytest.raises(BackendError):
         b.enqueue("start", {})
+
+
+def test_un_outil_critique_en_echec_arrete_la_flotte(monkeypatch):
+    """Serper à sec 4 jours : 2 395 fiches « enrichies » sans une recherche
+    réussie, jobs « done », aucune borne. La santé se lit au JOURNAL des
+    appels de l'org : ≥12 appels sur 15 min dont ≥90 % en échec ⟹ arrêt
+    ANORMAL (relance auto quand l'outil revient)."""
+    from oto_runner import fleet as F
+
+    F._outil_critique_en_panne.dernier = {}
+
+    class BackendSerperMort(FauxBackend):
+        def tool_health(self, org, tool, *, minutes=15, limit=20):
+            return (20, 19)
+
+    b = BackendSerperMort(counts=[100, 100])
+    bilan = _run(_spec(ramp_seconds=0, org=226, critical_tools=("serper_search",)), b)
+    assert "outil critique `serper_search` en échec" in bilan.arret
+    assert not any(bilan.arret.startswith(m) for m in F._ARRETS_NORMAUX), \
+        "arrêt ANORMAL : systemd relance quand l'outil revient"
+
+
+def test_sans_appels_recents_pas_de_verdict(monkeypatch):
+    """À la relance après panne, aucun appel récent : on laisse partir des jobs
+    qui ré-alimentent la mesure — les vieux échecs ne bornent pas à vide."""
+    from oto_runner import fleet as F
+
+    F._outil_critique_en_panne.dernier = {}
+
+    class BackendSilencieux(FauxBackend):
+        def tool_health(self, org, tool, *, minutes=15, limit=20):
+            return (0, 0)
+
+    b = BackendSilencieux(counts=[2, 2, 0, 0])
+    bilan = _run(_spec(ramp_seconds=0, org=226, critical_tools=("serper_search",)), b)
+    assert bilan.arret == "file vide"
