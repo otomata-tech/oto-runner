@@ -327,3 +327,22 @@ def test_sans_appels_recents_pas_de_verdict(monkeypatch):
     b = BackendSilencieux(counts=[2, 2, 0, 0])
     bilan = _run(_spec(ramp_seconds=0, org=226, critical_tools=("serper_search",)), b)
     assert bilan.arret == "file vide"
+
+
+def test_des_faux_departs_en_serie_arretent_la_flotte():
+    """Rodage v96 : 4 jobs « done » sur 5 avaient réservé sans écrire, et la
+    ligne ratée était reservie dans la minute au suivant — une boucle à vide
+    invisible des bornes (les jobs sont done). N d'affilée ⟹ arrêt ANORMAL."""
+    from oto_runner import fleet as F
+
+    class BackendFauxDeparts(FauxBackend):
+        def get_job(self, jid):
+            j = super().get_job(jid)
+            if j["status"] == "done":
+                j["result"]["tool_counts"] = {"data_claim_next": 1, "fr_get": 2}
+            return j
+
+    b = BackendFauxDeparts(counts=[100, 100])
+    bilan = _run(_spec(ramp_seconds=0), b)
+    assert "faux départs consécutifs" in bilan.arret
+    assert not any(bilan.arret.startswith(m) for m in F._ARRETS_NORMAUX)

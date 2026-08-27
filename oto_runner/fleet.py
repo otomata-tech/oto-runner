@@ -28,6 +28,13 @@ logger = logging.getLogger("oto_runner.fleet")
 _POLL_S = 20
 _MAX_FAILED_CONSECUTIFS = 3
 _MAX_ERREURS_BACKEND = 10   # ~3-4 min de panne DENSE (reset au 1er succès)
+# Faux départs EN SÉRIE (27/08) : un job « done » qui a réservé une ligne sans
+# rien écrire n'est pas un succès — et depuis que le run libère la ligne à sa
+# conclusion, la ligne ratée est reservie dans la minute au job suivant, qui
+# refait le même faux départ : une boucle qui vide le budget sans écrire, et
+# qu'aucune borne ne voyait (les jobs sont « done »). N d'affilée ⟹ arrêt
+# ANORMAL (relance auto) : « ça tourne à vide » n'est pas « ça tourne ».
+_MAX_FAUX_DEPARTS_CONSECUTIFS = 5
 # ⚠️ Le message de lancement NOMME la file : un agent à qui on dit « la file de
 # travail » sans la nommer DEVINE des noms de tableaux (vécu : entreprises,
 # projet_220, data… tous inconnus, puis des SIREN hallucinés et une conclusion
@@ -173,6 +180,7 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
     en_vol: set[int] = set()
     dernier_depart: Optional[float] = None
     failed_consecutifs = 0
+    faux_departs_consecutifs = 0
     # Les erreurs BACKEND consécutives du driver lui-même (count/enqueue) : un
     # 502 isolé sur l'enfilement a TUÉ un vol entier (lot C, 16/08 — la rafale
     # #352 ; 30 min de flotte figée avant détection humaine). Le driver tolère
@@ -199,6 +207,15 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
             if st == "done":
                 bilan.done += 1
                 failed_consecutifs = 0
+                tc = (job.get("result") or {}).get("tool_counts") or {}
+                claims = sum(v for k, v in tc.items() if k.endswith("data_claim_next"))
+                writes = sum(v for k, v in tc.items() if k.endswith("data_write"))
+                if claims and not writes:
+                    faux_departs_consecutifs += 1
+                    logger.warning("job %s : faux départ (%d claim, 0 write) — %d d'affilée",
+                                   jid, claims, faux_departs_consecutifs)
+                else:
+                    faux_departs_consecutifs = 0
             else:
                 bilan.failed += 1
                 failed_consecutifs += 1
@@ -234,6 +251,9 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                      "c'est payer pour re-crasher")
         elif (panne := _outil_critique_en_panne(spec, backend, clock)):
             borne = panne
+        elif faux_departs_consecutifs >= _MAX_FAUX_DEPARTS_CONSECUTIFS:
+            borne = (f"{faux_departs_consecutifs} faux départs consécutifs (réservation "
+                     "sans écriture) — la flotte tourne à vide")
         elif restantes == 0:
             borne = "file vide"
 
