@@ -177,3 +177,36 @@ def test_les_noms_prefixes_par_le_connecteur_sont_normalises(monkeypatch):
     res = C.run_once(instructions="p", inputs="i",
                      tools=("data_claim_next", "data_write"))
     assert [s.tool for s in res.steps] == ["data_claim_next", "data_write"]
+
+
+def test_le_worker_one_shot_impose_lidentite_de_run_et_le_nom_du_tableau(monkeypatch):
+    """57 % des data_write refusés en campagne (27/08) : en Conversations
+    personne ne pose `_run_id`, le titulaire d'une ligne réservée était refusé
+    sur sa propre ligne. Le worker impose l'identité dans l'ordre — et le nom
+    EXACT du tableau (700+ refus sur des slots/variantes inventés)."""
+    _env(monkeypatch)
+    vu = {}
+
+    class FauxConv:
+        ONE_SHOT = True
+
+        @staticmethod
+        def run_once(*, instructions, inputs, tools):
+            vu["inputs"] = inputs
+            from oto_runner.agent_runtime import AgentResult
+            return AgentResult(reply="ok", stopped="end_turn")
+
+    class Mcp:
+        def __init__(self, **kw):
+            self.run_id = None
+
+        def outil(self, name, args=None):
+            return {"body_md": "p"} if name == "oto_procedure" else {"run_id": "r-ID"}
+
+    monkeypatch.setattr(W, "McpSession", Mcp)
+    job = _job("start")
+    job["payload"]["namespace"] = "edition-vivier"
+    W._traiter(FauxBackend(), job, provider=FauxConv)
+    assert '_run_id: "r-ID"' in vu["inputs"] and 'worker: "r-ID"' in vu["inputs"]
+    assert 'namespace: "edition-vivier"' in vu["inputs"]
+    assert vu["inputs"].endswith("Vas-y."), "l'ordre de la flotte suit, intact"

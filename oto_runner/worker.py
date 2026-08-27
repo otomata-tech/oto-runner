@@ -90,6 +90,32 @@ def _assainir_pour_transport(historique: list) -> list:
     return out
 
 
+def _ordre_one_shot(ordre: str, run_id: str, payload: dict) -> str:
+    """L'IDENTITÉ d'exécution, imposée par le worker à l'agent one-shot.
+
+    En stateless, le worker posait `_run_id` sur chaque appel : le backend
+    reconnaissait le titulaire d'une ligne réservée par son RUN. En Conversations
+    le connecteur Mistral appelle NU — personne ne pose le jeton — et le
+    titulaire était refusé sur sa propre ligne (« réservée par … — écriture
+    refusée ») : 57 % des data_write d'une campagne refusés, mesuré le 27/08,
+    des milliers de fiches travaillées pour rien. Le worker connaît le run_id
+    avant de lancer la conversation : il l'impose dans l'ordre, l'agent le pose
+    comme il pose déjà `_project`. Même geste pour le NOM EXACT du tableau : le
+    modèle inventait des slots et des variantes (`slot:edition-vivier`,
+    `edition_vivier`, `220-edition-vivier` — 700+ refus)."""
+    ns = (payload or {}).get("namespace") or ""
+    identite = (
+        f"IDENTITÉ D'EXÉCUTION — obligatoire : sur CHAQUE appel d'outil, ajoute "
+        f"l'argument `_run_id: \"{run_id}\"` (c'est ce qui te reconnaît comme "
+        f"titulaire de la ligne que tu réserves ; sans lui, tes écritures sont "
+        f"refusées). Au claim et au release, passe aussi `worker: \"{run_id}\"`.")
+    if ns:
+        identite += (f" Le tableau se nomme EXACTEMENT `{ns}` : passe "
+                     f"`namespace: \"{ns}\"` tel quel — jamais `slot:…`, jamais "
+                     f"une variante.")
+    return identite + "\n\n" + ordre
+
+
 def _spec_du_job(job: dict, procedure_md: str) -> AgentSpec:
     p = job.get("payload") or {}
     outils = frozenset(p.get("tools") or ())
@@ -166,7 +192,8 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         # heartbeat intermédiaire (d'où le bail élargi au claim, cf. main). La
         # reprise d'un start re-claimé REJOUE l'ordre du payload : chaque
         # conversation est neuve, les baux de lignes rendent le rejeu inoffensif.
-        ordre = prompt or p.get("input") or "Exécute la procédure."
+        ordre = _ordre_one_shot(prompt or p.get("input") or "Exécute la procédure.",
+                                run_id, p)
         res = provider.run_once(instructions=spec.system, inputs=ordre,
                                 tools=p.get("tools") or ())
         # Le fil garde l'ORDRE et la SYNTHÈSE (l'observabilité au grain run) — le

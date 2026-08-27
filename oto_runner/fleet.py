@@ -98,6 +98,7 @@ def _payload(spec: FleetSpec) -> dict:
                .replace("{filter}", _json.dumps(spec.filter, ensure_ascii=False)))
     return {"procedure": spec.procedure, "tools": list(spec.tools),
             "project_id": spec.project, "org_id": spec.org,
+            "namespace": spec.namespace,
             "max_steps": spec.max_steps,
             "input": message,
             "label": f"flotte {spec.namespace} — {spec.procedure}"}
