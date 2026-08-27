@@ -268,3 +268,26 @@ def test_un_arret_anormal_sort_en_echec_pour_que_systemd_relance(monkeypatch):
     assert e.value.code == 1
     _main_avec("file vide")()          # ne lève pas : fin normale
     _main_avec("budget atteint (…)")()
+
+
+def test_une_erreur_reseau_du_backend_est_une_backenderror(monkeypatch):
+    """Un ReadTimeout de requests traversait la tolérance du driver (qui
+    n'attrape que BackendError) et l'a tué en plein vol le 27/08 — cinq jours
+    nominaux puis un traceback pour un backend lent de 60 s. Converti à la
+    SOURCE : driver, worker et flotte en héritent d'un coup."""
+    import requests as _rq
+
+    import oto_runner.backend as B
+    from oto_runner.backend import Backend, BackendError
+
+    b = Backend(base="http://x", token="t")
+
+    def _timeout(url, **kw):
+        raise _rq.exceptions.ReadTimeout("Read timed out")
+
+    monkeypatch.setattr(B, "get_with_deadline", _timeout)
+    with pytest.raises(BackendError, match="réseau : ReadTimeout"):
+        b.count_rows("ns", filter={"a": "b"})
+    monkeypatch.setattr(B, "post_with_deadline", _timeout)
+    with pytest.raises(BackendError):
+        b.enqueue("start", {})

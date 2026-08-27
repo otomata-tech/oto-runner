@@ -9,9 +9,9 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
-import requests  # noqa: F401
+import requests
 
-from .deadline import get_with_deadline, post_with_deadline
+from .deadline import DeadlineExceeded, get_with_deadline, post_with_deadline
 
 _TIMEOUT = (10, 60)
 
@@ -29,10 +29,24 @@ class Backend:
         if not self.token:
             raise BackendError("OTO_TOKEN absent de l'environnement du worker")
 
+    def _reseau(self, chemin: str, fn, **kw):
+        """TOUTE erreur de transport devient une BackendError (status=None).
+
+        Un ReadTimeout de requests n'en était pas une : il traversait la
+        tolérance du driver (qui n'attrape que BackendError) et l'a tué en plein
+        vol le 27/08 à 08:26 — 5 jours de campagne nominale, puis un traceback
+        pour un backend lent de 60 s. La conversion vit ICI, à la source : le
+        driver, le worker (appose, extend) et la flotte en héritent d'un coup."""
+        try:
+            return fn(self.base + chemin, **kw)
+        except (requests.RequestException, DeadlineExceeded) as e:
+            raise BackendError(f"{chemin} → réseau : {type(e).__name__} "
+                               f"{str(e)[:200]}", status=None)
+
     def _post(self, chemin: str, corps: dict) -> dict:
-        r = post_with_deadline(self.base + chemin, json=corps, timeout=_TIMEOUT,
-                               headers={"Authorization": f"Bearer {self.token}"},
-                               wall_s=120)
+        r = self._reseau(chemin, post_with_deadline, json=corps, timeout=_TIMEOUT,
+                         headers={"Authorization": f"Bearer {self.token}"},
+                         wall_s=120)
         if r.status_code >= 400:
             try:
                 detail = r.json().get("message") or r.json().get("error") or r.text
@@ -49,8 +63,8 @@ class Backend:
             # Le namespace d'une flotte vit dans l'org de la MISSION, pas dans
             # l'org maison du jeton — la consultation REST se scope par en-tête.
             entetes["X-Oto-Org"] = str(org)
-        r = get_with_deadline(self.base + chemin, params=params, timeout=_TIMEOUT,
-                              headers=entetes, wall_s=120)
+        r = self._reseau(chemin, get_with_deadline, params=params, timeout=_TIMEOUT,
+                         headers=entetes, wall_s=120)
         if r.status_code >= 400:
             raise BackendError(f"{chemin} → {r.status_code} : {r.text[:300]}",
                                status=r.status_code)
