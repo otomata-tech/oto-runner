@@ -39,6 +39,13 @@ _MAX_ERREURS_BACKEND = 10   # ~3-4 min de panne DENSE (reset au 1er succès)
 # refait le même faux départ : une boucle qui vide le budget sans écrire, et
 # qu'aucune borne ne voyait (les jobs sont « done »). N d'affilée ⟹ arrêt
 # ANORMAL (relance auto) : « ça tourne à vide » n'est pas « ça tourne ».
+# ⚠️ Seuls comptent les jobs qui ont RÉELLEMENT réservé une ligne. Un job à
+# CLAIM VIDE (la file n'avait plus rien à rendre) est un non-événement : en fin
+# de file il y a toujours plus d'agents que de lignes, et les compter a fait
+# échouer une campagne ABOUTIE le 28/08 (18/20 lignes, les 2 dernières sous bail
+# ⟹ 5 jobs à un seul appel ⟹ borne mordue, `exit 1`). Il ne remet pas non plus
+# le compteur à zéro : la remise à zéro rendrait la borne contournable par
+# alternance (un vrai faux départ, un claim à vide, indéfiniment).
 _MAX_FAUX_DEPARTS_CONSECUTIFS = 5
 # ⚠️ Le message de lancement NOMME la file : un agent à qui on dit « la file de
 # travail » sans la nommer DEVINE des noms de tableaux (vécu : entreprises,
@@ -273,27 +280,40 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                 if st == "done":
                     bilan.done += 1
                     failed_consecutifs = 0
-                    # ⚠️ Le connecteur MCP peut PRÉFIXER les noms d'outils
-                    # (`<connecteur>_data_write`) : l'appartenance se teste par
-                    # SUFFIXE, jamais par égalité.
-                    tc = resultat.get("tool_counts") or {}
-                    writes = sum(v for k, v in tc.items() if k.endswith("data_write"))
-                    fenetre.append((jetons_du_job, writes))
-                    # Le faux départ est DÉCLARÉ par le worker — le seul à avoir vu
-                    # les appels. Un résultat qui ne le porte pas vient d'un worker
-                    # trop ancien : on lève, on ne redevine pas en silence.
-                    if "faux_depart" not in resultat:
+                    # Le claim à vide et le faux départ sont DÉCLARÉS par le
+                    # worker — le seul à avoir vu les appels ET leurs sorties.
+                    # Un résultat qui ne les porte pas vient d'un worker trop
+                    # ancien : on lève, on ne redevine pas en silence.
+                    manquants = [c for c in ("faux_depart", "claim_vide")
+                                 if c not in resultat]
+                    if manquants:
                         raise RuntimeError(
-                            f"job {jid} : résultat sans `faux_depart` — worker trop "
-                            "ancien pour cette flotte (le marqueur est posé à la "
-                            "conclusion du job). Mets à jour les workers.")
-                    if resultat["faux_depart"]:
-                        faux_departs_consecutifs += 1
-                        logger.warning("job %s : faux départ (réservation sans "
-                                       "écriture) — %d d'affilée",
-                                       jid, faux_departs_consecutifs)
+                            f"job {jid} : résultat sans {' ni '.join(manquants)} — "
+                            "worker trop ancien pour cette flotte (les marqueurs "
+                            "sont posés à la conclusion du job). Mets à jour les "
+                            "workers.")
+                    if resultat["claim_vide"]:
+                        # Rien à réserver : le job n'avait aucune sortie à
+                        # produire. Ni faux départ, ni point de rendement — le
+                        # compter des deux côtés ferait échouer, à la fin de
+                        # chaque campagne, une flotte qui a tout traité.
+                        logger.info("job %s : claim à vide — la file n'avait "
+                                    "plus de ligne à réserver", jid)
                     else:
-                        faux_departs_consecutifs = 0
+                        # ⚠️ Le connecteur MCP peut PRÉFIXER les noms d'outils
+                        # (`<connecteur>_data_write`) : l'appartenance se teste
+                        # par SUFFIXE, jamais par égalité.
+                        tc = resultat.get("tool_counts") or {}
+                        writes = sum(v for k, v in tc.items()
+                                     if k.endswith("data_write"))
+                        fenetre.append((jetons_du_job, writes))
+                        if resultat["faux_depart"]:
+                            faux_departs_consecutifs += 1
+                            logger.warning("job %s : faux départ (réservation sans "
+                                           "écriture) — %d d'affilée",
+                                           jid, faux_departs_consecutifs)
+                        else:
+                            faux_departs_consecutifs = 0
                 else:
                     bilan.failed += 1
                     failed_consecutifs += 1

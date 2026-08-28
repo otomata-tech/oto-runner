@@ -27,7 +27,7 @@ def _job_avec_namespace():
 def _jouer(monkeypatch, job, reply, outils):
     etapes = [AgentStep(tool=t, ok=True, duration_ms=1) for t in outils]
 
-    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None):
+    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None, **_):
         return AgentResult(reply=reply, stopped="end_turn", steps=etapes)
 
     monkeypatch.setattr(W.agent_runtime, "run", faux_run)
@@ -85,7 +85,7 @@ def test_un_depot_impraticable_ne_tue_pas_le_job(monkeypatch, tmp_path):
     monkeypatch.setenv("OTO_RUNNER_FAUX_DEPARTS_DIR", str(barrage / "dedans"))
     b = FauxBackend()
 
-    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None):
+    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None, **_):
         return AgentResult(reply="prose", stopped="end_turn", steps=[
             AgentStep(tool="data_claim_next", ok=True, duration_ms=1)])
 

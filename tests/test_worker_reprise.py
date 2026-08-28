@@ -65,7 +65,7 @@ def _run_stub(monkeypatch, resultat_prompt):
     """Capture le prompt/history passés à la boucle, sans tour de modèle."""
     vu = {}
 
-    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None):
+    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None, **_):
         vu.update(prompt=prompt, history=list(history or []))
         from oto_runner.agent_runtime import AgentResult
         return AgentResult(reply="fini", stopped="end_turn")
@@ -117,7 +117,7 @@ def test_le_resultat_declare_compte_les_appels_par_outil(monkeypatch):
     import oto_runner.worker as W2
     from oto_runner.agent_runtime import AgentResult, AgentStep
 
-    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None):
+    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None, **_):
         return AgentResult(reply="belle synthèse", stopped="end_turn", steps=[
             AgentStep(tool="data_claim_next", ok=True, duration_ms=1),
             AgentStep(tool="serper_search", ok=True, duration_ms=1),
@@ -146,7 +146,7 @@ def test_le_resultat_declare_claims_writes_et_faux_depart(monkeypatch):
     def _resultat(*outils):
         etapes = [AgentStep(tool=t, ok=True, duration_ms=1) for t in outils]
 
-        def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None):
+        def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None, **_):
             return AgentResult(reply="fini", stopped="end_turn", steps=etapes)
 
         monkeypatch.setattr(W2.agent_runtime, "run", faux_run)
@@ -224,7 +224,7 @@ def test_un_echec_dextend_ne_tue_pas_le_run(monkeypatch):
 
     apposes = []
 
-    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None):
+    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None, **_):
         on_turn("assistant", {"content": "un tour"}, {"role": "assistant"})
         from oto_runner.agent_runtime import AgentResult
         return AgentResult(reply="fini", stopped="end_turn")
@@ -253,7 +253,7 @@ def test_lappose_du_fil_est_rejouee_avant_de_tuer(monkeypatch):
                 raise BackendError("/api → 502 : bad gateway", status=502)
             return super().thread_append(run_id, role, content, provider_raw)
 
-    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None):
+    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None, **_):
         on_turn("assistant", {"content": "t"}, {"role": "assistant"})
         from oto_runner.agent_runtime import AgentResult
         return AgentResult(reply="fini", stopped="end_turn")
@@ -328,7 +328,7 @@ def test_le_resultat_declare_le_cache_a_cote_des_jetons(monkeypatch):
     import oto_runner.worker as W2
     from oto_runner.agent_runtime import AgentResult
 
-    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None):
+    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None, **_):
         return AgentResult(reply="fini", stopped="end_turn",
                            usage={"input_tokens": 2400, "output_tokens": 600,
                                   "cache_creation_input_tokens": 9200,

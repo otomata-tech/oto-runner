@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -36,6 +37,16 @@ logger = logging.getLogger("oto_runner")
 
 _POLL_S = 15          # file vide → on respire (le tick des déclencheurs enfile, R3)
 _LEASE_S = 600        # ~3× le tour le plus lent observé ; prolongé entre les tours
+
+# Les deux gestes de la file de travail. ⚠️ Le connecteur MCP peut PRÉFIXER les
+# noms (`<connecteur>_data_write`) : l'appartenance se teste par SUFFIXE, jamais
+# par égalité (13 jobs comptés « zéro écriture » alors que les fiches partaient).
+_CLAIM = "data_claim_next"
+_WRITE = "data_write"
+# La marque d'une réservation qui ne rend RIEN, quand la charge n'est pas
+# parsable (sortie tronquée par `_cap`, texte nu) — la charge JSON reste la
+# source qui fait foi, ce motif n'est qu'un repli, et il est explicite.
+_ROW_NULLE = re.compile(r'"row"\s*:\s*null')
 
 _SYSTEM_FRAME = """Tu exécutes un run hébergé sur la plateforme oto.
 
@@ -151,6 +162,47 @@ def _conserver_faux_depart(job: dict, payload: dict, res) -> None:
     logger.info("job %s : faux départ conservé dans %s", job.get("id"), chemin)
 
 
+def _claim_sans_ligne(nom: str, sortie: str) -> bool:
+    """Cet appel de réservation a-t-il rendu AUCUNE ligne (`row: null`) ?
+
+    Posé à la boucle locale, qui voit les sorties d'outils : elle marque le pas
+    (`AgentStep.vide`) et le worker en tire les réservations RÉELLES. Un outil
+    qui n'est pas une réservation n'est jamais vide — la question ne se pose
+    que pour `data_claim_next`."""
+    if not nom.endswith(_CLAIM):
+        return False
+    try:
+        charge = json.loads(sortie or "")
+    except Exception:  # noqa: BLE001 — sortie tronquée ou non-JSON : cf. _ROW_NULLE
+        return bool(_ROW_NULLE.search(sortie or ""))
+    return isinstance(charge, dict) and "row" in charge and charge["row"] is None
+
+
+def _lignes_reservees(res, appels_claim: int, one_shot: bool) -> int:
+    """Les lignes RÉSERVÉES — jamais le nombre d'APPELS de réservation.
+
+    ⚠️ Un `data_claim_next` qui ne rend aucune ligne n'a rien réservé, et le
+    confondre avec une réservation a fait échouer une flotte ABOUTIE (28/08 :
+    18 lignes sur 20 traitées, les 2 dernières sous bail chez des pairs encore
+    en vol ⟹ les jobs suivants ne faisaient qu'UN appel, comptés « faux
+    départs », borne mordue, `exit 1` sur une campagne réussie). En fin de file
+    il y a TOUJOURS plus d'agents que de lignes : sans cette distinction, toute
+    flotte se termine en panne.
+
+    Deux chemins, deux règles :
+    - **boucle locale** (`agent_runtime`) : le worker VOIT la sortie du claim —
+      les pas marqués vides ne comptent pas. C'est la règle fidèle ;
+    - **conversations** : la boucle tourne chez le fournisseur, aucune sortie ne
+      remonte. Règle de REPLI, explicite : un job qui n'a fait qu'UN appel n'a
+      pu faire que le claim, donc il n'a rien réservé. À partir de deux appels,
+      on ne sait pas — et on compte, comme avant."""
+    if one_shot:
+        return 0 if len(res.steps) <= 1 else appels_claim
+    vides = sum(1 for s in res.steps
+                if s.ok and s.vide and s.tool.endswith(_CLAIM))
+    return max(0, appels_claim - vides)
+
+
 def _spec_du_job(job: dict, procedure_md: str) -> AgentSpec:
     p = job.get("payload") or {}
     outils = frozenset(p.get("tools") or ())
@@ -221,7 +273,8 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             # re-claim par un pair reprend le fil — c'est le design.
             logger.warning("extend %s toléré : %s", job["id"], e)
 
-    if getattr(provider, "ONE_SHOT", False):
+    one_shot = bool(getattr(provider, "ONE_SHOT", False))
+    if one_shot:
         # Chemin CONVERSATIONS (décision Alexis 19/08) : la boucle d'outils tourne
         # chez Mistral, le worker reçoit le résultat — pas de tours à apposer ni de
         # heartbeat intermédiaire (d'où le bail élargi au claim, cf. main). La
@@ -241,9 +294,9 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 {"role": "assistant", "content": res.reply})
     else:
         res = agent_runtime.run(spec, mcp, provider, prompt=prompt,
-                                history=historique, on_turn=apposer)
+                                history=historique, on_turn=apposer,
+                                a_vide=_claim_sans_ligne)
 
-    outcome = "done" if res.stopped in ("end_turn",) else "blocked"
     jetons = res.usage.get("input_tokens", 0) + res.usage.get("output_tokens", 0)
     # Le cache de prompt se compte À CÔTÉ, jamais dedans : `input_tokens` est le
     # reste NON caché, donc les jetons lus en cache ne sont pas dans `jetons`.
@@ -251,6 +304,36 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # (budget, rendement), et la déplacer les fausserait toutes d'un coup.
     lus_en_cache = int(res.usage.get("cache_read_input_tokens") or 0)
     ecrits_en_cache = int(res.usage.get("cache_creation_input_tokens") or 0)
+    # Le résultat DÉCLARÉ (R5) : ce que l'ordonnanceur de flotte lit pour ses
+    # gardes — un résumé, jamais du contenu de fil. `tool_counts` rend le TOUR
+    # PERDU lisible d'un coup d'œil : un agent qui analyse et conclut en prose
+    # SANS écrire ne produit aucune erreur — la seule trace est l'écart entre
+    # ses mots et ses appels. Le compte par outil le montre au grain job (des
+    # claims sans writes), sans lire le fil. `claims`/`writes`/`claim_vide`/
+    # `faux_depart` en sont la lecture ARRÊTÉE ICI : le verdict appartient au
+    # worker, qui a vu les appels, pas à l'ordonnanceur qui devrait le
+    # redériver à chaque tour.
+    compte: dict = {}
+    for s in res.steps:
+        if s.ok:
+            compte[s.tool] = compte.get(s.tool, 0) + 1
+    appels_claim = sum(v for k, v in compte.items() if k.endswith(_CLAIM))
+    writes = sum(v for k, v in compte.items() if k.endswith(_WRITE))
+    claims = _lignes_reservees(res, appels_claim, one_shot)
+    # Le claim À VIDE : l'agent a demandé une ligne, la file n'en avait plus à
+    # lui rendre. C'est l'état NORMAL d'une fin de file, il ne dit rien de la
+    # santé de la campagne — et surtout ce n'est pas un faux départ.
+    claim_vide = appels_claim > 0 and claims == 0
+    faux_depart = claims > 0 and writes == 0
+    # ⚠️ « Conclu, rien écrit » n'est pas une issue légitime quand le TRANSPORT
+    # a lâché : au redéploiement du service MCP la session du worker est
+    # invalidée, tous les appels suivants échouent, et l'agent l'annonce
+    # poliment puis conclut — job « done », donc jamais rejoué, et la ligne
+    # reste « à traiter » sans que personne ne le sache (2 fiches perdues en
+    # silence le 28/08). On ÉCHOUE le job : le backend le rejoue.
+    echec_transport = bool(claims > 0 and writes == 0
+                           and any(s.transport_ko for s in res.steps))
+    outcome = "done" if res.stopped == "end_turn" and not echec_transport else "blocked"
     note = f"{res.stopped} · {len(res.steps)} appels · {jetons} jetons"
     if lus_en_cache:
         note += f" (+ {lus_en_cache} lus en cache)"
@@ -260,37 +343,31 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         except Exception as e:  # noqa: BLE001 — la clôture du run est best-effort,
             # sur SA connexion : jamais dans la transaction d'un autre (cf. #333).
             logger.warning("run_finish %s : %s", run_id, e)
-    # Le résultat DÉCLARÉ (R5) : ce que l'ordonnanceur de flotte lit pour ses
-    # gardes — un résumé, jamais du contenu de fil. `tool_counts` rend le TOUR
-    # PERDU lisible d'un coup d'œil : un agent qui analyse et conclut en prose
-    # SANS écrire ne produit aucune erreur — la seule trace est l'écart entre
-    # ses mots et ses appels. Le compte par outil le montre au grain job (des
-    # claims sans writes), sans lire le fil. `claims`/`writes`/`faux_depart` en
-    # sont la lecture ARRÊTÉE ICI : le verdict appartient au worker, qui a vu
-    # les appels, pas à l'ordonnanceur qui devrait le redériver à chaque tour.
-    # ⚠️ Le connecteur MCP peut PRÉFIXER les noms (`<connecteur>_data_write`) :
-    # l'appartenance se teste par SUFFIXE, jamais par égalité.
-    compte: dict = {}
-    for s in res.steps:
-        if s.ok:
-            compte[s.tool] = compte.get(s.tool, 0) + 1
-    claims = sum(v for k, v in compte.items() if k.endswith("data_claim_next"))
-    writes = sum(v for k, v in compte.items() if k.endswith("data_write"))
-    faux_depart = claims > 0 and writes == 0
     if faux_depart:
         _conserver_faux_depart(job, p, res)
     # `model` = la version CONCRÈTE derrière l'alias configuré, relevée à
     # l'appel. Un alias flotte : sans ce champ, une anomalie de campagne ne se
     # date pas — on ne sait pas quels jobs ont tourné avant la bascule et
     # lesquels après. None quand le provider ne sait pas la résoudre.
-    backend.complete(job["id"], ok=True, run_id=run_id,
-                     result={"usage_tokens": jetons,
-                             "usage_cache_read": lus_en_cache,
-                             "usage_cache_write": ecrits_en_cache,
-                             "stopped": res.stopped,
-                             "steps": len(res.steps), "tool_counts": compte,
-                             "claims": claims, "writes": writes,
-                             "faux_depart": faux_depart, "model": res.model})
+    resultat = {"usage_tokens": jetons,
+                "usage_cache_read": lus_en_cache,
+                "usage_cache_write": ecrits_en_cache,
+                "stopped": res.stopped,
+                "steps": len(res.steps), "tool_counts": compte,
+                "claims": claims, "writes": writes,
+                "claim_vide": claim_vide,
+                "faux_depart": faux_depart, "model": res.model}
+    if echec_transport:
+        outils = ", ".join(sorted({s.tool for s in res.steps
+                                   if s.transport_ko}))[:200]
+        erreur = ("ligne réservée, aucune écriture, transport en panne "
+                  f"({outils}) — le job échoue pour être rejoué plutôt que "
+                  "conclu à vide")
+        backend.complete(job["id"], ok=False, error=erreur, run_id=run_id,
+                         result=resultat)
+        logger.warning("job %s : %s (%s)", job["id"], erreur, note)
+        return
+    backend.complete(job["id"], ok=True, run_id=run_id, result=resultat)
     logger.info("job %s : %s (%s)", job["id"], outcome, note)
 
 

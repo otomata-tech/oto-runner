@@ -13,7 +13,7 @@ Deux règles de lecture, toutes deux payées cher :
   qui ne correspond PLUS au filtre de réservation de la flotte. Compter les
   jobs « done » comptait les tours perdus comme des succès ;
 - **le coût se lit au résultat DÉCLARÉ des jobs** (`usage_tokens`, `claims`,
-  `writes`, `faux_depart`), et les refus d'écriture au
+  `writes`, `claim_vide`, `faux_depart`), et les refus d'écriture au
   JOURNAL des appels de l'org : une écriture refusée (RBAC, quota, schéma) ne
   fait pas échouer le job — l'agent conclut « done » sans une ligne écrite.
 
@@ -48,22 +48,30 @@ def _par_suffixe(compte: dict, suffixe: str) -> int:
 
 
 def _claims_writes(resultat: dict) -> tuple[int, int]:
-    """(réservations, écritures) d'un job. Le worker les DÉCLARE quand il les
-    connaît ; sinon elles se dérivent de `tool_counts`. Les deux sources disent
-    la même chose — aucune n'est un repli sur du vide."""
+    """(lignes réservées, écritures) d'un job. Le worker les DÉCLARE quand il
+    les connaît ; sinon elles se dérivent de `tool_counts`.
+
+    ⚠️ Une RÉSERVATION n'est pas un APPEL de réservation : un `data_claim_next`
+    qui ne rend aucune ligne n'a rien réservé (fin de file — il y a toujours
+    plus d'agents que de lignes). Le worker, qui voit la sortie, le déclare ;
+    à défaut on applique SA règle de repli, la même des deux côtés sous peine
+    de voir le bilan et la borne de flotte se contredire : un job qui n'a fait
+    qu'UN appel n'a pu faire que le claim, donc il n'a rien réservé."""
     claims, writes = resultat.get("claims"), resultat.get("writes")
     compte = resultat.get("tool_counts") or {}
     if claims is None:
-        claims = _par_suffixe(compte, "data_claim_next")
+        claims = (0 if sum(int(v or 0) for v in compte.values()) <= 1
+                  else _par_suffixe(compte, "data_claim_next"))
     if writes is None:
         writes = _par_suffixe(compte, "data_write")
     return int(claims), int(writes)
 
 
 def _faux_depart(resultat: dict, claims: int, writes: int) -> bool:
-    """Le faux départ — la ligne réservée, rien d'écrit. Le worker le DÉCLARE
+    """Le faux départ — la ligne RÉSERVÉE, rien d'écrit. Le worker le DÉCLARE
     (lui seul a vu les appels) et sa parole prime ; un résultat qui ne le porte
-    pas (un job en ÉCHEC, par exemple) se juge sur l'asymétrie."""
+    pas (un job en ÉCHEC, par exemple) se juge sur l'asymétrie — sur des
+    réservations réelles, donc, jamais sur des claims restés vides."""
     if "faux_depart" in resultat:
         return bool(resultat["faux_depart"])
     return bool(claims) and not writes

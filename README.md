@@ -69,6 +69,22 @@ joue la boucle sur un fil neuf. `continue` : `{run_id, input?}` — il recharge 
 fil et continue ; `input` absent = reprise pure après une mort en plein tour.
 Un job porte des **références, jamais un secret**.
 
+### Session MCP perdue, et le job qui n'a rien écrit
+
+Une session MCP ne survit pas au **redéploiement** du service : le serveur ne la
+connaît plus (`-32600` « Session not found ») et tous les appels d'outils
+suivants échouent d'un coup. L'agent lit ça comme une réponse, l'annonce
+proprement et conclut — job « done » sans une écriture, donc **jamais rejoué**,
+et la ligne reste « à traiter » sans que personne ne le sache (2 fiches perdues
+en silence le 28/08).
+
+Deux crans. Le client MCP **rouvre** la session et rejoue l'appel — une seule
+fois par appel, journalisée, jamais en boucle ; un `-32600` n'ayant pas été
+exécuté, le rejeu ne peut pas doubler une écriture. Si la réouverture échoue, il
+**lève**. Et le worker **échoue le job** (`ok=False`) dès lors qu'il a réservé
+une ligne, n'a rien écrit, et porte des appels morts au transport : le backend
+le rejoue. Il n'existe pas d'issue légitime « conclu, rien écrit ».
+
 ## La flotte
 
 `python -m oto_runner.fleet flotte.yaml` enfile des jobs `start` sur une file de
@@ -98,7 +114,7 @@ fenêtre ne juge qu'une fois **pleine** : un début de vol n'a pas de verdict.
 
 Chaque job conclu déclare son coût et sa sortie (`usage_tokens`,
 `usage_cache_read`, `usage_cache_write`, `tool_counts`, `claims`, `writes`,
-`faux_depart`, `model`) : c'est ce que l'ordonnanceur lit, sans jamais ouvrir un
+`claim_vide`, `faux_depart`, `model`) : c'est ce que l'ordonnanceur lit, sans jamais ouvrir un
 fil. `usage_tokens` reste **input + output** — la base des bornes de flotte
 (budget, rendement) ne bouge pas ; le cache se compte à côté.
 
@@ -112,6 +128,23 @@ catalogue est injoignable (le relevé ne fait jamais échouer un job).
 Le verdict de faux départ (réserver une ligne sans rien écrire) appartient au
 worker, qui a vu les appels — un résultat qui ne le porte pas vient d'un worker
 trop ancien, et la flotte lève plutôt que de le redeviner.
+
+⚠️ **Un claim à VIDE n'est pas un faux départ.** Une réservation qui ne rend
+aucune ligne (`row: null`) n'a rien réservé, et en fin de file il y a **toujours
+plus d'agents que de lignes** : compter ces jobs a fait échouer une campagne
+ABOUTIE (28/08 — 18 lignes sur 20, les 2 dernières sous bail chez des pairs
+encore en vol ⟹ 5 jobs à un seul appel ⟹ borne mordue, `exit 1`), et aurait
+arrêté à tort une montée par paliers. Le worker déclare donc `claim_vide` et le
+driver l'**ignore** : ni +1 au compteur de faux départs (la borne du 28/08), ni
+remise à zéro (elle rendrait la borne contournable par alternance), ni point de
+rendement — aucune écriture n'était attendue de ce job.
+
+Deux règles selon le chemin, parce que le worker n'y voit pas la même chose :
+la **boucle locale** lit la sortie du claim et s'y fie ; en **Conversations** la
+boucle tourne chez le fournisseur et aucune sortie ne remonte — la règle de
+repli est alors explicite, *un job qui n'a fait qu'UN appel n'a pu faire que le
+claim, donc il n'a rien réservé*. Le **bilan** applique la même règle que la
+borne : les deux parlent du même job, ils ne peuvent pas se contredire.
 
 ### Le bilan de la campagne
 

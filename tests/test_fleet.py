@@ -40,9 +40,11 @@ class FauxBackend:
         self._age[jid] += 1
         if self._age[jid] >= self.duree:
             # Le résultat est celui d'un worker À JOUR : il DÉCLARE son faux
-            # départ, le driver ne le redevine pas (cf. le test dédié).
+            # départ et son claim à vide, le driver ne les redevine pas (cf. les
+            # tests dédiés).
             self.jobs[jid] = {"status": self.statut,
                               "result": {"usage_tokens": self.usage,
+                                         "claim_vide": False,
                                          "faux_depart": False},
                               "last_error": "boom" if self.statut == "failed" else None}
         return self.jobs[jid]

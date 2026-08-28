@@ -97,7 +97,8 @@ def test_le_faux_depart_declare_par_le_worker_prime():
                            "faux_depart": False}},
             2: {"status": "failed",
                 "result": {"usage_tokens": 50,
-                           "tool_counts": {"unconnecteur_data_claim_next": 1}}}}
+                           "tool_counts": {"unconnecteur_data_claim_next": 1,
+                                           "unconnecteur_fr_get": 2}}}}
     bilan = ecrire_bilan(_spec(), BackendBilan(restantes=1), jobs,
                          lignes_initiales=2, secondes=60)
     assert bilan["jobs"] == {"termines": 1, "echoues": 1, "faux_departs": 1}
@@ -151,8 +152,9 @@ def test_la_ligne_de_journal_se_lit_dun_coup_doeil(caplog):
     caplog.set_level(logging.INFO, logger="oto_runner.bilan")
     jobs = {i: _job(jetons=150_000, **{"data_claim_next": 1, "data_write": 1})
             for i in range(1, 13)}
-    jobs[13] = _job(jetons=0, **{"data_claim_next": 1})   # un faux départ
-    jobs[14] = _job(jetons=0, **{"data_claim_next": 1})   # un autre
+    # Deux faux départs : la ligne réservée, cherchée, puis conclue en prose.
+    jobs[13] = _job(jetons=0, **{"data_claim_next": 1, "fr_get": 2})
+    jobs[14] = _job(jetons=0, **{"data_claim_next": 1, "fr_get": 3})
     b = BackendBilan(restantes=18, journal=(14, 0))
     # Le bilan porte le NOM de la flotte (le tag de ses jobs), pas le nom du
     # tableau qu'elle draine — deux flottes peuvent drainer la même file.

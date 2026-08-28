@@ -6,6 +6,15 @@ compte n'est pas ce qu'il fait mais ce qu'il N'A PAS à faire : credential, RBAC
 activation, rédaction de champs, journal d'audit — tout est appliqué CÔTÉ SERVEUR
 au passage de l'appel, parce que ce client est un client comme un autre.
 
+⚠️ Une session MCP ne survit pas au REDÉPLOIEMENT du service : le serveur ne la
+connaît plus (`-32600` « Session not found ») et tous les appels suivants
+échouent d'un coup. L'agent, lui, lit ça comme une réponse — il l'annonce
+poliment et conclut : job « done » sans écriture, donc jamais rejoué, et la
+ligne reste « à traiter » sans que personne ne le sache (2 fiches perdues en
+silence le 28/08). La session se ROUVRE donc ici, une seule fois par appel, et
+l'appel est rejoué ; si la réouverture échoue, on LÈVE — le job échoue et le
+backend le rejoue, ce qui est la seule issue honnête.
+
 Tout ce qui revient du serveur se décode en UTF-8 EXPLICITEMENT (28/08/2026) : le
 flux SSE arrive en `text/event-stream` SANS charset, et requests applique alors le
 défaut HTTP des `text/*` — ISO-8859-1 — donc « é » ressortait en « Ã© ». Le modèle
@@ -14,7 +23,9 @@ RECOPIE ses résultats d'outils : la corruption finissait dans les fiches produi
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 from typing import Optional
 
 import requests  # noqa: F401 — la forme des kwargs
@@ -22,7 +33,25 @@ import requests  # noqa: F401 — la forme des kwargs
 from .agent_runtime import serialize
 from .deadline import post_with_deadline
 
+logger = logging.getLogger("oto_runner")
+
 _TIMEOUT = (10, 180)
+# La signature d'une session que le serveur ne connaît plus : son message, et le
+# code JSON-RPC qu'il rend quand l'en-tête `Mcp-Session-Id` est refusé. Un
+# `-32600` (« Invalid Request ») n'a de toute façon jamais été exécuté : le
+# rejouer après réouverture ne peut pas doubler une écriture.
+_SESSION_PERDUE = re.compile(r"session not found|missing session id", re.I)
+_CODE_REQUETE_INVALIDE = -32600
+
+
+def _session_perdue(d: dict) -> bool:
+    """La réponse dit-elle que notre session n'existe plus côté serveur ?"""
+    err = (d or {}).get("error")
+    if isinstance(err, dict) and (err.get("code") == _CODE_REQUETE_INVALIDE
+                                  or _SESSION_PERDUE.search(str(err.get("message")
+                                                                or ""))):
+        return True
+    return bool(_SESSION_PERDUE.search(str((d or {}).get("_brut") or "")))
 
 
 def _utf8(r) -> str:
@@ -77,6 +106,9 @@ class McpSession:
         return (r.headers, data) if avec_entetes else data
 
     def _ouvrir(self):
+        # L'ancien id part AVANT le premier POST : un serveur qui refuse une
+        # session inconnue refuserait aussi l'initialize qui la porte.
+        self.session = None
         # Un 502 pendant l'initialize rendait une session MUETTE (session id
         # absent avalé) : tous les appels suivants mouraient en « Missing
         # session ID » cryptique (vécu, nuit du 15/08). Trois essais espacés,
@@ -152,8 +184,24 @@ class McpSession:
         if self.run_id is not None and "_run_id" in declares:
             args.setdefault("_run_id", self.run_id)
         self._n += 1
-        d = self._post({"jsonrpc": "2.0", "id": self._n, "method": "tools/call",
-                        "params": {"name": name, "arguments": args}})
+        corps = {"jsonrpc": "2.0", "id": self._n, "method": "tools/call",
+                 "params": {"name": name, "arguments": args}}
+        d = self._post(corps)
+        if _session_perdue(d):
+            # UNE réouverture par appel, jamais une boucle : `_ouvrir` lève
+            # après 3 initialize muets, et le job échoue — c'est voulu. Laisser
+            # l'erreur revenir au modèle ferait conclure « done » sans écriture.
+            logger.warning("session MCP perdue sur %s : réouverture", name)
+            self._ouvrir()
+            logger.info("session MCP rouverte après « Session not found » — "
+                        "%s rejoué", name)
+            self._n += 1
+            d = self._post(dict(corps, id=self._n))
+            if _session_perdue(d):
+                raise RuntimeError(
+                    f"session MCP rouverte mais {name} reste refusé "
+                    f"({str((d or {}).get('error') or d)[:200]}) — le job échoue "
+                    "pour être rejoué")
         res = (d or {}).get("result") or {}
         if res.get("isError"):
             blocs = res.get("content") or []

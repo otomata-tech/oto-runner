@@ -78,11 +78,24 @@ class AgentStep:
     ok: bool
     duration_ms: int
     error: Optional[str] = None
+    # Un appel qui ABOUTIT sans rien rendre — une réservation de ligne qui ne
+    # rend AUCUNE ligne, par exemple. `ok` ne le distingue pas d'un appel
+    # fécond : la boucle ne connaît pas la sémantique des outils, elle pose ici
+    # le verdict que l'appelant lui rend (`a_vide`).
+    vide: bool = False
+    # L'échec vient du TRANSPORT (session MCP perdue, réseau, protocole), pas de
+    # l'outil : l'appel n'a jamais été exécuté. Un tel échec ne se lit pas comme
+    # une réponse métier — un job qui en porte n'a pas « fait le travail ».
+    transport_ko: bool = False
 
     def as_dict(self) -> dict:
         out = {"tool": self.tool, "ok": self.ok, "duration_ms": self.duration_ms}
         if self.error:
             out["error"] = self.error
+        if self.vide:
+            out["vide"] = True
+        if self.transport_ko:
+            out["transport_ko"] = True
         return out
 
 
@@ -123,20 +136,28 @@ def _trim(messages: list) -> list:
 
 
 def execute_tool(spec: AgentSpec, transport: ToolTransport,
-                 call: ToolCall) -> tuple[str, bool]:
-    """UN appel d'outil. Ne lève jamais : une erreur d'outil est un résultat que le
-    modèle lit pour se corriger. Fail-closed sur l'allowlist AVANT tout transport."""
+                 call: ToolCall) -> tuple[str, bool, bool]:
+    """UN appel d'outil → (texte, is_error, panne de transport). Ne lève jamais :
+    une erreur d'outil est un résultat que le modèle lit pour se corriger.
+    Fail-closed sur l'allowlist AVANT tout transport.
+
+    Le troisième terme sépare l'erreur MÉTIER (une réponse : not_found, 400) de
+    la PANNE DE TRANSPORT — le transport a levé, l'appel n'a pas eu lieu. Le
+    modèle lit les deux de la même façon (il n'y a rien d'autre à lui dire),
+    mais le worker, lui, ne doit pas conclure « done » sur un travail que le
+    transport a empêché."""
     if call.name not in spec.tools:
         return (f"Outil `{call.name}` indisponible pour ce run. "
-                f"Outils autorisés : {', '.join(sorted(spec.tools)) or '(aucun)'}.", True)
+                f"Outils autorisés : {', '.join(sorted(spec.tools)) or '(aucun)'}.",
+                True, False)
     try:
         text, is_error = transport.call(call.name, call.arguments or {})
         if is_error and _est_transitoire(text):
             time.sleep(2)
             text, is_error = transport.call(call.name, call.arguments or {})
     except Exception as e:  # noqa: BLE001 — l'erreur de la cible EST un résultat
-        return (f"Erreur de l'outil `{call.name}` : {e}", True)
-    return (_cap(text), is_error)
+        return (f"Erreur de l'outil `{call.name}` : {e}", True, True)
+    return (_cap(text), is_error, False)
 
 
 def _est_transitoire(texte: str) -> bool:
@@ -149,12 +170,17 @@ def _est_transitoire(texte: str) -> bool:
 def run(spec: AgentSpec, transport: ToolTransport, provider,
         prompt: Optional[str] = None,
         history: Optional[list] = None, on_turn: Optional[OnTurn] = None,
-        api_key: Optional[str] = None) -> AgentResult:
+        api_key: Optional[str] = None,
+        a_vide: Optional[Callable[[str, str], bool]] = None) -> AgentResult:
     """La boucle : tours de modèle et d'outils jusqu'à conclusion, plafond, ou refus.
 
     `history` = les `provider_raw` du fil, rejoués dans l'ordre (continuation d'un
     run) ; `prompt` = le nouveau tour user (None = reprendre sans rien ajouter,
-    ex. après un kill en plein tour). `on_turn` appose chaque tour au fil backend."""
+    ex. après un kill en plein tour). `on_turn` appose chaque tour au fil backend.
+
+    `a_vide(nom, sortie)` → « cet appel a abouti SANS RIEN RENDRE » : la boucle
+    voit les sorties d'outils, mais leur SENS appartient au domaine (le worker).
+    Elle lui pose la question et marque le pas ; absent, aucun pas n'est vide."""
     messages = _trim(history or [])
     if prompt is not None:
         um = provider.user_message(prompt)
@@ -195,10 +221,13 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
         neutre = []
         for call in turn.tool_calls:
             started = time.monotonic()
-            text, is_error = execute_tool(spec, transport, call)
+            text, is_error, transport_ko = execute_tool(spec, transport, call)
             ms = int((time.monotonic() - started) * 1000)
             steps.append(AgentStep(tool=call.name, ok=not is_error, duration_ms=ms,
-                                   error=text[:200] if is_error else None))
+                                   error=text[:200] if is_error else None,
+                                   vide=bool(a_vide and not is_error
+                                             and a_vide(call.name, text)),
+                                   transport_ko=transport_ko))
             neutre.append({"name": call.name, "ok": not is_error, "duration_ms": ms})
             results.append({"id": call.id, "text": text, "is_error": is_error})
         # La FORME des résultats dans le fil appartient au provider (un message
