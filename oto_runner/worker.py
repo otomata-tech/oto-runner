@@ -125,11 +125,30 @@ def _ordre_one_shot(ordre: str, run_id: str, payload: dict,
     modèle inventait des slots et des variantes (`slot:edition-vivier`,
     `edition_vivier`, `220-edition-vivier` — 700+ refus)."""
     ns = (payload or {}).get("namespace") or ""
+    projet = (payload or {}).get("project_id")
     identite = (
         f"IDENTITÉ D'EXÉCUTION — obligatoire : sur CHAQUE appel d'outil, ajoute "
         f"l'argument `_run_id: \"{run_id}\"` (c'est ce qui te reconnaît comme "
         f"titulaire de la ligne que tu réserves ; sans lui, tes écritures sont "
         f"refusées). Au claim et au release, passe aussi `worker: \"{run_id}\"`.")
+    # ⚠️ Le PROJET est imposé ICI, jamais nommé dans la procédure. Vécu le 28/08 :
+    # la procédure disait « passe `_project: 220` », et ce projet liait le slot
+    # `vivier` au FICHIER CLIENT. Résultat — des agents travaillant sur une copie
+    # ont écrit dans la table de production par `namespace: "slot:vivier"`, dont
+    # une ligne créée sans clé. Le dispositif de copies ne protégeait rien : le
+    # miroir n'était qu'un nom qu'on passait, l'autre restait joignable.
+    # Une procédure qui nomme son projet EMPORTE SA CIBLE partout où on la copie —
+    # nommer le projet revient à nommer la table, avec une indirection en plus, ce
+    # qui la rend seulement plus difficile à voir. Le projet appartient donc à la
+    # DÉCLARATION DE FLOTTE (`project:`), qui change d'un essai à l'autre, et le
+    # harnais l'impose — comme il impose déjà le run et le nom du tableau.
+    # ⚠️ Pourquoi la prose et pas l'injection : sur ce chemin la boucle d'outils
+    # tourne chez le fournisseur ; `McpSession.call` — qui pose `_project` en
+    # stateless — n'est jamais traversée. La prose est le SEUL levier.
+    if projet is not None:
+        identite += (f" Passe aussi `_project: {projet}` sur chaque appel, et "
+                     f"AUCUN autre : c'est ce projet-ci qui résout les slots. "
+                     f"Ignore tout numéro de projet écrit dans la procédure.")
     if ns:
         identite += (f" Le tableau se nomme EXACTEMENT `{ns}` : passe "
                      f"`namespace: \"{ns}\"` tel quel — jamais `slot:…`, jamais "

@@ -145,3 +145,36 @@ def test_la_prose_porte_les_deux_valeurs_a_recopier():
 def test_la_prose_reste_muette_sans_estampille():
     ordre = worker._ordre_one_shot("fais le travail", "run-42", {"namespace": "t"}, {})
     assert "modele" not in ordre
+
+
+# ── Le PROJET imposé par le harnais ──────────────────────────────────────────
+# Vécu le 28/08 : la procédure disait « passe `_project: 220` », et ce projet liait
+# le slot `vivier` au FICHIER CLIENT. Des agents travaillant sur une copie ont donc
+# écrit dans la table de production via `namespace: "slot:vivier"` — dont une ligne
+# créée sans clé. Le dispositif de copies ne protégeait rien : le miroir n'était
+# qu'un nom qu'on passait, l'autre restait joignable en permanence.
+# Une procédure qui nomme son projet emporte sa cible partout où on la copie.
+
+def test_le_projet_de_la_flotte_est_impose_dans_l_ordre():
+    ordre = worker._ordre_one_shot("fais le travail", "run-42",
+                                   {"namespace": "un-miroir", "project_id": 999})
+    assert "`_project: 999`" in ordre
+    # Et l'ordre prime explicitement sur ce que la procédure pourrait nommer :
+    # sans cette phrase, un agent lisant les deux choisirait au hasard.
+    assert "Ignore tout numéro de projet écrit dans la procédure" in ordre
+
+
+def test_sans_projet_declare_l_ordre_n_en_invente_aucun():
+    """Une flotte sans projet ne doit pas en voir surgir un : mieux vaut que
+    l'agent n'en passe aucun que le mauvais."""
+    ordre = worker._ordre_one_shot("fais le travail", "run-42",
+                                   {"namespace": "un-miroir"})
+    assert "_project" not in ordre
+
+
+def test_le_projet_impose_est_celui_de_la_flotte_pas_un_autre():
+    """Deux flottes, deux projets : c'est la déclaration qui décide, et elle
+    change d'un essai à l'autre — contrairement à une procédure qu'on copie."""
+    a = worker._ordre_one_shot("x", "r", {"namespace": "n", "project_id": 220})
+    b = worker._ordre_one_shot("x", "r", {"namespace": "n", "project_id": 221})
+    assert "`_project: 220`" in a and "`_project: 221`" in b
