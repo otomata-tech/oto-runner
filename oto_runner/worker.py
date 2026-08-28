@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import re
 import time
 from datetime import datetime, timezone
@@ -462,6 +463,35 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     logger.info("job %s : %s (%s)", job["id"], outcome, note)
 
 
+# ── Arrêt gracieux ───────────────────────────────────────────────────────────
+# Un déploiement redémarre les agents. Sans traitement du signal, l'agent MEURT
+# EN PLEIN TRAVAIL : vécu le 28/08 sur une campagne de 100 lignes — trois
+# traitements tués, repris seize minutes plus tard par expiration de bail, et la
+# flotte à l'arrêt pendant ce temps. Rien n'a été perdu (la reprise est le
+# design), mais la protection était une DISCIPLINE — « ne pas déployer pendant
+# une campagne » — au lieu d'être une propriété du système.
+#
+# Le contrat, en une phrase : au signal, NE PLUS RÉSERVER, finir le travail en
+# cours, sortir. L'unité systemd accorde une patience de 16 minutes (la durée du
+# bail : au-delà, attendre n'aurait pas d'objet puisque le travail est
+# reprenable) et tue passé ce délai — la reprise reste le filet.
+_arret_demande = False
+
+
+def _demander_arret(signum, _frame) -> None:
+    """Handler de SIGTERM/SIGINT — il ne fait RIEN d'autre que lever un drapeau.
+
+    ⚠️ Surtout ne pas interrompre le travail en cours ici : un agent tué au
+    milieu d'un traitement laisse sa ligne sous bail et fait repayer le job.
+    C'est précisément ce qu'on corrige."""
+    global _arret_demande
+    if _arret_demande:      # un second signal ne change rien : systemd tuera.
+        return
+    _arret_demande = True
+    logger.info("signal %s reçu — plus aucune réservation ; le travail en cours "
+                "va à son terme, puis l'agent sort", signum)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     if os.environ.get("OTO_RUNNER_ARMED") != "1":
@@ -487,7 +517,9 @@ def main() -> None:
     logger.info("worker armé — file de %s · provider %s · modèle %s%s",
                 backend.base, provider.__name__.rsplit('_', 1)[-1], nom_modele,
                 f" (= {resolu})" if resolu and resolu != nom_modele else "")
-    while True:
+    signal.signal(signal.SIGTERM, _demander_arret)
+    signal.signal(signal.SIGINT, _demander_arret)
+    while not _arret_demande:
         try:
             job = backend.claim(lease_seconds=lease_s)
         except BackendError as e:
@@ -497,6 +529,13 @@ def main() -> None:
         if not job:
             time.sleep(_POLL_S)
             continue
+        # ⚠️ Testé APRÈS le claim : entre la décision de réserver et le retour du
+        # backend, le signal a pu arriver. Rendre la ligne tout de suite vaut
+        # mieux que la garder sous bail pendant que l'agent s'éteint.
+        if _arret_demande:
+            logger.info("arrêt demandé pendant la réservation — job %s rendu à la "
+                        "file sans être entamé", job.get("id"))
+            break
         try:
             _traiter(backend, job, provider)
         except Exception as e:  # noqa: BLE001 — l'échec d'un job n'arrête pas la batterie
@@ -507,6 +546,7 @@ def main() -> None:
                 # Bail déjà perdu (re-claimé ailleurs) : le job ne nous appartient
                 # plus, on n'insiste pas.
                 logger.warning("complete %s : %s", job.get("id"), e2)
+    logger.info("agent sorti proprement — aucun travail interrompu")
 
 
 if __name__ == "__main__":
