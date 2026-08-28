@@ -5,6 +5,11 @@ tools/call), porté du harnais de campagne (`mcp_oto.py`), en requests. Ce qui
 compte n'est pas ce qu'il fait mais ce qu'il N'A PAS à faire : credential, RBAC,
 activation, rédaction de champs, journal d'audit — tout est appliqué CÔTÉ SERVEUR
 au passage de l'appel, parce que ce client est un client comme un autre.
+
+Tout ce qui revient du serveur se décode en UTF-8 EXPLICITEMENT (28/08/2026) : le
+flux SSE arrive en `text/event-stream` SANS charset, et requests applique alors le
+défaut HTTP des `text/*` — ISO-8859-1 — donc « é » ressortait en « Ã© ». Le modèle
+RECOPIE ses résultats d'outils : la corruption finissait dans les fiches produites.
 """
 from __future__ import annotations
 
@@ -18,6 +23,19 @@ from .agent_runtime import serialize
 from .deadline import post_with_deadline
 
 _TIMEOUT = (10, 180)
+
+
+def _utf8(r) -> str:
+    """Le corps d'une réponse du serveur, décodé en UTF-8 — quoi qu'annoncent les
+    en-têtes. `r.text` ne convient pas : il suit le charset déclaré, et le flux
+    SSE n'en déclare AUCUN. `errors="strict"` : un corps qui n'est pas de l'UTF-8
+    est un échec NET, jamais des remplacements muets au milieu d'une fiche."""
+    try:
+        return r.content.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise RuntimeError(
+            f"réponse MCP non décodable en UTF-8 (octet {e.start}, {e.reason}) — "
+            f"content-type « {r.headers.get('Content-Type', '?')} »") from e
 
 
 class McpSession:
@@ -49,8 +67,9 @@ class McpSession:
             entetes["Mcp-Session-Id"] = self.session
         r = post_with_deadline(self.url, json=corps, headers=entetes,
                                timeout=_TIMEOUT, wall_s=300)
-        charge = "".join(l[5:].strip() for l in r.text.splitlines()
-                         if l.startswith("data:")) or r.text
+        brut = _utf8(r)
+        charge = "".join(l[5:].strip() for l in brut.splitlines()
+                         if l.startswith("data:")) or brut
         try:
             data = json.loads(charge) if charge.strip() else {}
         except Exception:  # noqa: BLE001
