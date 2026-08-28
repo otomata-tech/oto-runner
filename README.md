@@ -51,6 +51,16 @@ rien écrit après avoir payé le run entier. `OTO_RUNNER_RELANCES_MAX` (défaut
 **0**, donc inactif) autorise autant de relances du fil — on répond à l'appel
 rendu et on repart de là.
 
+## Cache de prompt (Anthropic)
+
+Le modèle est sans état : chaque tour lui renvoie la procédure, les schémas
+d'outils et tous les résultats d'outils déjà lus. Le provider Anthropic pose donc
+**trois points de cache** (limite dure : 4) — dernier bloc du `system`, dernière
+définition d'`tools`, dernier bloc du dernier message — et une lecture en cache
+se facture ~0,1× le prix d'entrée. ⚠️ Un préfixe sous le minimum du modèle (1024
+jetons sur Sonnet 5) n'est **pas** caché, sans erreur ni avertissement : le seul
+juge est `usage_cache_read` au résultat du job.
+
 ## Un job
 
 `start` : `{procedure, project_id, tools: […], input?, label?, max_steps?}` —
@@ -86,9 +96,11 @@ Sur les `rendement_fenetre` derniers jobs conclus, si la somme des jetons
 dépasse `jetons_par_ecriture_max × max(1, écritures)`, la flotte s'arrête. La
 fenêtre ne juge qu'une fois **pleine** : un début de vol n'a pas de verdict.
 
-Chaque job conclu déclare son coût et sa sortie (`usage_tokens`, `tool_counts`,
-`claims`, `writes`, `faux_depart`, `model`) : c'est ce que l'ordonnanceur lit,
-sans jamais ouvrir un fil.
+Chaque job conclu déclare son coût et sa sortie (`usage_tokens`,
+`usage_cache_read`, `usage_cache_write`, `tool_counts`, `claims`, `writes`,
+`faux_depart`, `model`) : c'est ce que l'ordonnanceur lit, sans jamais ouvrir un
+fil. `usage_tokens` reste **input + output** — la base des bornes de flotte
+(budget, rendement) ne bouge pas ; le cache se compte à côté.
 
 `model` porte la **version concrète** derrière l'alias configuré
 (`mistral-large-latest` → `mistral-large-2512`), relevée au moment de l'appel :

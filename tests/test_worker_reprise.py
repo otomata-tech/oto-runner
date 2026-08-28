@@ -318,3 +318,27 @@ def test_un_run_start_degrade_echoue_avec_une_erreur_parlante(monkeypatch):
     monkeypatch.setattr(W, "McpSession", McpDegrade)
     with pytest.raises(RuntimeError, match="run_start sans run_id"):
         W._traiter(FauxBackend(), _job("start"), provider=None)
+
+
+def test_le_resultat_declare_le_cache_a_cote_des_jetons(monkeypatch):
+    """`usage_tokens` reste input+output — c'est la base des bornes de flotte, et
+    la gonfler du cache les fausserait toutes. Le cache se déclare À CÔTÉ, parce
+    que `input_tokens` ne compte QUE le reste non caché : sans ces deux postes,
+    un run bien caché a l'air gratuit."""
+    import oto_runner.worker as W2
+    from oto_runner.agent_runtime import AgentResult
+
+    def faux_run(spec, transport, provider, prompt=None, history=None, on_turn=None):
+        return AgentResult(reply="fini", stopped="end_turn",
+                           usage={"input_tokens": 2400, "output_tokens": 600,
+                                  "cache_creation_input_tokens": 9200,
+                                  "cache_read_input_tokens": 148000})
+
+    monkeypatch.setattr(W2.agent_runtime, "run", faux_run)
+    monkeypatch.setattr(W2, "McpSession", FauxMcp)
+    b = FauxBackend()
+    W2._traiter(b, _job("start"), provider=None)
+    result = next(a for a in b.appels if a[0] == "complete_result")[1]
+    assert result["usage_tokens"] == 3000
+    assert result["usage_cache_read"] == 148000
+    assert result["usage_cache_write"] == 9200

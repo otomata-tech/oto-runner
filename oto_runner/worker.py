@@ -245,7 +245,15 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
 
     outcome = "done" if res.stopped in ("end_turn",) else "blocked"
     jetons = res.usage.get("input_tokens", 0) + res.usage.get("output_tokens", 0)
+    # Le cache de prompt se compte À CÔTÉ, jamais dedans : `input_tokens` est le
+    # reste NON caché, donc les jetons lus en cache ne sont pas dans `jetons`.
+    # `usage_tokens` reste input+output — c'est la base des bornes de flotte
+    # (budget, rendement), et la déplacer les fausserait toutes d'un coup.
+    lus_en_cache = int(res.usage.get("cache_read_input_tokens") or 0)
+    ecrits_en_cache = int(res.usage.get("cache_creation_input_tokens") or 0)
     note = f"{res.stopped} · {len(res.steps)} appels · {jetons} jetons"
+    if lus_en_cache:
+        note += f" (+ {lus_en_cache} lus en cache)"
     if job["kind"] == "start" or res.stopped in ("end_turn", "max_steps"):
         try:
             mcp.outil("run_finish", {"run_id": run_id, "outcome": outcome, "note": note})
@@ -276,7 +284,10 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # date pas — on ne sait pas quels jobs ont tourné avant la bascule et
     # lesquels après. None quand le provider ne sait pas la résoudre.
     backend.complete(job["id"], ok=True, run_id=run_id,
-                     result={"usage_tokens": jetons, "stopped": res.stopped,
+                     result={"usage_tokens": jetons,
+                             "usage_cache_read": lus_en_cache,
+                             "usage_cache_write": ecrits_en_cache,
+                             "stopped": res.stopped,
                              "steps": len(res.steps), "tool_counts": compte,
                              "claims": claims, "writes": writes,
                              "faux_depart": faux_depart, "model": res.model})

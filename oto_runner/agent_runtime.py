@@ -46,6 +46,11 @@ DEFAULT_MAX_STEPS = 24
 HARD_MAX_STEPS = 64
 MAX_HISTORY_MESSAGES = 60   # tours provider transportés au modèle (le fil complet
                             # reste au backend — ici on borne le COÛT d'un tour)
+# Les postes d'usage cumulés sur un run. Les deux derniers ne sont pas du
+# décor : `input_tokens` ne compte QUE le reste non caché, donc sans eux le
+# volume d'entrée réel d'un run caché est illisible.
+USAGE_KEYS = ("input_tokens", "output_tokens",
+              "cache_creation_input_tokens", "cache_read_input_tokens")
 
 
 class ToolTransport(Protocol):
@@ -159,7 +164,7 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
 
     schemas = provider.format_tools(transport.schemas(spec.tools))
     steps: list[AgentStep] = []
-    usage = {"input_tokens": 0, "output_tokens": 0}
+    usage = dict.fromkeys(USAGE_KEYS, 0)
     stopped = "end_turn"
     reply = ""
     plafond = max(1, min(spec.max_steps, HARD_MAX_STEPS))
@@ -167,7 +172,7 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
     for _ in range(plafond + 1):
         turn = provider.complete(system=spec.system, messages=messages,
                                  tools=schemas, api_key=api_key)
-        for k in ("input_tokens", "output_tokens"):
+        for k in USAGE_KEYS:
             usage[k] = usage.get(k, 0) + int(turn.usage.get(k) or 0)
 
         if turn.stop_reason == "refusal":

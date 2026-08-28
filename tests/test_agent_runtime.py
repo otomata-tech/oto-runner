@@ -203,3 +203,35 @@ def test_une_erreur_metier_nest_jamais_rejouee():
     p = FauxProvider([_turn(calls=[("data_rows", {})]), _turn(text="fini")])
     agent_runtime.run(SPEC, t, p, prompt="go")
     assert t.essais == 1
+
+
+def test_les_postes_de_cache_se_cumulent_sur_tout_le_run():
+    """Un run qui cache bien affiche un `input_tokens` MINUSCULE : sans les deux
+    postes de cache, son volume d'entrée réel serait illisible au résultat."""
+    def _u(**kw):
+        return Turn(text=kw.pop("text", ""), tool_calls=(), stop_reason="end_turn",
+                    raw_content=[], usage=kw)
+
+    p = FauxProvider([
+        Turn(text="", tool_calls=(ToolCall(id="t0", name="data_rows", arguments={}),),
+             stop_reason="tool_use", raw_content=[],
+             usage={"input_tokens": 9000, "output_tokens": 120,
+                    "cache_creation_input_tokens": 8800,
+                    "cache_read_input_tokens": 0}),
+        _u(text="fini", input_tokens=300, output_tokens=80,
+           cache_creation_input_tokens=400, cache_read_input_tokens=8800),
+    ])
+    res = agent_runtime.run(SPEC, FauxTransport(), p, prompt="go")
+    assert res.usage == {"input_tokens": 9300, "output_tokens": 200,
+                         "cache_creation_input_tokens": 9200,
+                         "cache_read_input_tokens": 8800}
+
+
+def test_un_provider_sans_poste_de_cache_ne_casse_pas_le_cumul():
+    """Le chemin OpenAI-compat ne rend que input/output : les postes de cache
+    restent à zéro, jamais absents (l'ordonnanceur lit un dict de forme fixe)."""
+    p = FauxProvider([Turn(text="fini", raw_content=[],
+                           usage={"input_tokens": 10, "output_tokens": 3})])
+    res = agent_runtime.run(SPEC, FauxTransport(), p, prompt="go")
+    assert res.usage["cache_read_input_tokens"] == 0
+    assert res.usage["cache_creation_input_tokens"] == 0

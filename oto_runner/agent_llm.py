@@ -116,6 +116,99 @@ def format_tools(schemas: list[dict]) -> list[dict]:
     return list(schemas)
 
 
+# ── Cache de prompt : un tour ne repaie plus la procédure ────────────────────
+# Le modèle est SANS ÉTAT : la boucle lui renvoie tout à chaque tour — procédure,
+# schémas d'outils, et tous les résultats d'outils déjà lus. Sans point de cache,
+# chaque tour repaie ce préfixe au plein tarif (mesuré : ~180 k jetons d'entrée
+# par fiche, contre ~24 k sur le chemin Conversations).
+#
+# Le cache d'Anthropic est un PRÉFIXE, et l'ordre de rendu est FIXE :
+# `tools` → `system` → `messages`. Un point posé plus loin couvre donc tout ce
+# qui précède, et une LECTURE se facture ~0,1× le prix d'entrée (l'écriture
+# 1,25× en TTL 5 min, le défaut). On en pose TROIS — la limite dure est 4 :
+#   - le dernier bloc de `system` : la procédure, figée pour tout le job ;
+#   - la dernière définition de `tools` : figée pour tout le job (et rendue
+#     AVANT `system`, donc ce point-là couvre le seul catalogue) ;
+#   - le dernier bloc du DERNIER message : le point MOBILE, celui qui fait que
+#     le tour N+1 relit en cache tout ce que le tour N a écrit dans le fil,
+#     résultats d'outils compris.
+# Le marqueur mobile se DÉPLACE à chaque tour, et ce déplacement n'invalide
+# rien : un bloc marqué au tour N reste un point de lecture au tour N+1.
+#
+# ⚠️ Trois limites documentées, assumées telles quelles :
+#   - un préfixe sous le MINIMUM du modèle n'est pas caché, SANS erreur ni
+#     avertissement (512 jetons sur Opus 5 / Fable 5, 1024 sur Sonnet 5 — notre
+#     défaut —, 2048 sur Opus 4.7, 4096 sur Opus 4.6 et Haiku 4.5) ; un run court
+#     ne verra donc rien, et c'est normal ;
+#   - un bloc de PENSÉE ne se marque pas : on remonte au dernier bloc marquable ;
+#   - le point mobile ne remonte que 20 blocs en arrière pour retrouver l'entrée
+#     précédente. Un tour qui appose plus de 20 blocs d'un coup (≥ 20 appels
+#     d'outils parallèles) la pousse hors de la fenêtre et réécrit tout le fil.
+CACHE_CONTROL = {"type": "ephemeral"}
+_NON_CACHABLES = ("thinking", "redacted_thinking")
+
+
+def _marque(bloc: dict) -> dict:
+    return {**bloc, "cache_control": dict(CACHE_CONTROL)}
+
+
+def systeme_cache(system):
+    """`system` → blocs dont le DERNIER porte le point de cache.
+
+    Une chaîne devient UN bloc texte (l'API n'accepte `cache_control` que sur un
+    bloc). Un système vide n'est pas marqué : un bloc texte vide n'est pas
+    cachable, et le marquer serait un point de cache perdu."""
+    if isinstance(system, str):
+        if not system.strip():
+            return system
+        blocs = [{"type": "text", "text": system}]
+    elif isinstance(system, list):
+        blocs = [dict(b) if isinstance(b, dict) else b for b in system]
+        if not blocs or not isinstance(blocs[-1], dict):
+            return system
+    else:
+        return system
+    blocs[-1] = _marque(blocs[-1])
+    return blocs
+
+
+def outils_cache(tools: list[dict]) -> list[dict]:
+    """La DERNIÈRE définition d'outil porte le point de cache — le catalogue est
+    figé pour tout le job, et il se rend avant tout le reste."""
+    if not tools:
+        return tools
+    return [*tools[:-1], _marque(tools[-1])]
+
+
+def fil_cache(messages: list) -> list:
+    """Le dernier bloc MARQUABLE du dernier message porte le point mobile.
+
+    Copie de surface, jamais une mutation : le fil que la boucle appose au
+    backend garde des `provider_raw` SANS marqueur. Un marqueur figé dans le fil
+    stocké se rejouerait à contretemps au rechargement, et ferait un point de
+    cache mort au milieu d'un fil rechargé."""
+    if not messages or not isinstance(messages[-1], dict):
+        return messages
+    dernier = messages[-1]
+    contenu = dernier.get("content")
+    if isinstance(contenu, str):
+        if not contenu.strip():
+            return messages
+        blocs: list = [{"type": "text", "text": contenu}]
+    elif isinstance(contenu, list):
+        blocs = [dict(b) if isinstance(b, dict) else b for b in contenu]
+    else:
+        return messages
+    i = len(blocs) - 1
+    while i >= 0 and (not isinstance(blocs[i], dict)
+                      or _block_type(blocs[i]) in _NON_CACHABLES):
+        i -= 1
+    if i < 0:          # un tour tout en pensée : rien à marquer ici
+        return messages
+    blocs[i] = _marque(blocs[i])
+    return [*messages[:-1], {**dernier, "content": blocs}]
+
+
 def complete(*, system: str, messages: list, tools: list[dict],
              api_key: Optional[str] = None) -> Turn:
     """UN tour de modèle — synchrone : le worker est un process dédié, pas un
@@ -131,19 +224,30 @@ def complete(*, system: str, messages: list, tools: list[dict],
     kwargs: dict = {
         "model": model(),
         "max_tokens": max_tokens(),
-        "system": system,
-        "messages": messages,
+        "system": systeme_cache(system),
+        "messages": fil_cache(messages),
+        # `effort` est ÉPINGLÉ par worker (env), et c'est aussi ce que le cache
+        # demande : le faire varier d'un tour à l'autre invaliderait le fil.
         "output_config": {"effort": effort()},
     }
     if tools:
-        kwargs["tools"] = tools
+        kwargs["tools"] = outils_cache(tools)
     resp = client.messages.create(**kwargs)
 
     stop = getattr(resp, "stop_reason", "") or "end_turn"
     usage = {}
     try:
-        usage = {"input_tokens": resp.usage.input_tokens,
-                 "output_tokens": resp.usage.output_tokens}
+        u = resp.usage
+        # ⚠️ `input_tokens` n'est QUE le reste NON caché — le volume d'entrée
+        # réel vaut input + cache_creation + cache_read. Un run qui cache bien
+        # affiche un `input_tokens` minuscule : c'est la somme qui se lit, pas
+        # le champ seul. 0 quand l'API ne rend pas le champ (pas de cache).
+        usage = {"input_tokens": u.input_tokens,
+                 "output_tokens": u.output_tokens,
+                 "cache_creation_input_tokens":
+                     int(getattr(u, "cache_creation_input_tokens", 0) or 0),
+                 "cache_read_input_tokens":
+                     int(getattr(u, "cache_read_input_tokens", 0) or 0)}
     except Exception:  # noqa: BLE001 — la télémétrie n'est jamais bloquante
         pass
 
