@@ -20,6 +20,33 @@ Deux règles de lecture, toutes deux payées cher :
 Rien ici n'arrête une flotte : une lecture qui échoue devient un poste `null`
 assumé et une ligne de journal, jamais un chiffre inventé ni un traceback qui
 masquerait l'arrêt en cours (le bilan de fin tombe souvent APRÈS une panne).
+
+⚠️ **PIÈGE DE LECTURE des refus « ligne réservée par … » — deux fois la même
+erreur en une semaine, par deux sessions différentes (2026-08-28).** Le message
+d'un refus d'écriture nomme le TITULAIRE du moment :
+
+    ligne « 01a0…d018 » réservée par « 06953e8c… » jusqu'à 15:39:04
+    ligne « 01a0…d018 » réservée par « 262ea7e2… » jusqu'à 15:44:03
+
+Deux titulaires sur la même ligne à une minute d'intervalle **se lisent
+naturellement comme « deux agents la traitent en même temps »** — et l'on en
+conclut que la réservation n'est pas atomique. **C'est faux, et coûteux : la
+conclusion est remontée jusqu'à une décision de montée en charge.** La prise de
+ligne est verrouillée par le datastore ; des titulaires SUCCESSIFS ressemblent
+à des titulaires SIMULTANÉS.
+
+**Comment les distinguer, et il n'y a que ce moyen :** reconstituer la
+chronologie de la ligne au journal des appels — `data_claim_next`,
+`data_release` et `data_write` mêlés, triés par heure. Si un `data_release` du
+premier titulaire précède la prise du second, ils se succèdent et le verrou
+fonctionne. C'était le cas.
+
+**Et alors, que dit le refus ?** Qu'un agent a écrit sur une ligne qu'il ne
+détient pas — relâchée entre-temps, ou dont il a reconstruit l'identifiant au
+lieu de reprendre celui que la réservation lui a rendu. **Un refus est donc la
+preuve que la garde FONCTIONNE, jamais l'indice qu'elle manque** : prendre un
+dispositif de sécurité pour le danger qu'il prévient est l'erreur exacte à ne
+pas refaire ici.
 """
 from __future__ import annotations
 
