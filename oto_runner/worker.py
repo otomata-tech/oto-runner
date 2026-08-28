@@ -109,7 +109,8 @@ def _assainir_pour_transport(historique: list) -> list:
     return out
 
 
-def _ordre_one_shot(ordre: str, run_id: str, payload: dict) -> str:
+def _ordre_one_shot(ordre: str, run_id: str, payload: dict,
+                    estampille: Optional[dict] = None) -> str:
     """L'IDENTITÉ d'exécution, imposée par le worker à l'agent one-shot.
 
     En stateless, le worker posait `_run_id` sur chaque appel : le backend
@@ -132,6 +133,17 @@ def _ordre_one_shot(ordre: str, run_id: str, payload: dict) -> str:
         identite += (f" Le tableau se nomme EXACTEMENT `{ns}` : passe "
                      f"`namespace: \"{ns}\"` tel quel — jamais `slot:…`, jamais "
                      f"une variante.")
+    # L'ESTAMPILLE par la prose : sur ce chemin la boucle d'outils tourne chez
+    # le fournisseur, le worker ne voit pas les arguments d'un `data_write` et
+    # ne peut donc pas l'injecter comme il le fait en stateless. Même recours
+    # que pour `_run_id` ci-dessus — et on ne demande pas à l'agent de SAVOIR
+    # quel modèle le fait tourner : on lui donne les deux chaînes à recopier.
+    if estampille:
+        champs = ", ".join(f'`{k}: "{v}"`' for k, v in estampille.items() if v)
+        if champs:
+            identite += (f" Sur CHAQUE écriture de fiche, ajoute aussi {champs} — "
+                         f"recopie ces valeurs telles quelles, elles identifient "
+                         f"ce qui a produit la fiche.")
     return identite + "\n\n" + ordre
 
 
@@ -215,6 +227,55 @@ def _lignes_reservees(res, appels_claim: int, one_shot: bool) -> int:
                 if s.ok and s.vide and s.tool.endswith(_CLAIM))
     return max(0, appels_claim - vides)
 
+def _estampille(mcp, payload: dict, provider, procedure: dict) -> dict:
+    """Ce qui identifiera la fiche : le MODÈLE qui l'a écrite et la VERSION de
+    procédure qui l'a dictée.
+
+    Posé par le harnais, jamais demandé à l'agent (doc 1170) — et jamais laissé
+    à un geste manuel de fin de campagne : celui-là a été oublié sur la
+    production précisément, laissant 504 fiches livrées dont aucune ne dit ce
+    qui l'a produite.
+
+    Rend {} — donc ne pose rien — dans deux cas, tous deux volontaires :
+      · le tableau ne DÉCLARE pas les deux champs. Injecter une colonne non
+        déclarée dans un tableau strict fait refuser l'écriture ENTIÈRE : on
+        perdrait la fiche pour un champ d'observabilité ;
+      · le modèle ou la version ne s'établissent pas. Une demi-estampille
+        (« écrit par ? en version 101 ») est pire que rien : elle a l'air de
+        renseigner et ne renseigne pas.
+    ⚠️ Ne lève JAMAIS : un relevé d'observabilité ne fait pas échouer un job que
+    la campagne a déjà payé."""
+    try:
+        modele = None
+        resoudre = getattr(provider, "modele_resolu", None)
+        courant = provider.model() if hasattr(provider, "model") else None
+        if resoudre and courant:
+            modele = resoudre(courant)
+        modele = modele or courant
+        version = procedure.get("version")
+        slug = payload.get("procedure")
+        if not modele or version is None or not slug:
+            logger.info("estampille non posée : modèle=%s version=%s", modele, version)
+            return {}
+        voulu = {"modele": str(modele), "version_procedure": f"{slug} v{version}"}
+        ns = payload.get("namespace")
+        if not ns:
+            return {}
+        schema = mcp.outil("data_get_schema", {"namespace": ns}) or {}
+        corps = schema.get("schema") if isinstance(schema.get("schema"), dict) else schema
+        declares = {f.get("key") for f in ((corps or {}).get("fields") or [])
+                    if isinstance(f, dict)}
+        manquants = sorted(k for k in voulu if k not in declares)
+        if manquants:
+            logger.info("estampille non posée sur `%s` : champ(s) non déclaré(s) %s "
+                        "— une colonne non déclarée ferait refuser toute la fiche",
+                        ns, ", ".join(manquants))
+            return {}
+        return voulu
+    except Exception as e:  # noqa: BLE001 — cf. docstring : jamais bloquant.
+        logger.warning("estampille non établie : %s", e)
+        return {}
+
 
 def _spec_du_job(job: dict, procedure_md: str) -> AgentSpec:
     p = job.get("payload") or {}
@@ -263,6 +324,8 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
 
     mcp.run_id = run_id
     spec = _spec_du_job(job, procedure.get("body_md") or "")
+    estampille = _estampille(mcp, p, provider, procedure)
+    mcp.estampille = estampille   # chemin stateless : injectée à l'écriture
 
     def apposer(role: str, neutre: dict, brut: dict) -> None:
         # L'appose du fil EST la persistance : elle mérite des rejeux avant de
@@ -294,7 +357,7 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         # reprise d'un start re-claimé REJOUE l'ordre du payload : chaque
         # conversation est neuve, les baux de lignes rendent le rejeu inoffensif.
         ordre = _ordre_one_shot(prompt or p.get("input") or "Exécute la procédure.",
-                                run_id, p)
+                                run_id, p, estampille)
         res = provider.run_once(instructions=spec.system, inputs=ordre,
                                 tools=p.get("tools") or ())
         # Le fil garde l'ORDRE et la SYNTHÈSE (l'observabilité au grain run) — le
@@ -369,7 +432,10 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 "steps": len(res.steps), "tool_counts": compte,
                 "claims": claims, "writes": writes,
                 "claim_vide": claim_vide,
-                "faux_depart": faux_depart, "model": res.model}
+                "faux_depart": faux_depart, "model": res.model,
+                # Un oubli d'estampille doit SE VOIR au bilan : le geste
+                # manuel qu'on remplace ici avait été oublié sans bruit.
+                "estampille": bool(estampille)}
     if echec_transport:
         outils = ", ".join(sorted({s.tool for s in res.steps
                                    if s.transport_ko}))[:200]
