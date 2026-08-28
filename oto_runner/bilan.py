@@ -30,6 +30,8 @@ import tempfile
 from datetime import datetime, timezone
 from typing import Optional
 
+from .worker import OUTILS_DE_TENUE
+
 logger = logging.getLogger("oto_runner.bilan")
 
 PERIODE_S = 600            # défaut du champ de déclaration `bilan_periode_s`
@@ -54,14 +56,16 @@ def _claims_writes(resultat: dict) -> tuple[int, int]:
     ⚠️ Une RÉSERVATION n'est pas un APPEL de réservation : un `data_claim_next`
     qui ne rend aucune ligne n'a rien réservé (fin de file — il y a toujours
     plus d'agents que de lignes). Le worker, qui voit la sortie, le déclare ;
-    à défaut on applique SA règle de repli, la même des deux côtés sous peine
-    de voir le bilan et la borne de flotte se contredire : un job qui n'a fait
-    qu'UN appel n'a pu faire que le claim, donc il n'a rien réservé."""
+    à défaut on applique SA règle de repli — la MÊME liste, importée, sous peine
+    de voir le bilan et la borne de flotte se contredire : un job dont tous les
+    appels sont des gestes de TENUE (réserver, relâcher, ouvrir et clore le
+    run) n'a fait aucun travail, donc il n'a rien réservé."""
     claims, writes = resultat.get("claims"), resultat.get("writes")
     compte = resultat.get("tool_counts") or {}
     if claims is None:
-        claims = (0 if sum(int(v or 0) for v in compte.values()) <= 1
-                  else _par_suffixe(compte, "data_claim_next"))
+        travail = [k for k in compte
+                   if not any(str(k).endswith(t) for t in OUTILS_DE_TENUE)]
+        claims = (_par_suffixe(compte, "data_claim_next") if travail else 0)
     if writes is None:
         writes = _par_suffixe(compte, "data_write")
     return int(claims), int(writes)

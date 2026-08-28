@@ -43,6 +43,12 @@ _LEASE_S = 600        # ~3× le tour le plus lent observé ; prolongé entre les
 # par égalité (13 jobs comptés « zéro écriture » alors que les fiches partaient).
 _CLAIM = "data_claim_next"
 _WRITE = "data_write"
+# Les gestes de TENUE de la file — réserver, relâcher, ouvrir et clore le run —
+# par opposition aux appels de TRAVAIL (chercher, lire, écrire). Un job qui n'a
+# fait QUE ceux-là n'a rien traité, donc rien réservé. Le bilan lit la même
+# liste : deux définitions du travail finiraient par diverger, et la borne
+# contredirait le pilotage.
+OUTILS_DE_TENUE = (_CLAIM, "data_release", "run_start", "run_finish")
 # La marque d'une réservation qui ne rend RIEN, quand la charge n'est pas
 # parsable (sortie tronquée par `_cap`, texte nu) — la charge JSON reste la
 # source qui fait foi, ce motif n'est qu'un repli, et il est explicite.
@@ -193,11 +199,18 @@ def _lignes_reservees(res, appels_claim: int, one_shot: bool) -> int:
     - **boucle locale** (`agent_runtime`) : le worker VOIT la sortie du claim —
       les pas marqués vides ne comptent pas. C'est la règle fidèle ;
     - **conversations** : la boucle tourne chez le fournisseur, aucune sortie ne
-      remonte. Règle de REPLI, explicite : un job qui n'a fait qu'UN appel n'a
-      pu faire que le claim, donc il n'a rien réservé. À partir de deux appels,
-      on ne sait pas — et on compte, comme avant."""
+      remonte. Règle de REPLI, explicite : un job dont TOUS les appels sont des
+      gestes de tenue (`OUTILS_DE_TENUE`) n'a fait aucun travail — il n'a donc
+      rien réservé. Un seul appel de travail, tenté ou abouti, et on considère
+      qu'il a eu une ligne à traiter. ⚠️ Compter les APPELS ne suffit pas : sur
+      une file vide l'agent en fait DEUX — il réserve, reçoit `row: null`,
+      RELÂCHE, puis conclut proprement (3 jobs de l'étape 2 comptés faux
+      départs le 28/08 par la première version de ce repli, qui s'arrêtait à
+      « un seul appel »)."""
     if one_shot:
-        return 0 if len(res.steps) <= 1 else appels_claim
+        travail = [s for s in res.steps
+                   if not any(s.tool.endswith(t) for t in OUTILS_DE_TENUE)]
+        return appels_claim if travail else 0
     vides = sum(1 for s in res.steps
                 if s.ok and s.vide and s.tool.endswith(_CLAIM))
     return max(0, appels_claim - vides)

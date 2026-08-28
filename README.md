@@ -142,9 +142,14 @@ rendement — aucune écriture n'était attendue de ce job.
 Deux règles selon le chemin, parce que le worker n'y voit pas la même chose :
 la **boucle locale** lit la sortie du claim et s'y fie ; en **Conversations** la
 boucle tourne chez le fournisseur et aucune sortie ne remonte — la règle de
-repli est alors explicite, *un job qui n'a fait qu'UN appel n'a pu faire que le
-claim, donc il n'a rien réservé*. Le **bilan** applique la même règle que la
-borne : les deux parlent du même job, ils ne peuvent pas se contredire.
+repli porte alors sur la NATURE des appels, *un job dont tous les appels sont
+des gestes de tenue* (`data_claim_next`, `data_release`, `run_start`,
+`run_finish`) *n'a fait aucun travail, donc il n'a rien réservé* ; un seul appel
+d'outil métier, et il compte. ⚠️ Compter les appels ne suffit pas : sur une file
+vide l'agent en fait **deux** — il réserve, reçoit `row: null`, relâche, puis
+conclut proprement. Le **bilan** applique la même règle que la borne, sur la
+même liste importée : les deux parlent du même job, ils ne peuvent pas se
+contredire.
 
 ### Le bilan de la campagne
 

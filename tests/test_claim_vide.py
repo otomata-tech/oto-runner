@@ -27,6 +27,7 @@ from tests.test_worker_reprise import FauxBackend, FauxMcp
 
 _CLAIM = "demo-connecteur_data_claim_next"
 _WRITE = "demo-connecteur_data_write"
+_RELEASE = "demo-connecteur_data_release"
 
 
 # ── 1. la sortie du claim ────────────────────────────────────────────────────
@@ -127,19 +128,32 @@ class ProviderOneShot:
             AgentStep(tool=o, ok=True, duration_ms=1) for o in self.outils])
 
 
-def test_en_conversations_un_seul_appel_na_rien_reserve(monkeypatch):
-    """Règle de REPLI, explicite : sans sortie d'outil, un job qui n'a fait
-    qu'UN appel n'a pu faire que le claim — il n'a donc rien réservé."""
-    r = _conclure(monkeypatch, [], provider=ProviderOneShot([_CLAIM]))
-    assert (r["claims"], r["claim_vide"], r["faux_depart"]) == (0, True, False)
+def test_en_conversations_reserver_puis_relacher_na_rien_reserve(monkeypatch):
+    """LE geste réel d'une file vide, vu en production le 28/08 : l'agent
+    réserve, reçoit `row: null`, RELÂCHE, et conclut « la file est vide ». Deux
+    appels, aucun travail — compter les appels ratait ces jobs (3 sur l'étape
+    2). La règle porte sur la NATURE des appels, pas sur leur nombre."""
+    for outils in ([_CLAIM], [_CLAIM, _RELEASE],
+                   [_CLAIM, _RELEASE, _CLAIM, _RELEASE]):
+        r = _conclure(monkeypatch, [], provider=ProviderOneShot(outils))
+        assert (r["claims"], r["claim_vide"], r["faux_depart"]) == (0, True, False), \
+            f"aucun appel de travail dans {outils}"
 
 
-def test_en_conversations_deux_appels_ne_dispensent_plus_du_verdict(monkeypatch):
-    """Au-delà d'UN appel on ne sait pas — et on compte, comme avant : cinq
-    appels sans une écriture restent un faux départ."""
-    r = _conclure(monkeypatch, [], provider=ProviderOneShot(
-        [_CLAIM, "serper_search", "fr_get", "fr_get", "serper_search"]))
+def test_en_conversations_un_seul_appel_de_travail_vaut_reservation(monkeypatch):
+    """L'autre bord : dès qu'un outil MÉTIER est appelé, le job a eu une ligne
+    à traiter — s'il n'écrit pas, c'est un faux départ, comme avant."""
+    r = _conclure(monkeypatch, [], provider=ProviderOneShot([_CLAIM, "fr_get"]))
     assert (r["claims"], r["claim_vide"], r["faux_depart"]) == (1, False, True)
+
+    r = _conclure(monkeypatch, [], provider=ProviderOneShot(
+        [_CLAIM, _RELEASE, "serper_search"]))
+    assert (r["claims"], r["claim_vide"], r["faux_depart"]) == (1, False, True), \
+        "relâcher après avoir travaillé n'efface pas le travail"
+
+    r = _conclure(monkeypatch, [], provider=ProviderOneShot(
+        [_CLAIM, "fr_get", _WRITE, _RELEASE]))
+    assert (r["claims"], r["writes"], r["faux_depart"]) == (1, 1, False)
 
 
 # ── 3. la borne du driver ────────────────────────────────────────────────────
@@ -195,10 +209,12 @@ def test_le_bilan_applique_la_meme_regle_que_la_borne():
         1: {"status": "done", "result": {"usage_tokens": 100, "claims": 0,
                                          "writes": 0, "claim_vide": True,
                                          "faux_depart": False}},
-        # dérivé de `tool_counts` (job en échec, sans marqueur) : UN appel, donc
-        # rien de réservé — la même règle de repli que le worker
+        # dérivé de `tool_counts` (job en échec, sans marqueur) : que des gestes
+        # de TENUE, donc aucun travail et rien de réservé — la même règle de
+        # repli que le worker, importée de lui
         2: {"status": "failed", "result": {"usage_tokens": 50,
-                                           "tool_counts": {_CLAIM: 1}}},
+                                           "tool_counts": {_CLAIM: 1,
+                                                           _RELEASE: 1}}},
         # celui-là a bien réservé, cherché, et n'a rien écrit
         3: {"status": "done", "result": {"usage_tokens": 900,
                                          "tool_counts": {_CLAIM: 1, "fr_get": 4}}},
