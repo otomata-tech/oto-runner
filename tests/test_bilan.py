@@ -179,7 +179,11 @@ def test_le_json_se_pose_a_cote_de_la_declaration_et_se_reecrit(tmp_path):
     assert set(intermediaire) == {"horodatage", "flotte", "namespace", "procedure",
                                   "final", "arret", "secondes", "lignes", "jobs",
                                   "jetons", "ecritures", "refus_ecriture",
-                                  "refus_ecriture_omis"}, "la forme du bilan est un contrat"
+                                  "refus_ecriture_omis",
+                                  # `lignes_sorties` : ajouté le 28/08. Vaut None
+                                  # au bilan intermédiaire — une ligne peut encore
+                                  # sortir tant que la flotte tourne.
+                                  "lignes_sorties"}, "la forme du bilan est un contrat"
     assert intermediaire["final"] is False and intermediaire["arret"] is None
     assert intermediaire["lignes"]["abouties"] == 12
 

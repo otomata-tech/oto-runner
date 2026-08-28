@@ -214,6 +214,73 @@ def _ecrire(chemin: str, bilan: dict) -> None:
         logger.error("bilan : écriture de %s impossible : %s", chemin, e)
 
 
+def annoter_lignes_sorties(spec, backend, jobs: dict) -> dict:
+    """Écrit sur les lignes SORTIES de la file ce qui les a traitées et pourquoi
+    elles sont sorties. Rend {"sorties": n, "annotees": k}.
+
+    ⚠️ Pourquoi ça existe. Une ligne réservée trois fois sans écriture est
+    basculée en « échec » PAR LA PLATEFORME : personne n'écrit à ce moment-là,
+    donc la ligne ne porte ni estampille, ni motif, ni la moindre trace de ce
+    qui a été tenté. **C'est le seul événement de la campagne sur lequel on a
+    vraiment besoin de savoir, et le seul sur lequel on ne sait rien.** Mesuré
+    le 28/08 : 2 lignes sur 23 — à l'échelle d'une vague, des centaines de
+    fiches muettes, et une fiche muette ne se rattrape pas après coup,
+    contrairement à une fiche incomplète.
+
+    Le harnais ne peut pas le faire : le worker qui vient de finir ne sait pas
+    quelle ligne il avait, ni qu'elle vient de sortir. L'ordonnanceur, lui, voit
+    l'état final du tableau — c'est le seul endroit possible.
+
+    ⚠️ BEST-EFFORT, comme l'estampille : une observation ne bloque jamais une
+    file. Tout échec de lecture ou d'écriture est journalisé et le bilan sort
+    quand même."""
+    if not getattr(spec, "namespace", None):
+        return {"sorties": 0, "annotees": 0}
+    try:
+        sorties = backend.rows(spec.namespace, {"statut": "echec"},
+                               org=getattr(spec, "org", None), limit=500)
+    except Exception as e:  # noqa: BLE001 — cf. docstring
+        logger.warning("bilan : lignes sorties illisibles : %s", e)
+        return {"sorties": None, "annotees": 0}
+    a_annoter = [r for r in sorties if not r.get("modele")]
+    if not a_annoter:
+        return {"sorties": len(sorties), "annotees": 0}
+
+    # Le modèle vient des jobs de CETTE flotte ; la version de procédure se lit
+    # sur une ligne RÉUSSIE du même lot — l'ordonnanceur ne la connaît pas, mais
+    # ses propres fiches la portent. Deux relevés, aucune invention.
+    modeles = {(j.get("result") or {}).get("model") for j in jobs.values()}
+    modele = next((m for m in modeles if m), None)
+    version = None
+    try:
+        for r in backend.rows(spec.namespace, {"statut": "enrichi"},
+                              org=getattr(spec, "org", None), limit=1):
+            version = r.get("version_procedure")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("bilan : version de procédure illisible : %s", e)
+
+    raison = ("sortie de la file : réservée sans écriture jusqu'au plafond de "
+              "la plateforme. Aucun agent n'a écrit de fiche ; le motif exact "
+              "de chaque tentative se lit au journal des appels de l'org "
+              f"(outil data_write, autour du {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC).")
+    annotees = 0
+    for r in a_annoter:
+        valeurs = {"retraitement": "outil", "retraitement_motif": raison}
+        if modele:
+            valeurs["modele"] = modele
+        if version:
+            valeurs["version_procedure"] = version
+        try:
+            backend.patch_row(spec.namespace, str(r.get("_id")), valeurs,
+                              org=getattr(spec, "org", None))
+            annotees += 1
+        except Exception as e:  # noqa: BLE001 — une ligne non annotée ne bloque
+            # ni les suivantes ni le bilan : on la compte comme non expliquée.
+            logger.warning("bilan : ligne %s non annotée : %s", r.get("siren"), e)
+    logger.info("bilan : %d ligne(s) sortie(s), %d annotée(s)", len(sorties), annotees)
+    return {"sorties": len(sorties), "annotees": annotees}
+
+
 def ecrire_bilan(spec, backend, jobs: dict, *, lignes_initiales: int,
                  secondes: float, arret: str = "") -> dict:
     """Calcule le bilan de la flotte, le journalise et le pose en JSON.
@@ -227,6 +294,9 @@ def ecrire_bilan(spec, backend, jobs: dict, *, lignes_initiales: int,
     abouties = None if restantes is None else max(0, lignes_initiales - restantes)
     conclus = postes["termines"] + postes["echoues"]
     refus, refus_omis = _refus_ecriture(spec, backend, secondes)
+    # Seulement au bilan de FIN : une ligne peut encore sortir pendant la flotte,
+    # et l'annoter à chaque tour ferait du bruit sans rien apprendre.
+    sorties = annoter_lignes_sorties(spec, backend, jobs) if arret else None
     bilan = {
         "horodatage": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         # Le nom de la flotte est le TAG apposé à ses jobs : c'est par lui
@@ -241,6 +311,10 @@ def ecrire_bilan(spec, backend, jobs: dict, *, lignes_initiales: int,
                    "abouties": abouties},
         "jobs": {"termines": postes["termines"], "echoues": postes["echoues"],
                  "faux_departs": postes["faux_departs"]},
+        # ⚠️ Compté À PART, jamais fondu dans « abouties » : un bilan qui rend
+        # « 98 traitées » sans dire que 2 sont sorties muettes rend un
+        # dénominateur amputé qui a l'air complet.
+        "lignes_sorties": sorties,
         "jetons": {"total": postes["jetons"],
                    "par_job": round(postes["jetons"] / conclus) if conclus else None,
                    # Le vrai coût d'une campagne : ce que coûte une ligne qui

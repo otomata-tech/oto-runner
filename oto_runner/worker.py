@@ -373,7 +373,9 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                                 history=historique, on_turn=apposer,
                                 a_vide=_claim_sans_ligne)
 
-    jetons = res.usage.get("input_tokens", 0) + res.usage.get("output_tokens", 0)
+    entree = int(res.usage.get("input_tokens") or 0)
+    sortie = int(res.usage.get("output_tokens") or 0)
+    jetons = entree + sortie
     # Le cache de prompt se compte À CÔTÉ, jamais dedans : `input_tokens` est le
     # reste NON caché, donc les jetons lus en cache ne sont pas dans `jetons`.
     # `usage_tokens` reste input+output — c'est la base des bornes de flotte
@@ -425,7 +427,17 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # l'appel. Un alias flotte : sans ce champ, une anomalie de campagne ne se
     # date pas — on ne sait pas quels jobs ont tourné avant la bascule et
     # lesquels après. None quand le provider ne sait pas la résoudre.
+    # ⚠️ ENTRÉE et SORTIE se gardent SÉPARÉMENT, pas seulement leur somme : elles
+    # se facturent au TRIPLE l'une de l'autre. Sans elles, projeter le coût d'une
+    # campagne oblige à poser une répartition au jugé — et cette hypothèse pèse
+    # ±17 %, autant que l'incertitude statistique, à ceci près qu'elle ne se
+    # resserre PAS avec plus de fiches (constaté le 28/08 en chiffrant la vague).
+    # Une incertitude qui ne cède pas aux données se lève par un instrument,
+    # jamais par une mesure de plus. `usage_tokens` reste la SOMME : c'est la
+    # base des bornes de flotte, et la déplacer les fausserait toutes d'un coup.
     resultat = {"usage_tokens": jetons,
+                "usage_input": entree,
+                "usage_output": sortie,
                 "usage_cache_read": lus_en_cache,
                 "usage_cache_write": ecrits_en_cache,
                 "stopped": res.stopped,

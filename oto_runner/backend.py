@@ -6,6 +6,7 @@ oto : si ces contrats tiennent, le worker est remplaçable (ADR 0064-D1).
 """
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Optional
 
@@ -14,6 +15,28 @@ import requests
 from .deadline import DeadlineExceeded, get_with_deadline, post_with_deadline
 
 _TIMEOUT = (10, 60)
+
+
+def _params_filtre(filter: Optional[dict], limit: int) -> dict:
+    """La grammaire riche du datastore : une valeur peut être un opérateur
+    ({"in": [...]}) ou une LISTE (raccourci pour `in`) — c'est ce qui permet de
+    borner une flotte à un LOT NOMMÉ de lignes (une comparaison entre deux
+    modèles se fait sur des populations exactes, jamais sur des plages
+    approximatives)."""
+    params: dict = {"limit": limit}
+    if not filter:
+        return params
+    clauses = []
+    for k, v in filter.items():
+        if isinstance(v, dict) and len(v) == 1:
+            op, val = next(iter(v.items()))
+            clauses.append({"field": k, "op": op, "value": val})
+        elif isinstance(v, (list, tuple)):
+            clauses.append({"field": k, "op": "in", "value": list(v)})
+        else:
+            clauses.append({"field": k, "op": "eq", "value": v})
+    params["filters"] = json.dumps(clauses)
+    return params
 
 
 class BackendError(RuntimeError):
@@ -53,6 +76,18 @@ class Backend:
             except Exception:  # noqa: BLE001
                 detail = r.text
             raise BackendError(f"{chemin} → {r.status_code} : {str(detail)[:300]}",
+                               status=r.status_code)
+        return r.json() if r.content else {}
+
+    def _patch(self, chemin: str, corps: dict,
+               org: Optional[int] = None) -> dict:
+        entetes = {"Authorization": f"Bearer {self.token}"}
+        if org is not None:
+            entetes["X-Oto-Org"] = str(org)
+        r = self._reseau(chemin, lambda u, **kw: requests.patch(u, **kw),
+                         json=corps, timeout=_TIMEOUT, headers=entetes)
+        if r.status_code >= 400:
+            raise BackendError(f"{chemin} → {r.status_code} : {r.text[:300]}",
                                status=r.status_code)
         return r.json() if r.content else {}
 
@@ -140,27 +175,34 @@ class Backend:
         """Combien de lignes matchent encore le filtre de la flotte. Lecture
         d'observation (borne d'arrêt + ré-enfilement) — jamais un claim : le
         claim appartient à l'AGENT, dans la procédure."""
-        import json as _json
-        params: dict = {"limit": 1}
-        if filter:
-            # La grammaire riche du datastore : une valeur peut être un
-            # opérateur ({"in": [...]}) ou une LISTE (raccourci pour in) —
-            # c'est ce qui permet de borner une flotte à un LOT NOMMÉ de
-            # lignes (une comparaison A/B se fait sur des populations exactes,
-            # jamais sur des plages approximatives).
-            clauses = []
-            for k, v in filter.items():
-                if isinstance(v, dict) and len(v) == 1:
-                    op, val = next(iter(v.items()))
-                    clauses.append({"field": k, "op": op, "value": val})
-                elif isinstance(v, (list, tuple)):
-                    clauses.append({"field": k, "op": "in", "value": list(v)})
-                else:
-                    clauses.append({"field": k, "op": "eq", "value": v})
-            params["filters"] = _json.dumps(clauses)
-        out = self._get(f"/api/datastore/namespaces/{namespace}/rows", params,
-                        org=org)
+        out = self._get(f"/api/datastore/namespaces/{namespace}/rows",
+                        _params_filtre(filter, limit=1), org=org)
         return int(out.get("total") or 0)
+
+    def rows(self, namespace: str, filter: Optional[dict] = None,
+             org: Optional[int] = None, limit: int = 200) -> list[dict[str, Any]]:
+        """Les lignes qui matchent — lecture d'observation, jamais un claim.
+
+        Sert au bilan de fin : une ligne SORTIE de la file (trois réservations
+        sans écriture) ne dit ni pourquoi elle est sortie ni ce qui l'a traitée,
+        parce que la bascule est opérée par la plateforme et que PERSONNE
+        n'écrit à ce moment-là. C'est le seul événement de la campagne dont on
+        a vraiment besoin et sur lequel on ne sait rien."""
+        out = self._get(f"/api/datastore/namespaces/{namespace}/rows",
+                        _params_filtre(filter, limit=limit), org=org)
+        return out.get("rows") or []
+
+    def patch_row(self, namespace: str, row_id: str, valeurs: dict,
+                  org: Optional[int] = None) -> dict:
+        """Écriture PARTIELLE d'une ligne, par son identifiant.
+
+        ⚠️ Par IDENTIFIANT et jamais par clé métier : une écriture par clé sur
+        une ligne absente la CRÉERAIT (vécu le 28/08 — une ligne fantôme dans un
+        livrable client, repérée au compte qui passait de 504 à 505). Ici on
+        annote une ligne dont on vient de lire l'identifiant : la création est
+        impossible par construction."""
+        return self._patch(f"/api/datastore/namespaces/{namespace}/rows/{row_id}",
+                           valeurs, org=org)
 
     # ── le fil d'un run (runs.thread, R1) ────────────────────────────────────
     def thread_append(self, run_id: str, role: str, content: dict,
