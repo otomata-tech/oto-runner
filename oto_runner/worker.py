@@ -930,6 +930,7 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # les sorties d'outils, pas dans la réponse de clôture — un poste branché sur
     # `complete` n'aurait jamais rien dit, et son silence se serait lu
     # « pas mesuré ».
+    # Premier relevé : ce que l'agent a obtenu de son `run_finish`.
     rendues = _lignes_rendues(res)
     if rendues is not None:
         resultat["lignes_rendues"] = rendues
@@ -941,7 +942,36 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             logger.warning("aucune ligne rendue sur %s — `run_finish` non atteint, "
                            "la ligne reste tenue jusqu'à expiration du bail",
                            ligne_finale)
-    backend.complete(job["id"], ok=True, run_id=run_id, result=resultat)
+    # ⚠️ Second relevé, et il en dit plus : depuis v1.168.0 la clôture du travail
+    # libère elle aussi les baux du run et rend les QUATRE CAS, au lieu d'un
+    # nombre — un zéro ne veut plus dire trois choses à la fois :
+    #
+    #   rows_released: n            n lignes rendues
+    #   rows_released: 0            le run ne tenait rien (écrit, jamais absent)
+    #   null + release "no_run"     aucun run connu du job
+    #   null + release "failed"     la libération a échoué — la ligne reste tenue
+    #                               jusqu'à l'expiration du bail
+    #
+    # On garde les DEUX relevés et on les compare : deux chemins indépendants sur
+    # la même mesure valent mieux qu'un, et le jour où ils divergent, c'est le
+    # renseignement le plus utile qu'on puisse avoir.
+    reponse = backend.complete(job["id"], ok=True, run_id=run_id, result=resultat)
+    if isinstance(reponse, dict):
+        rendues_cloture = reponse.get("rows_released")
+        motif = reponse.get("release")
+        resultat["lignes_rendues_cloture"] = rendues_cloture
+        if motif:
+            resultat["liberation_motif"] = motif
+        if motif == "failed" and ligne_finale:
+            logger.warning("libération ÉCHOUÉE à la clôture sur %s — la ligne "
+                           "reste tenue jusqu'à expiration du bail", ligne_finale)
+        elif (rendues is not None and rendues_cloture is not None
+                and rendues != rendues_cloture):
+            # Les deux chemins ne comptent pas la même chose : à lire, pas à
+            # taire. L'un des deux se trompe, et on ne sait pas encore lequel.
+            logger.warning("les deux relevés de libération divergent sur %s : "
+                           "run_finish=%s, clôture=%s",
+                           ligne_finale, rendues, rendues_cloture)
     logger.info("job %s : %s (%s)", job["id"], outcome, note)
 
 
