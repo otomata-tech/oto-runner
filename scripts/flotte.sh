@@ -70,6 +70,24 @@ lancer)
   fi
   echo "code déployé : à jour avec origin/main ✅"
 
+  # ⚠️ LES EXÉCUTANTS, avant tout le reste. Le 29/08, le septième départ est
+  # parti avec flotte, garde, ordonnanceur et code TOUS VERTS et les trois
+  # agents éteints : la flotte a enfilé dans le vide pendant quarante secondes.
+  # La vérification regardait chaque pièce du dispositif SAUF celles qui
+  # travaillent. Elle refuse — elle ne se contente pas de le signaler, parce
+  # qu'un avertissement au milieu de vingt lignes de sortie se manque.
+  eteints=""
+  for i in 1 2 3; do
+    [ "$(systemctl is-active "oto-runner@$i")" = "active" ] || eteints="$eteints $i"
+  done
+  if [ -n "$eteints" ]; then
+    echo "⛔ REFUS DE LANCER — agents éteints :$eteints"
+    echo "   systemctl start oto-runner@1 oto-runner@2 oto-runner@3"
+    echo "   puis relancer. Rien n'a été armé, il n'y a rien à défaire."
+    exit 1
+  fi
+  echo "agents : les trois actifs ✅"
+
   # ⚠️ LA SONDE ENSUITE : c'est le MODÈLE qui dit ce qu'on lui sert.
   #
   # La liste d'outils d'une déclaration de flotte est une DÉCLARATION. Le 29/08,

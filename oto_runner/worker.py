@@ -131,7 +131,7 @@ def _ordre_one_shot(ordre: str, run_id: str, payload: dict,
         f"IDENTITÉ D'EXÉCUTION — obligatoire : sur CHAQUE appel d'outil, ajoute "
         f"l'argument `_run_id: \"{run_id}\"` (c'est ce qui te reconnaît comme "
         f"titulaire de la ligne que tu réserves ; sans lui, tes écritures sont "
-        f"refusées). Au claim et au release, passe aussi `worker: \"{run_id}\"`.")
+        f"refusées). Au claim, passe aussi `worker: \"{run_id}\"`.")
     # ⚠️ Le PROJET est imposé ICI, jamais nommé dans la procédure. Vécu le 28/08 :
     # la procédure disait « passe `_project: 220` », et ce projet liait le slot
     # `vivier` au FICHIER CLIENT. Résultat — des agents travaillant sur une copie
