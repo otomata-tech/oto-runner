@@ -145,6 +145,25 @@ lancer)
       systemctl stop "$GARDE.timer" 2>/dev/null; exit 1; }
   echo "garde $PROFILS armée (profils personnels)"
 
+  # ⚠️ L'INSTANTANÉ DE RÉFÉRENCE, exporté ICI et par personne d'autre.
+  # Le 29/08 il était un geste séparé, à faire avant le lancement — et il a été
+  # oublié : pris une minute APRÈS le départ, valide par chance seulement.
+  # L'enjeu dépasse la propreté : c'est la référence de TOUS les contrôles
+  # d'écart. Pris trop tard, il contient déjà le travail des agents, et ce qu'il
+  # contient des deux côtés devient invisible à la comparaison.
+  # Placé après les gardes et avant la flotte : dernier instant où le tableau
+  # est intact, premier où la surveillance est en place.
+  if ! "$PY" "$RACINE/exporter-socle.py"; then
+    echo "ABANDON : instantané non exporté — on ne lance pas sans référence."
+    systemctl stop "$GARDE.timer" "$PROFILS.timer" 2>/dev/null
+    exit 1
+  fi
+  _socle=$(ls -t "$RACINE"/socle-*.json 2>/dev/null | head -1)
+  echo "socle exporté par le lancement : $(basename "$_socle")"
+  echo "   md5 : $(md5sum "$_socle" | cut -d" " -f1)"
+  echo "   ⚠️ à DÉPOSER dans le dossier partagé de la mission avec son empreinte :"
+  echo "      c'est là, et seulement là, qu'un instantané est un fait."
+
   systemd-run --unit="$FLOTTE" --property=EnvironmentFile="$RACINE/.env" \
     --working-directory="$RACINE" "$PY" -m oto_runner.fleet "$yaml" >/dev/null || {
       echo "ABANDON : flotte non lancée — je retire la garde que je venais d'armer."

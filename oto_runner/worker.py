@@ -297,6 +297,12 @@ def _lignes_rendues(reponse) -> "Optional[int]":
                 return int(reponse[cle])
             except (TypeError, ValueError):
                 return None
+    # ⚠️ Aucun nom reconnu : on le DIT, avec les clés reçues. Ces trois noms sont
+    # une supposition, et une supposition qui rend `None` se lit « pas mesuré » —
+    # on cesse vite de regarder un poste qui ne dit jamais rien. Au premier
+    # travail, le nom réel apparaîtra ici et remplacera la devinette par un fait.
+    logger.warning("témoin de libération non reconnu dans la réponse de clôture "
+                   "— clés reçues : %s", sorted(reponse))
     return None
 
 
