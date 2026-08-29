@@ -48,7 +48,25 @@ lancer)
   systemctl stop "$GARDE.timer" "$GARDE" "$PROFILS.timer" "$PROFILS" 2>/dev/null
   systemctl reset-failed "$FLOTTE" "$GARDE" "$PROFILS" 2>/dev/null
 
-  # La GARDE D'ABORD : une flotte qui tourne une seconde sans surveillance est
+  # ⚠️ LA SONDE D'ABORD : c'est le MODÈLE qui dit ce qu'on lui sert.
+  #
+  # La liste d'outils d'une déclaration de flotte est une DÉCLARATION. Le 29/08,
+  # j'ai affirmé qu'elle n'était pas appliquée — sur la foi de 54 appels d'un
+  # outil retiré — et j'avais tort : les appels venaient de mon propre harnais.
+  # La sonde tranche en une question posée au modèle : nomme les outils que tu
+  # vois. **Deux listes qui concordent, c'est une fenêtre mesurée ; une seule,
+  # c'est une fenêtre déclarée.**
+  #
+  # Elle coûte un appel au fournisseur (~9 000 jetons, une trentaine de
+  # secondes). C'est le prix d'une fenêtre qu'on peut opposer.
+  echo "sonde : ce que le modèle voit…"
+  if ! "$PY" "$RACINE/sonde-outils-vus.py" "$yaml"; then
+    echo "ABANDON : la sonde ne retrouve pas la liste déclarée — la fenêtre du"
+    echo "protocole ne mesure pas ce que les agents voient. On ne lance pas."
+    exit 1
+  fi
+
+  # La GARDE ENSUITE : une flotte qui tourne une seconde sans surveillance est
   # une seconde pendant laquelle une écriture peut partir sans que rien ne la voie.
   # ⚠️ La fenêtre de la garde démarre AU LANCEMENT, jamais à une date fixe.
   # Le 29/08, son défaut « depuis hier 21:00 » englobait les réparations faites à
