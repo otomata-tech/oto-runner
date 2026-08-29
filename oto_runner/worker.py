@@ -27,7 +27,7 @@ import signal
 import re
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Dict, Optional
 
 from . import agent_runtime
 from .llm_select import get_provider
@@ -465,6 +465,41 @@ def _hors_perimetre(res) -> Optional[int]:
     return total
 
 
+def _hors_schema(res) -> Optional[Dict[str, int]]:
+    """Les colonnes écrites HORS du schéma, par nom et par nombre d'écritures.
+
+    ⚠️ La plateforme le DIT dans le corps de chaque écriture — `hors_schema`,
+    avec le nom des colonnes et un texte qui explique la conséquence. Elle le
+    disait déjà le 29/08 quand un appel mal formé a créé une colonne fantôme
+    `row` : le signal existait, personne ne le lisait. Un rapporteur qui parle
+    dans un corps que personne ne lit est aussi muet qu'un rapporteur absent.
+
+    Ce que ça rattrape : une écriture hors schéma est ACCEPTÉE — code 200,
+    donnée stockée, mais invisible à l'interface et à tout ce qui s'appuie sur
+    le schéma. Le contrôle d'écriture, lui, relit la version de procédure et
+    conclut « fiche conclue ». Cent fiches peuvent donc sortir conclues avec
+    leur motif rangé dans une colonne que plus rien ne lira.
+
+    ⚠️ None, jamais {}, quand les sorties manquent : un dictionnaire vide dirait
+    « aucune colonne fantôme » là où il faut lire « pas mesuré ».
+    """
+    sorties = getattr(res, "raw_outputs", None)
+    if not sorties:
+        return None
+    par_colonne: Dict[str, int] = {}
+    for e in sorties:
+        if (e or {}).get("type") != "tool.execution":
+            continue
+        info = e.get("info")
+        if info is None:
+            continue
+        brut = json.dumps(info, ensure_ascii=False) if not isinstance(info, str) else info
+        for m in re.finditer(r'"hors_schema"\s*:\s*\[([^\]]*)\]', brut):
+            for col in re.findall(r'"([^"]+)"', m.group(1)):
+                par_colonne[col] = par_colonne.get(col, 0) + 1
+    return par_colonne
+
+
 def _ligne_depuis_sorties(res) -> Optional[str]:
     """L'identifiant rendu par la réservation, lu dans les sorties du fournisseur.
 
@@ -821,6 +856,11 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 # tentatives vers ce qu'on interdit. `None` = non mesuré, jamais
                 # confondu avec « aucune tentative ».
                 "hors_perimetre": _hors_perimetre(res),
+            # ⚠️ Le jumeau : ce qui a été écrit HORS du schéma.
+            # La plateforme le dit dans le corps de chaque écriture ;
+            # sans ce poste, une fiche « conclue » peut avoir rangé son
+            # motif dans une colonne fantôme que plus rien ne lira.
+            "hors_schema": _hors_schema(res),
                 # ⚠️ `claims_mesures` DIT CE QUE `claims` VAUT. Sur le chemin où
                 # la boucle d'outils tourne chez le fournisseur, aucune sortie de
                 # `data_claim_next` ne remonte : `claims` est une RÈGLE DE REPLI
