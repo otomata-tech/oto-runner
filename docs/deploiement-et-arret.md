@@ -56,6 +56,25 @@ durée d'un travail  <  bail de la ligne (10 min)  <  patience de systemd (16 mi
 n'échoue, les travaux se font tuer à nouveau, et le journal n'écrit plus la ligne de
 sortie propre. C'est le seul témoin — son absence est le signal.
 
+## Ce qui fait foi
+
+Un travail rend un **relevé d'exécution** — jetons, outils appelés, lignes réservées,
+lignes écrites, et `ligne_abandonnee` quand le harnais a dû marquer un abandon.
+
+⚠️ **Le relevé fait foi, jamais un champ de données ni un texte.** Deux façons de se
+tromper, vécues à une semaine d'intervalle :
+
+- **un champ écrit peut mentir** — une estampille posée à la main affirmait un modèle
+  que le travail n'avait pas utilisé ; c'est le relevé qui disait vrai ;
+- **un texte peut cesser de correspondre** — compter les abandons en cherchant une
+  formule dans un motif marche jusqu'au jour où la formule change d'un mot. Ce
+  jour-là le comptage rend zéro **sans rien signaler**, et un comptage qui ne trouve
+  rien ressemble exactement à un comptage qui n'a rien à trouver.
+
+Dans les deux cas la règle est la même : **ce qui a été enregistré en agissant prime
+sur ce qu'un champ raconte après coup.** Le champ reste la vérification croisée — s'il
+diverge du relevé, il y a autre chose à comprendre.
+
 ## Pièges vécus
 
 ⚠️ **Un déploiement en pleine campagne était interdit par DISCIPLINE, pas par le

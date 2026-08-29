@@ -146,7 +146,12 @@ def test_apres_deux_rappels_l_abandon_s_enregistre(monkeypatch):
     assert len(motif) < 500, "borné : un motif de trois pages se saute"
     # Aucun champ métier touché : ni qualification, ni notes, ni contact.
     assert set(patch[2]) == {"retraitement", "retraitement_motif"}
-    assert _resultat(b)["abandon_enregistre"] is True
+    r = _resultat(b)
+    assert r["abandon_enregistre"] is True
+    # ⚠️ Le relevé DÉCLARE la ligne marquée. Sans cet identifiant, le bilan devrait
+    # la retrouver en cherchant une formule dans un motif — une source qui casse
+    # sans bruit le jour où la formule bouge.
+    assert r["ligne_abandonnee"] == "01a0-la-ligne"
 
 
 def test_les_jetons_des_rappels_se_cumulent(monkeypatch):

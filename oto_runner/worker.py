@@ -207,23 +207,30 @@ def _ordre_de_renvoi(ligne: Optional[str]) -> str:
 
 
 def _enregistrer_abandon(backend, spec_ns: Optional[str], org, ligne: Optional[str],
-                         res) -> bool:
+                         res) -> Optional[str]:
     """Après les renvois : l'abandon s'ENREGISTRE au lieu de se taire.
 
     ⚠️ Le harnais n'écrit RIEN sur l'entreprise — seulement un fait sur NOTRE
     traitement : `retraitement: arbitrage` et, en motif, la raison que l'agent a
     donnée de s'arrêter. Le motif est BORNÉ : un motif de trois lignes se lit, un
     motif de trois pages se saute, et on retombe dans le drapeau muet qu'on corrige
-    ici. Best-effort : une observation n'arrête jamais une file.
+    ici. Best-effort : une observation n'arrête jamais une file. Rend l'IDENTIFIANT
+    marqué, et non un booléen : c'est ce relevé-là qui fait foi au bilan.
 
     ⚠️ `arbitrage` a DEUX émetteurs, pour deux situations opposées : un agent qui
     l'a JUGÉ (motif métier libre) et le harnais qui constate un abandon. Ils ne se
-    distinguent pas par la valeur — **c'est le motif qui les sépare**, et c'est
-    pourquoi celui du harnais s'ouvre toujours par « conclu sans écrire après N
-    rappels ». Compter les abandons en filtrant sur la valeur seule les mélangerait
-    aux jugements d'agent, et gonflerait un taux d'échec de traitements réussis."""
+    distinguent pas par la valeur, et compter les abandons en filtrant dessus
+    mêlerait des traitements RÉUSSIS aux perdus, gonflant le taux d'échec.
+
+    ⚠️ Ce qui les sépare au bilan est **le relevé d'exécution** (`ligne_abandonnee`
+    sur le résultat du travail), jamais le texte du motif. Le motif s'ouvre bien
+    par « conclu sans écrire après N rappels », mais cette formule est de la PROSE :
+    la chercher marche jusqu'au jour où elle change d'un mot, et ce jour-là le
+    comptage rend zéro sans rien signaler — un comptage qui ne trouve rien
+    ressemble exactement à un comptage qui n'a rien à trouver. Le motif reste la
+    vérification croisée : s'il diverge du relevé, il y a autre chose à comprendre."""
     if not (spec_ns and ligne):
-        return False
+        return None
     raison = " ".join(str(getattr(res, "reply", "") or "").split())[:280]
     try:
         # ⚠️ `arbitrage` et NON `epuise`. Le libellé d'`epuise` que la cliente lit
@@ -239,10 +246,10 @@ def _enregistrer_abandon(backend, spec_ns: Optional[str], org, ligne: Optional[s
                 f"conclu sans écrire après {RENVOIS_MAX} rappels du harnais — "
                 f"raison donnée par l'agent : « {raison or 'aucune'} »")}, org=org)
         logger.info("abandon enregistré sur la ligne %s", ligne)
-        return True
+        return ligne
     except Exception as e:  # noqa: BLE001 — cf. docstring
         logger.warning("abandon non enregistré sur %s : %s", ligne, e)
-        return False
+        return None
 
 
 def _conserver_faux_depart(job: dict, payload: dict, res) -> None:
@@ -613,7 +620,13 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 # Combien de fois le harnais a dû rendre la main, et si l'abandon a
                 # fini par être enregistré : sans ces deux postes, le mécanisme
                 # travaillerait en silence — le défaut même qu'il corrige.
-                "renvois": renvois, "abandon_enregistre": abandon}
+                #
+                # ⚠️ `ligne_abandonnee` porte l'IDENTIFIANT, pas seulement le fait :
+                # le bilan DÉCLARE les lignes que le harnais a marquées au lieu de
+                # les RETROUVER en cherchant une formule dans un motif. Ce qui fait
+                # foi est ce que le mécanisme a enregistré EN AGISSANT.
+                "renvois": renvois, "abandon_enregistre": bool(abandon),
+                "ligne_abandonnee": abandon}
     if echec_transport:
         outils = ", ".join(sorted({s.tool for s in res.steps
                                    if s.transport_ko}))[:200]
