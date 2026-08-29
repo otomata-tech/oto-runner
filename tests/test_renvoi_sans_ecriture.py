@@ -400,4 +400,8 @@ def test_le_relachement_porte_l_identite_du_travail(monkeypatch):
     assert args_vus, "le harnais relâche"
     assert args_vus[-1].get("worker") == "r-1", \
         "sous l'IDENTITÉ du travail, celle qui a réservé"
-    assert args_vus[-1].get("id") == "01a0-la-ligne"
+    # ⚠️ Par l'ALIAS, plus par l'identifiant : le harnais ne retrouvait la ligne
+    # qu'une fois sur cinq dans les sorties du fournisseur, et le serveur, lui,
+    # sait toujours ce que le travail tient.
+    assert args_vus[-1].get("id") == "@claimed"
+    assert args_vus[-1].get("namespace") == "@claimed"

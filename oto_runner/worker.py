@@ -264,6 +264,30 @@ def _relacher(mcp, ligne: Optional[str], ns: Optional[str], org,
     Best-effort : un relâchement manqué laisse la ligne sous bail jusqu'à son
     expiration, ce qui est le comportement d'avant. On ne tue jamais un travail
     abouti pour un relâchement raté."""
+    # ⚠️ `@claimed` DES DEUX CÔTÉS : le harnais n'a pas besoin de connaître la
+    # ligne, seulement le jeton du travail — et celui-là, il l'a toujours.
+    #
+    # La version d'avant cherchait l'identifiant dans les sorties du fournisseur
+    # et ne le trouvait QUE DANS UN CAS SUR CINQ. J'avais retiré `data_release`
+    # aux agents en comptant sur ce relâchement : le résultat net était pire que
+    # l'état d'avant — personne ne relâchait, et les lignes attendaient
+    # l'expiration du bail.
+    #
+    # Depuis v1.163.0 l'alias vaut pour le tableau ET pour la ligne : le serveur
+    # sait ce que le travail tient, il suffit de le lui demander. Plus rien à
+    # parser, plus rien à espérer d'un relevé.
+    if run_id:
+        try:
+            mcp.outil("data_release", {"namespace": "@claimed", "id": "@claimed",
+                                       "worker": run_id, "_run_id": run_id,
+                                       "_org": org})
+            logger.info("ligne relâchée par le harnais via @claimed (travail %s)",
+                        run_id[:12])
+            return True
+        except Exception as e:  # noqa: BLE001 — on retombe sur la voie explicite
+            logger.info("relâchement par @claimed impossible (%s) — "
+                        "on tente par identifiant", e)
+
     # ⚠️ None, pas False : « il n'y avait RIEN À RENDRE » n'est pas un échec.
     #
     # Vécu à 16:22 le 29/08 : la borne « deux relâchements ratés arrêtent le

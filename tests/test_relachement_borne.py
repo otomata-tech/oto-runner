@@ -50,3 +50,24 @@ def test_rien_a_rendre_n_est_pas_un_echec():
     raté » finit toujours par arrêter ce qui marche."""
     assert worker._relacher(None, None, "un-tableau", 226, "r-1") is None
     assert worker._relacher(None, "une-ligne", None, 226, "r-1") is None
+
+
+def test_le_relachement_passe_par_l_alias_et_non_par_l_identifiant():
+    """⚠️ Le harnais ne retrouvait la ligne qu'une fois sur cinq dans les sorties
+    du fournisseur. Il n'a pas besoin de la connaître : le serveur sait ce que le
+    travail tient, et l'alias le lui demande. Le harnais n'a qu'à tenir le jeton,
+    et il le tient toujours."""
+    vus = []
+
+    class _Mcp:
+        derniere_ligne = None
+
+        def outil(self, name, arguments=None):
+            vus.append((name, arguments or {}))
+            return {}
+
+    assert worker._relacher(_Mcp(), None, "un-tableau", 226, "r-42") is True
+    nom, args = vus[-1]
+    assert nom == "data_release"
+    assert args["namespace"] == "@claimed" and args["id"] == "@claimed"
+    assert args["worker"] == "r-42"
