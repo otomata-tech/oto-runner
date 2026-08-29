@@ -38,6 +38,12 @@ case "$geste" in
 lancer)
   yaml=${3:?fichier de flotte}; a=${4:?référence a}; b=${5:?référence b}; c=${6:?référence c}
   [ -f "$yaml" ] || { echo "fichier de flotte introuvable : $yaml"; exit 1; }
+  # ⚠️ Un lancement AVORTÉ laisse son minuteur derrière lui, et le suivant se
+  # voit refuser « unit already exists » — donc refuser de lancer, faute de
+  # pouvoir armer sa garde. Le refus est le bon comportement ; le résidu ne l'est
+  # pas. On nettoie donc AVANT, au lieu de laisser un état intermédiaire bloquer
+  # le geste suivant.
+  systemctl stop "$GARDE.timer" "$GARDE" 2>/dev/null
   systemctl reset-failed "$FLOTTE" "$GARDE" 2>/dev/null
 
   # La GARDE D'ABORD : une flotte qui tourne une seconde sans surveillance est
