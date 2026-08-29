@@ -378,3 +378,26 @@ def test_sans_estampille_configuree_le_harnais_n_ecrit_rien(monkeypatch):
     b = _Backend()
     W._traiter(b, _job(), provider=None)
     assert not [a for a in b.appels if a[0] == "patch"]
+
+
+def test_le_relachement_porte_l_identite_du_travail(monkeypatch):
+    """⚠️ Sans `worker`, les 54 relâchements du 29/08 ont TOUS échoué — « worker
+    Missing required argument » — et les lignes sont restées sous bail jusqu'à
+    expiration. Le relâchement existait, il ne relâchait rien."""
+    args_vus = []
+
+    class _McpArgs(_Mcp):
+        def outil(self, name, arguments=None):
+            if name == "data_release":
+                args_vus.append(arguments or {})
+                return {}
+            return super().outil(name, arguments)
+
+    _monter(monkeypatch, [AgentResult(reply="fait", stopped="end_turn",
+                                      steps=_pas("data_claim_next", "data_write"))])
+    monkeypatch.setattr(W, "McpSession", _McpArgs)
+    W._traiter(_Backend(), _job(), provider=None)
+    assert args_vus, "le harnais relâche"
+    assert args_vus[-1].get("worker") == "r-1", \
+        "sous l'IDENTITÉ du travail, celle qui a réservé"
+    assert args_vus[-1].get("id") == "01a0-la-ligne"

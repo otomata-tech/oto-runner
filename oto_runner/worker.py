@@ -246,7 +246,8 @@ def _ordre_de_renvoi(ligne: Optional[str]) -> str:
             "qu'une ligne sans trace. N'ajoute aucune recherche : écris ce que tu as.")
 
 
-def _relacher(mcp, ligne: Optional[str], ns: Optional[str], org) -> bool:
+def _relacher(mcp, ligne: Optional[str], ns: Optional[str], org,
+              run_id: Optional[str] = None) -> bool:
     """Le HARNAIS rend la ligne, plus l'agent.
 
     ⚠️ Pourquoi ce déplacement. Un agent qui relâche sa ligne AVANT d'avoir écrit
@@ -266,7 +267,21 @@ def _relacher(mcp, ligne: Optional[str], ns: Optional[str], org) -> bool:
     if not (ligne and ns):
         return False
     try:
-        mcp.outil("data_release", {"namespace": ns, "id": ligne, "_org": org})
+        # ⚠️ `worker` est OBLIGATOIRE, et son absence a fait échouer les 54
+        # relâchements du cinquième passage — « worker Missing required
+        # argument », un par travail. Les lignes restaient donc sous bail
+        # jusqu'à expiration, exactement ce que ce relâchement existe pour
+        # éviter.
+        #
+        # La ligne est réservée SOUS UNE IDENTITÉ, pas sous un run : la
+        # consigne dit à l'agent de passer `worker: <run_id>` au claim comme au
+        # release. Le harnais doit passer la MÊME, sinon il demande la
+        # libération d'une ligne qu'il ne tient pas — de son point de vue.
+        args = {"namespace": ns, "id": ligne, "_org": org}
+        if run_id:
+            args["worker"] = run_id
+            args["_run_id"] = run_id
+        mcp.outil("data_release", args)
         logger.info("ligne %s relâchée par le harnais", ligne)
         return True
     except Exception as e:  # noqa: BLE001 — cf. docstring
@@ -735,8 +750,8 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             logger.warning("estampille non imposée sur %s : %s", ligne_finale, e)
             resultat["estampille_imposee"] = False
 
-    resultat["relachee"] = _relacher(mcp, ligne_finale,
-                                     p.get("namespace"), p.get("org_id"))
+    resultat["relachee"] = _relacher(mcp, ligne_finale, p.get("namespace"),
+                                     p.get("org_id"), run_id)
     backend.complete(job["id"], ok=True, run_id=run_id, result=resultat)
     logger.info("job %s : %s (%s)", job["id"], outcome, note)
 
