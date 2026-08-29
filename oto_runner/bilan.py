@@ -298,6 +298,45 @@ def annoter_lignes_sorties(spec, backend, jobs: dict) -> dict:
     return {"sorties": len(sorties), "annotees": annotees}
 
 
+ACTE_EXTINCTION = re.compile(
+    r"radiation|radié|radie"
+    r"|cessation|cessé d'activité|cesse d'activite"
+    r"|liquidation|liquidé|liquide judiciaire"
+    r"|dissolution|dissous|dissoute"
+    # ⚠️ « clôture » ne se prend JAMAIS seul : une clôture d'EXERCICE est un
+    # acte de vie normale. On ne retient que les clôtures qui éteignent —
+    # attrapé par un test existant, qui rejetait « jugement de clôture ».
+    r"|jugement de clôture|jugement de cloture"
+    r"|clôture de liquidation|cloture de liquidation"
+    r"|clôture pour insuffisance|cloture pour insuffisance"
+    r"|jugement d'ouverture|redressement judiciaire"
+    r"|reprise par|absorbée par|absorbee par|fusion-absorption",
+    re.I)
+
+
+def valeur(x):
+    return x.get("valeur") if isinstance(x, dict) and "valeur" in x else x
+
+
+def extinction_sans_acte(fiche: dict) -> bool:
+    """Une fiche déclarée éteinte cite-t-elle un acte d'EXTINCTION ?
+
+    ⚠️ DÉFINITION UNIQUE, volontairement exportée. Elle a d'abord vécu en deux
+    exemplaires — ici et dans le script de verdict — et les deux ont divergé dès
+    la première correction : le verdict criait sur neuf fiches valides pendant que
+    le bilan les acceptait. **Deux contrôles qui font la même chose divergent
+    toujours, et le jour où ils divergent on ne sait plus lequel croire.**
+
+    Ce qui fonde une extinction : un acte NOMMÉ — radiation, cessation,
+    liquidation, dissolution, jugement de clôture, reprise — lu dans le motif,
+    l'écartement, ou la PIÈCE cochée. Ni une date seule, ni un dépôt de comptes,
+    qui prouve le contraire ; ni une accumulation d'absences, qui date un vide."""
+    fonde = " ".join(str(valeur(fiche.get(c)) or "")
+                     for c in ("qualification_motif", "motif_ecartement",
+                               "qualification_piece"))
+    return not ACTE_EXTINCTION.search(fonde)
+
+
 def controler_fiches(spec, backend, jobs: dict) -> dict:
     """Deux contrôles DÉTERMINISTES sur les fiches produites, au bilan de fin.
 
@@ -332,8 +371,6 @@ def controler_fiches(spec, backend, jobs: dict) -> dict:
         return {"estampille_exacte": None, "fiches_contradictoires": None,
                 "omis": f"fiches illisibles : {e}"}
 
-    def valeur(x):
-        return x.get("valeur") if isinstance(x, dict) and "valeur" in x else x
 
     # ── 1. estampille exacte ────────────────────────────────────────────────
     attendus = {(j.get("result") or {}).get("model") for j in jobs.values()}
@@ -381,20 +418,7 @@ def controler_fiches(spec, backend, jobs: dict) -> dict:
     # support qui le publie. Un événement de registre daté quelconque — dépôt,
     # immatriculation, modification, changement de gérant — ne compte pas, quelle
     # que soit sa date et quel que soit le journal qui l'annonce.
-    ACTE = re.compile(
-        r"radiation|radié|radie"
-        r"|cessation|cessé d'activité|cesse d'activite"
-        r"|liquidation|liquidé|liquide judiciaire"
-        r"|dissolution|dissous|dissoute"
-        # ⚠️ « clôture » ne se prend JAMAIS seul : une clôture d'EXERCICE est un
-        # acte de vie normale. On ne retient que les clôtures qui éteignent —
-        # attrapé par un test existant, qui rejetait « jugement de clôture ».
-        r"|jugement de clôture|jugement de cloture"
-        r"|clôture de liquidation|cloture de liquidation"
-        r"|clôture pour insuffisance|cloture pour insuffisance"
-        r"|jugement d'ouverture|redressement judiciaire"
-        r"|reprise par|absorbée par|absorbee par|fusion-absorption",
-        re.I)
+
     # ⚠️ NOTE, à lire avant le troisième affinage : c'est la DEUXIÈME fois que la
     # même fiche resserre ce contrôle. Un contrôle qu'un même cas corrige deux fois
     # court après les cas au lieu de porter sur le fond — le signe qu'il approxime
@@ -417,10 +441,7 @@ def controler_fiches(spec, backend, jobs: dict) -> dict:
         # lire l'état au registre ». Elle visait le vocabulaire. Le vrai défaut
         # était de chercher dans le texte libre une information qui existait,
         # nommée et codée, dans un champ voisin.
-        fonde = " ".join(str(valeur(f.get(c)) or "")
-                         for c in ("qualification_motif", "motif_ecartement",
-                                   "qualification_piece"))
-        if not ACTE.search(fonde):
+        if extinction_sans_acte(f):
             contradictoires.append(str(f.get("siren")))
 
     if fausses:
