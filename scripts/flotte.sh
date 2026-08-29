@@ -69,7 +69,15 @@ arreter)
 
 etat)
   echo "flotte  : $(systemctl is-active "$FLOTTE")"
-  echo "garde   : $(systemctl is-active "$GARDE.timer" 2>/dev/null || echo absente)"
+  # ⚠️ « inactive » et « absente » ne sont PAS la même chose, et les confondre
+  # est la faute que ce script combat : une garde supprimée se lit « inactive »
+  # comme une garde simplement au repos. On regarde donc si l'unité EXISTE.
+  charge=$(systemctl show "$GARDE.timer" -p LoadState --value 2>/dev/null)
+  if [ "$charge" = "not-found" ] || [ -z "$charge" ]; then
+    echo "garde   : ABSENTE — supprimée ou jamais armée. Une flotte ne se lance pas ainsi."
+  else
+    echo "garde   : $(systemctl is-active "$GARDE.timer")"
+  fi
   echo "agents  : $(systemctl is-active oto-runner@1 oto-runner@2 oto-runner@3 | tr '\n' ' ')"
   echo "ordonn. : $(ps -eo args | grep -c '[o]to_runner.fleet') processus"
   ;;
