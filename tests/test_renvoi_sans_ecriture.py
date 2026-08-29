@@ -135,7 +135,8 @@ def test_apres_deux_rappels_l_abandon_s_enregistre(monkeypatch):
     assert len(vus) == 3, "l'appel initial plus deux rappels"
     patch = next(a for a in b.appels if a[0] == "patch")
     assert patch[1] == "01a0-la-ligne"
-    assert patch[2]["retraitement"] == "epuise"
+    assert patch[2]["retraitement"] == "arbitrage", \
+        "« épuisé » affirmerait une recherche conclue ; l'agent n'a rien conclu"
     motif = patch[2]["retraitement_motif"]
     assert "rien trouvé de probant" in motif, "le motif porte la raison DE L'AGENT"
     assert len(motif) < 500, "borné : un motif de trois pages se saute"

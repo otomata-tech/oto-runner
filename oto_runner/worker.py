@@ -219,8 +219,15 @@ def _enregistrer_abandon(backend, spec_ns: Optional[str], org, ligne: Optional[s
         return False
     raison = " ".join(str(getattr(res, "reply", "") or "").split())[:280]
     try:
+        # ⚠️ `arbitrage` et NON `epuise`. Le libellé d'`epuise` que la cliente lit
+        # dit « cherché, rien de public à trouver » — or un agent qui s'arrête sans
+        # écrire n'a PAS conclu ça : il n'a rien conclu du tout. Poser `epuise`
+        # transformerait un abandon en constat de recherche épuisée, c'est-à-dire
+        # un champ qui affirme plus que ce qui a été mesuré — le glissement exact
+        # que cette campagne traque. `arbitrage` dit la vérité de la situation :
+        # « à trancher par un humain, pas par un agent ».
         backend.patch_row(spec_ns, ligne, {
-            "retraitement": "epuise",
+            "retraitement": "arbitrage",
             "retraitement_motif": (
                 f"conclu sans écrire après {RENVOIS_MAX} rappels du harnais — "
                 f"raison donnée par l'agent : « {raison or 'aucune'} »")}, org=org)
