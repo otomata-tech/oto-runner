@@ -41,7 +41,17 @@ def _params_filtre(filter: Optional[dict], limit: int) -> dict:
 
 _MOTIFS = (
     # (fragment cherché dans le message, nom du poste au bilan)
+    # ⚠️ Le refus du cran a DEUX formes, et c'est la seconde qui compte pour les
+    # fabrications : « aucune ligne de <table> ne porte <clé> = … ». Le 29/08 un
+    # agent a écrit un dictionnaire entier dans le champ SIREN — clé factice, avec
+    # son propre commentaire disant qu'il avait perdu la vraie. Sans le cran,
+    # c'était une ligne fantôme de plus. Mon compteur ne cherchait que la première
+    # forme : il a rangé le seul cas grave du passage dans « autre », et le bilan
+    # a annoncé ZÉRO création refusée. Un compteur qui rate le cas qu'il existe
+    # pour voir est pire qu'absent — il certifie qu'il ne s'est rien passé.
     ("business_key_required", "création refusée par le cran"),
+    ("ne porte", "création refusée par le cran"),
+    ("n'est pas renseigné", "création refusée par le cran"),
     ("introuvable", "ligne inconnue (identifiant inventé ou périmé)"),
     ("not found", "ligne inconnue (identifiant inventé ou périmé)"),
     ("réservée par", "ligne tenue par un autre travail"),
