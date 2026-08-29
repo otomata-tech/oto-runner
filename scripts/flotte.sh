@@ -76,17 +76,26 @@ lancer)
   # La vérification regardait chaque pièce du dispositif SAUF celles qui
   # travaillent. Elle refuse — elle ne se contente pas de le signaler, parce
   # qu'un avertissement au milieu de vingt lignes de sortie se manque.
-  eteints=""
-  for i in 1 2 3; do
-    [ "$(systemctl is-active "oto-runner@$i")" = "active" ] || eteints="$eteints $i"
+  # Les agents s'arrêtent d'eux-mêmes quand la file est vide : entre deux
+  # passages ils sont éteints, c'est normal. Le lancement les démarre — il est
+  # responsable de son dispositif — puis il CONSTATE. Il ne refuse que si le
+  # démarrage échoue : là, il y a quelque chose à comprendre avant de partir.
+  systemctl start oto-runner@1 oto-runner@2 oto-runner@3 2>/dev/null
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    eteints=""
+    for i in 1 2 3; do
+      [ "$(systemctl is-active "oto-runner@$i")" = "active" ] || eteints="$eteints $i"
+    done
+    [ -z "$eteints" ] && break
+    sleep 2
   done
   if [ -n "$eteints" ]; then
-    echo "⛔ REFUS DE LANCER — agents éteints :$eteints"
-    echo "   systemctl start oto-runner@1 oto-runner@2 oto-runner@3"
-    echo "   puis relancer. Rien n'a été armé, il n'y a rien à défaire."
+    echo "⛔ REFUS DE LANCER — agents encore éteints après démarrage :$eteints"
+    echo "   'journalctl -u oto-runner@${eteints## } -n 30' pour comprendre."
+    echo "   Rien n'a été armé, il n'y a rien à défaire."
     exit 1
   fi
-  echo "agents : les trois actifs ✅"
+  echo "agents : les trois actifs ✅ (démarrés par le lancement)"
 
   # ⚠️ LA SONDE ENSUITE : c'est le MODÈLE qui dit ce qu'on lui sert.
   #
