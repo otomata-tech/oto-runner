@@ -1,5 +1,10 @@
 __pycache__/
 *.pyc
 .venv*/
+# ⚠️ `.env` seul laissait passer `.env.preprod`, `.env.sonnet` et consorts — des
+# variantes qui apparaissent naturellement dès qu'une box sert deux environnements.
+# Le dépôt est PUBLIC : le motif doit couvrir la famille, pas un nom exact.
 .env
+.env.*
+!.env.example
 *.egg-info/
