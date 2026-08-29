@@ -76,12 +76,22 @@ class Sonde:
             raise RuntimeError(f"{methode} → {sortie['error']}")
         return sortie.get("result")
 
+    def notifier(self, methode: str, params: dict) -> None:
+        """Une NOTIFICATION JSON-RPC : ni `id`, ni réponse attendue.
+
+        ⚠️ L'envoyer comme une requête (avec `id`) fait répondre au serveur
+        « Invalid request parameters » — le message est trompeur, il ne dit pas
+        que c'est la FORME qui est fautive, pas les paramètres."""
+        self.session.post(self.url, headers=self._entetes(), timeout=60,
+                          json={"jsonrpc": "2.0", "method": methode,
+                                "params": params})
+
     def ouvrir(self) -> "Sonde":
         if self.sid:
             return self
         self.rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
                                 "clientInfo": {"name": "sonde", "version": "1"}})
-        self.rpc("notifications/initialized", {})
+        self.notifier("notifications/initialized", {})
         return self
 
     def outils(self) -> list[dict]:
