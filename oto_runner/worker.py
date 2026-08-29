@@ -459,6 +459,116 @@ def _hors_schema(res) -> Optional[Dict[str, int]]:
     return par_colonne
 
 
+# ⚠️ Les qualités qui font un INTERLOCUTEUR, et celles qui n'en font pas.
+# Un liquidateur n'est pas un dirigeant à contacter — l'entreprise est en train
+# de disparaître ; un commissaire aux comptes n'est pas dans l'entreprise. Les
+# nommer ferait proposer à la cliente des contacts qu'elle ne doit pas démarcher.
+_QUALITE_EXCLUE = re.compile(
+    r"liquidat|commissaire|mandataire\s+judiciaire|administrateur\s+judiciaire"
+    r"|curateur|s[ée]questre", re.I)
+# La qualité VIDE compte comme une qualité de direction : c'est tout le sujet.
+# Le registre rend parfois un nom sans fonction, et six contacts perdus sur six,
+# sur deux passages, portaient exactement cette forme.
+_QUALITE_DIRECTION = re.compile(
+    r"pr[ée]sident|g[ée]rant|directeur|directrice|dirigeant|associ[ée]\s+unique",
+    re.I)
+
+
+def _nu(x):
+    """La valeur d'une case, qu'elle soit nue ou en couches.
+
+    ⚠️ Les couches se lisent À PLAT sur une ligne relue (`champ.comment`), mais
+    à l'intérieur d'un contact la valeur peut être enveloppée. Un déballeur qui
+    se trompe rend None à coup sûr — et un None se lit « pas de catégorie »,
+    donc « pas de contact de direction », donc un rappel tiré pour rien.
+    """
+    return x.get("valeur") if isinstance(x, dict) and "valeur" in x else x
+
+
+def _dirigeant_a_contacter(mcp, siren: str) -> Optional[tuple]:
+    """Le registre nomme-t-il une personne physique qu'on devrait contacter ?
+
+    Rend (nom, qualité affichable) ou None. **None quand on n'a pas pu demander**
+    — un appel qui échoue ne doit pas se lire « le registre ne nomme personne ».
+    """
+    if not siren:
+        return None
+    try:
+        rep = mcp.outil("fr_directors", {"siren": str(siren)})
+    except Exception as e:  # noqa: BLE001 — pas de réponse n'est pas une absence
+        logger.warning("rappel contact : registre injoignable sur %s (%s)", siren, e)
+        return None
+    # ⚠️ La réponse arrive sous `result` — vérifié sur l'appel réel, pas supposé.
+    # La première version cherchait `dirigeants` et rendait « personne » sur les
+    # deux cas qui devaient déclencher : le cran aurait été posé, mesuré à zéro,
+    # et compté comme un succès. Un cran qui ne se déclenche jamais est
+    # indiscernable d'un cran qui n'avait rien à attraper.
+    if isinstance(rep, list):
+        entrees = rep
+    else:
+        rep = rep or {}
+        entrees = rep.get("result") or rep.get("dirigeants") or []
+    if not isinstance(entrees, list):
+        return None
+    for d in entrees:
+        if not isinstance(d, dict):
+            continue
+        # ⚠️ Une personne MORALE n'est pas un interlocuteur : au huitième, une
+        # fiche a écrit « Président » pour une personne alors que le registre
+        # nommait une société.
+        if "morale" in str(d.get("type_dirigeant") or "").lower():
+            continue
+        q = str(d.get("qualite") or "").strip()
+        if q and (_QUALITE_EXCLUE.search(q) or not _QUALITE_DIRECTION.search(q)):
+            continue
+        nom = " ".join(str(d.get(k) or "") for k in ("prenoms", "nom")).strip()
+        if not nom:
+            continue
+        return nom, (q or "non précisée au registre")
+    return None
+
+
+def _sans_contact_direction(fiche: Optional[dict]) -> bool:
+    """La fiche porte-t-elle un contact de direction ? Sur la fiche RELUE."""
+    # ⚠️ `None` (pas lu) et `{}` (lu, vide) ne disent PAS la même chose. La
+    # première version confondait les deux et laissait passer le cas le plus
+    # flagrant — une fiche sans rien — au nom du principe « ne pas décider sans
+    # avoir lu ». Le principe est bon ; il ne s'applique qu'à l'absence de
+    # lecture.
+    if fiche is None:
+        return False
+    contacts = fiche.get("contacts")
+    if not isinstance(contacts, list):
+        return True
+    for c in contacts:
+        if isinstance(c, dict) and str(_nu(c.get("categorie"))) == "direction":
+            return False
+    return True
+
+
+def _ordre_rappel_contact(nom: str, qualite: str, ligne: Optional[str]) -> str:
+    """Le nom SOUS LES YEUX — on ne demande pas à l'agent de le retrouver.
+
+    ⚠️ Et on lui laisse le refus : il connaît des raisons que le harnais ignore
+    — un homonyme, une personne qui n'est plus là. Une porte qui ne s'ouvre que
+    dans un sens produit des contacts faux au lieu de contacts manquants.
+    """
+    ou = f" (ligne {ligne})" if ligne else ""
+    return (
+        f"Ta fiche{ou} ne porte aucun contact de direction, alors que le registre "
+        f"nomme une personne physique : **{nom}** — qualité {qualite}.\n\n"
+        f"Un dirigeant dont le registre ne dit pas la fonction reste un dirigeant : "
+        f"une qualité vide n'est pas une absence de personne.\n\n"
+        f"Deux issues, et une seule écriture dans les deux cas :\n"
+        f"1. ajoute ce contact — `categorie: \"direction\"`, la fonction telle "
+        f"qu'elle se dit (« Dirigeante (qualité non précisée au registre) »), et "
+        f"`nom.comment` ouvert par `registre —` ;\n"
+        f"2. ou, si tu as une raison de ne pas le faire — liquidateur, homonyme, "
+        f"personne qui n'exerce plus —, écris-la dans `notes_verification`.\n\n"
+        f"N'invente rien d'autre : ce nom vient du registre, c'est le seul que tu "
+        f"aies. Réécris la fiche ENTIÈRE, `statut` compris.")
+
+
 def _ligne_depuis_sorties(res) -> Optional[str]:
     """L'identifiant rendu par la réservation, lu dans les sorties du fournisseur.
 
@@ -741,6 +851,95 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         abandon = _enregistrer_abandon(backend, p.get("namespace"), p.get("org_id"),
                                        _ligne_reservee(res, mcp), res)
 
+    # ── LE CONTACT QUE LE REGISTRE NOMME ET QUE LA FICHE N'A PAS ────────────
+    # Six contacts perdus sur deux passages, tous avec la même signature : le
+    # registre rend une personne physique dont la QUALITÉ EST VIDE, et la fiche
+    # sort sans contact de direction. Sur quatre des six, l'agent avait appelé le
+    # registre et reçu la réponse — la consigne ne peut donc rien pour eux.
+    #
+    # Le harnais appelle le registre lui-même et met le nom sous les yeux de
+    # l'agent. Il ne lui demande plus de reconnaître : il lui laisse le geste, et
+    # garde la porte.
+    rappels_contact, contact_rattrape, contact_arbitre = 0, False, False
+    ligne_rc = _ligne_reservee(res, mcp)
+    empreinte_avant = None
+    while ligne_rc and not abandon and rappels_contact < RENVOIS_MAX:
+        try:
+            fiche = backend.row(p["namespace"], ligne_rc, org=p.get("org_id"))
+        except Exception as e:  # noqa: BLE001 — pas de fiche relue, pas de verdict
+            logger.warning("rappel contact : fiche illisible (%s)", e)
+            break
+        if not _sans_contact_direction(fiche):
+            contact_rattrape = rappels_contact > 0
+            break
+        # ⚠️ Si l'agent a RÉPONDU sans ajouter de contact — une raison écrite dans
+        # ses notes —, on s'arrête : il a fait ce qu'on lui demandait de faire
+        # dans l'un des deux cas. Insister produirait un contact inventé.
+        empreinte = str(_nu((fiche or {}).get("notes_verification")) or "")
+        if rappels_contact and empreinte != empreinte_avant:
+            logger.info("job %s : rappel contact — l'agent a répondu sans "
+                        "ajouter de contact, on n'insiste pas", job["id"])
+            break
+        empreinte_avant = empreinte
+        trouve = _dirigeant_a_contacter(mcp, _nu((fiche or {}).get("siren")))
+        if not trouve:
+            break
+        nom, qualite = trouve
+        rappels_contact += 1
+        logger.info("job %s : contact de direction manquant — rappel %d/%d "
+                    "(le registre nomme %s, qualité %s)",
+                    job["id"], rappels_contact, RENVOIS_MAX, nom, qualite)
+        rappel = _ordre_rappel_contact(nom, qualite, ligne_rc)
+        outils_rappel = tuple(o for o in (p.get("tools") or ())
+                              if not str(o).endswith(_CLAIM))
+        try:
+            if getattr(provider, "ONE_SHOT", False):
+                suite = provider.run_once(
+                    instructions=spec.system,
+                    inputs=_ordre_one_shot(rappel, run_id, p, estampille),
+                    tools=outils_rappel)
+            else:
+                suite = agent_runtime.run(
+                    dataclasses.replace(spec, tools=frozenset(outils_rappel)),
+                    mcp, provider, prompt=rappel, history=historique,
+                    on_turn=apposer, a_vide=_claim_sans_ligne)
+        except Exception as e:  # noqa: BLE001 — un rappel qui échoue ne tue rien
+            logger.warning("job %s : rappel contact %d impossible (%s)",
+                           job["id"], rappels_contact, e)
+            break
+        if suite is not res:
+            for k in ("input_tokens", "output_tokens", "cache_read_input_tokens",
+                      "cache_creation_input_tokens"):
+                suite.usage[k] = int(suite.usage.get(k) or 0) + int(res.usage.get(k) or 0)
+            suite.steps = list(res.steps) + [x for x in suite.steps
+                                             if not x.tool.endswith(_CLAIM)]
+        suite.model = suite.model or res.model
+        res = suite
+    # ⚠️ Après les rappels, si le contact manque toujours ET que l'agent n'a rien
+    # dit : la fiche part en arbitrage avec son motif, comme le rappel d'écriture.
+    # On n'écrit PAS le contact à sa place — ce serait décider d'une donnée que la
+    # cliente recevra, sur une lecture que personne n'a faite.
+    if rappels_contact >= RENVOIS_MAX and ligne_rc and not contact_rattrape:
+        try:
+            fiche = backend.row(p["namespace"], ligne_rc, org=p.get("org_id"))
+            if _sans_contact_direction(fiche):
+                backend.patch_row(
+                    p["namespace"], ligne_rc,
+                    {"retraitement": "arbitrage",
+                     "retraitement_motif":
+                         f"contact de direction absent après {RENVOIS_MAX} "
+                         f"rappels — le registre nomme une personne physique"},
+                    org=p.get("org_id"))
+                contact_arbitre = True
+                logger.warning("job %s : contact de direction toujours absent "
+                               "après %d rappels — arbitrage",
+                               job["id"], RENVOIS_MAX)
+            else:
+                contact_rattrape = True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("job %s : arbitrage contact impossible (%s)",
+                           job["id"], e)
+
     entree = int(res.usage.get("input_tokens") or 0)
     sortie = int(res.usage.get("output_tokens") or 0)
     jetons = entree + sortie
@@ -848,6 +1047,13 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 # les RETROUVER en cherchant une formule dans un motif. Ce qui fait
                 # foi est ce que le mécanisme a enregistré EN AGISSANT.
                 "renvois": renvois, "abandon_enregistre": bool(abandon),
+                # ⚠️ Les trois postes du rappel de contact. Sans eux, ce remède
+                # rendrait la mesure aveugle à ce qu'il corrige : un zéro de
+                # contacts perdus au passage suivant ne dirait plus si c'est la
+                # consigne qui a porté ou le harnais qui a rattrapé.
+                "rappels_contact": rappels_contact,
+                "contact_rattrape": bool(contact_rattrape),
+                "contact_arbitre": bool(contact_arbitre),
                 "ligne_abandonnee": abandon}
     if echec_transport:
         outils = ", ".join(sorted({s.tool for s in res.steps
