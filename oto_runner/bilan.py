@@ -370,11 +370,37 @@ def controler_fiches(spec, backend, jobs: dict) -> dict:
     # année-là date une ABSENCE, pas un acte : c'est exactement l'accumulation de
     # riens qu'on veut refuser. Sans elle, le critère retient ce cas et écarte les
     # sept autres, qui citent tous un acte nommé.
+    # ⚠️ RESSERRÉ le 29/08 (deuxième affinage, MÊME ligne — voir la note dessous).
+    # La version précédente acceptait « une date complète OU un mot de registre ».
+    # Elle a donc laissé passer une fiche déclarée éteinte dont la preuve était…
+    # un DÉPÔT DE COMPTES daté, publié au BODACC. Un dépôt de comptes est un acte
+    # d'ACTIVITÉ : il prouve exactement le contraire de l'extinction, et il était
+    # retourné en preuve d'extinction parce que le contrôle ne lisait qu'une date.
+    #
+    # Le critère porte donc sur la NATURE de l'acte, jamais sur sa date ni sur le
+    # support qui le publie. Un événement de registre daté quelconque — dépôt,
+    # immatriculation, modification, changement de gérant — ne compte pas, quelle
+    # que soit sa date et quel que soit le journal qui l'annonce.
     ACTE = re.compile(
-        r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"          # une date COMPLÈTE (un acte se date au jour)
-        r"|bodacc|jugement|radiation|clôture|cloture|liquidation judiciaire"
-        r"|cessation déclarée|cessation declaree|dissolution",
+        r"radiation|radié|radie"
+        r"|cessation|cessé d'activité|cesse d'activite"
+        r"|liquidation|liquidé|liquide judiciaire"
+        r"|dissolution|dissous|dissoute"
+        # ⚠️ « clôture » ne se prend JAMAIS seul : une clôture d'EXERCICE est un
+        # acte de vie normale. On ne retient que les clôtures qui éteignent —
+        # attrapé par un test existant, qui rejetait « jugement de clôture ».
+        r"|jugement de clôture|jugement de cloture"
+        r"|clôture de liquidation|cloture de liquidation"
+        r"|clôture pour insuffisance|cloture pour insuffisance"
+        r"|jugement d'ouverture|redressement judiciaire"
+        r"|reprise par|absorbée par|absorbee par|fusion-absorption",
         re.I)
+    # ⚠️ NOTE, à lire avant le troisième affinage : c'est la DEUXIÈME fois que la
+    # même fiche resserre ce contrôle. Un contrôle qu'un même cas corrige deux fois
+    # court après les cas au lieu de porter sur le fond — le signe qu'il approxime
+    # une question métier (« cette entreprise est-elle éteinte ? ») par une
+    # recherche de mots. S'il faut l'affiner une troisième fois, la bonne réponse
+    # ne sera pas un mot de plus : ce sera d'aller lire l'état au registre.
     contradictoires = []
     for f in fiches:
         if valeur(f.get("qualification")) != "dormante_ou_introuvable":

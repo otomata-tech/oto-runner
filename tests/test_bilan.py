@@ -31,6 +31,9 @@ class BackendBilan:
     def count_rows(self, namespace, filter=None, org=None):
         return self.restantes
 
+    def rows(self, namespace, filter=None, org=None, limit=200):
+        return getattr(self, "lignes", [])
+
     def tool_health(self, org, tool, *, minutes=15, limit=20):
         self.sondes.append((tool, minutes, limit))
         return self.journal
@@ -288,3 +291,43 @@ def test_un_motif_inconnu_garde_son_texte_plutot_que_d_aller_en_divers():
     m = _motif("quota dépassé sur le connecteur amont")
     assert m.startswith("autre : ")
     assert "quota" in m
+
+
+# ── L'extinction se prouve par un ACTE D'EXTINCTION, pas par une date ───────
+# ⚠️ Vécu deux fois sur la MÊME fiche : le contrôle acceptait « une date complète
+# ou un mot de registre », et une fiche déclarée éteinte a été validée sur un
+# DÉPÔT DE COMPTES daté publié au BODACC — un acte d'ACTIVITÉ retourné en preuve
+# d'extinction.
+
+def _fiche_eteinte(motif):
+    return {"siren": "111", "qualification": "dormante_ou_introuvable",
+            "qualification_motif": motif, "motif_ecartement": ""}
+
+
+def _eteintes_sans_acte(motif):
+    """Rend le nombre de fiches éteintes SANS acte d'extinction retenu."""
+    from oto_runner.bilan import controler_fiches
+    spec, backend = _spec(org=226), BackendBilan(restantes=0)
+    backend.lignes = [_fiche_eteinte(motif)]
+    return len(controler_fiches(spec, backend, {})["fiches_contradictoires"])
+
+
+def test_un_depot_de_comptes_date_ne_prouve_PAS_une_extinction():
+    """LE cas qui a fait rater le quatrième passage : la preuve citée était un
+    dépôt de comptes — donc une preuve d'ACTIVITÉ."""
+    assert _eteintes_sans_acte(
+        "Dépôt des comptes annuels du 12/03/2024, publié au BODACC n°2024-0451.") == 1
+
+
+def test_un_acte_d_extinction_nomme_est_accepte():
+    for motif in ("Radiation du RCS le 04/06/2013 (BODACC).",
+                  "Jugement de clôture de liquidation du 08/11/2016.",
+                  "Cessation d'activité déclarée, dissolution en 2019.",
+                  "Reprise par la société X, fusion-absorption."):
+        assert _eteintes_sans_acte(motif) == 0, motif
+
+
+def test_une_accumulation_d_absences_ne_prouve_rien():
+    """« Aucun dépôt depuis 2016 » date une ABSENCE, pas un acte."""
+    assert _eteintes_sans_acte(
+        "Aucun dépôt de comptes depuis 2016, aucun salarié, aucune trace web.") == 1
