@@ -701,6 +701,20 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 "stopped": res.stopped,
                 "steps": len(res.steps), "tool_counts": compte,
                 "claims": claims, "writes": writes,
+                # ⚠️ `claims_mesures` DIT CE QUE `claims` VAUT. Sur le chemin où
+                # la boucle d'outils tourne chez le fournisseur, aucune sortie de
+                # `data_claim_next` ne remonte : `claims` est une RÈGLE DE REPLI
+                # — « un appel de travail après une réservation » vaut « il tenait
+                # une ligne ». Le 29/08 j'ai présenté ce repli comme une mesure
+                # pour affirmer qu'une ligne avait été attribuée, et porter un
+                # fait de plateforme qui n'en était pas un : le claim avait rendu
+                # `row: null`, la ligne était sous le bail d'un pair.
+                #
+                # Le code le disait dans sa docstring ; le RELEVÉ ne le disait
+                # pas — et c'est le relevé qu'on lit. Un poste qui ne délimite pas
+                # sa portée sera pris pour une mesure par le premier qui le
+                # regarde, et ce sera quelqu'un qui n'a pas lu la docstring.
+                "claims_mesures": not getattr(provider, "ONE_SHOT", False),
                 "claim_vide": claim_vide,
                 "faux_depart": faux_depart, "model": res.model,
                 # Un oubli d'estampille doit SE VOIR au bilan : le geste
