@@ -131,7 +131,7 @@ def _ordre_one_shot(ordre: str, run_id: str, payload: dict,
         f"IDENTITÉ D'EXÉCUTION — obligatoire : sur CHAQUE appel d'outil, ajoute "
         f"l'argument `_run_id: \"{run_id}\"` (c'est ce qui te reconnaît comme "
         f"titulaire de la ligne que tu réserves ; sans lui, tes écritures sont "
-        f"refusées). Au claim, passe aussi `worker: \"{run_id}\"`.")
+        f"refusées).")
     # ⚠️ Le PROJET est imposé ICI, jamais nommé dans la procédure. Vécu le 28/08 :
     # la procédure disait « passe `_project: 220` », et ce projet liait le slot
     # `vivier` au FICHIER CLIENT. Résultat — des agents travaillant sur une copie
@@ -263,83 +263,41 @@ def _ordre_de_renvoi(ligne: Optional[str]) -> str:
             "qu'une ligne sans trace. N'ajoute aucune recherche : écris ce que tu as.")
 
 
-def _relacher(mcp, ligne: Optional[str], ns: Optional[str], org,
-              run_id: Optional[str] = None) -> Optional[bool]:
-    """Le HARNAIS rend la ligne, plus l'agent.
+def _lignes_rendues(reponse) -> "Optional[int]":
+    """Combien de lignes la CLÔTURE du travail a relâchées.
 
-    ⚠️ Pourquoi ce déplacement. Un agent qui relâche sa ligne AVANT d'avoir écrit
-    inverse l'ordre que sa consigne lui donne — « traite, écris, libère ». Vingt-neuf
-    sur trente l'ont fait le 29/08, et le rappel du harnais leur rendait alors un
-    identifiant qui ne leur appartenait plus : un autre travail avait repris la
-    ligne entre-temps. Vingt collisions, autant de tours repayés.
+    ⚠️ On ne relâche plus soi-même. Le passage à l'alias `@claimed`, posé le
+    29/08, était INERTE : 27 refus pour 0 succès sur un seul passage. L'appel
+    partait après la clôture, or l'alias résout la réservation DU TRAVAIL — à
+    cet instant le travail est fermé et ne tient plus rien. Ce qui relâchait
+    vraiment, c'était le repli sur l'identifiant explicite : le chemin que
+    l'alias devait remplacer. Et deux travaux sur six ne se repliaient pas du
+    tout — leur ligne était rendue par la clôture, côté plateforme, sans que
+    rien chez nous ne le sache.
 
-    La consigne le disait déjà. Une phrase de plus contre un geste que la phrase
-    n'arrête pas ne sert à rien : **on retire l'outil**. L'agent ne peut plus rendre
-    sa ligne trop tôt parce qu'il n'a plus de quoi la rendre, et le harnais la rend
-    quand le travail est VRAIMENT fini — rappels compris.
+    Un effet juste obtenu par un mécanisme mort ne se distingue d'un effet juste
+    que si on regarde le mécanisme.
 
-    Best-effort : un relâchement manqué laisse la ligne sous bail jusqu'à son
-    expiration, ce qui est le comportement d'avant. On ne tue jamais un travail
-    abouti pour un relâchement raté."""
-    # ⚠️ `@claimed` DES DEUX CÔTÉS : le harnais n'a pas besoin de connaître la
-    # ligne, seulement le jeton du travail — et celui-là, il l'a toujours.
-    #
-    # La version d'avant cherchait l'identifiant dans les sorties du fournisseur
-    # et ne le trouvait QUE DANS UN CAS SUR CINQ. J'avais retiré `data_release`
-    # aux agents en comptant sur ce relâchement : le résultat net était pire que
-    # l'état d'avant — personne ne relâchait, et les lignes attendaient
-    # l'expiration du bail.
-    #
-    # Depuis v1.163.0 l'alias vaut pour le tableau ET pour la ligne : le serveur
-    # sait ce que le travail tient, il suffit de le lui demander. Plus rien à
-    # parser, plus rien à espérer d'un relevé.
-    if run_id:
-        try:
-            mcp.outil("data_release", {"namespace": "@claimed", "id": "@claimed",
-                                       "worker": run_id, "_run_id": run_id,
-                                       "_org": org})
-            logger.info("ligne relâchée par le harnais via @claimed (travail %s)",
-                        run_id[:12])
-            return True
-        except Exception as e:  # noqa: BLE001 — on retombe sur la voie explicite
-            logger.info("relâchement par @claimed impossible (%s) — "
-                        "on tente par identifiant", e)
+    La clôture rend un compte de lignes relâchées, présent seulement quand il y
+    en a. On le LIT plutôt que de supposer — la mesure est gratuite, et elle
+    dira le jour où elle passera à zéro.
 
-    # ⚠️ None, pas False : « il n'y avait RIEN À RENDRE » n'est pas un échec.
-    #
-    # Vécu à 16:22 le 29/08 : la borne « deux relâchements ratés arrêtent le
-    # passage », posée une heure plus tôt, a coupé le sixième à CINQ lignes sur
-    # cent. Elle comptait comme échecs les travaux qui n'avaient pas de ligne à
-    # relâcher — fin de file, ligne inconnue — parce que `_relacher` rendait le
-    # même `False` dans les deux cas.
-    #
-    # C'est le motif de la journée sous une forme de plus : un contrôle qui ne
-    # distingue pas « rien à faire » de « ça a raté ». Le test qui accompagnait
-    # la borne l'énonçait — « seul False compte » — et la fonction ne le
-    # respectait pas.
-    if not (ligne and ns):
+    ⚠️ Deux conditions, à connaître avant de s'y fier : la libération à la
+    clôture est au MIEUX-EFFORT — si elle échoue, la clôture réussit quand même
+    et la ligne reste tenue jusqu'à l'expiration du bail, et c'est précisément
+    ce compte qui distingue les deux cas. Et elle ne relâche que ce que le
+    TRAVAIL tient : une ligne réservée hors travail n'est concernée par aucun
+    des deux chemins.
+    """
+    if not isinstance(reponse, dict):
         return None
-    try:
-        # ⚠️ `worker` est OBLIGATOIRE, et son absence a fait échouer les 54
-        # relâchements du cinquième passage — « worker Missing required
-        # argument », un par travail. Les lignes restaient donc sous bail
-        # jusqu'à expiration, exactement ce que ce relâchement existe pour
-        # éviter.
-        #
-        # La ligne est réservée SOUS UNE IDENTITÉ, pas sous un run : la
-        # consigne dit à l'agent de passer `worker: <run_id>` au claim comme au
-        # release. Le harnais doit passer la MÊME, sinon il demande la
-        # libération d'une ligne qu'il ne tient pas — de son point de vue.
-        args = {"namespace": ns, "id": ligne, "_org": org}
-        if run_id:
-            args["worker"] = run_id
-            args["_run_id"] = run_id
-        mcp.outil("data_release", args)
-        logger.info("ligne %s relâchée par le harnais", ligne)
-        return True
-    except Exception as e:  # noqa: BLE001 — cf. docstring
-        logger.warning("ligne %s non relâchée (%s) — bail laissé à expirer", ligne, e)
-        return False
+    for cle in ("released_rows", "released", "rows_released"):
+        if cle in reponse:
+            try:
+                return int(reponse[cle])
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 def _enregistrer_abandon(backend, spec_ns: Optional[str], org, ligne: Optional[str],
@@ -923,9 +881,16 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             # quelle — et deux d'entre elles nommaient un modèle qui n'avait pas
             # tourné. Le serveur, lui, sait toujours quelle ligne le travail tient.
             if run_id:
+                # ⚠️ PAS de `worker` ici : `data_write` ne l'accepte pas, et
+                # le lui passer a fait échouer CHAQUE estampillage du septième
+                # passage — quinze refus « worker Unexpected keyword argument »,
+                # un par travail. L'estampille était pourtant posée sur 77 fiches
+                # sur 77 : c'est l'AGENT qui la pose, comme la consigne le lui
+                # demande. Cet appel-ci n'a donc jamais rien imposé, et son échec
+                # se lisait comme un simple bruit dans le journal.
                 mcp.outil("data_write", {"namespace": "@claimed", "id": "@claimed",
                                          "row": dict(estampille),
-                                         "worker": run_id, "_run_id": run_id,
+                                         "_run_id": run_id,
                                          "_org": p.get("org_id")})
             elif ligne_finale:
                 backend.patch_row(p["namespace"], ligne_finale, dict(estampille),
@@ -938,9 +903,24 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             logger.warning("estampille non imposée sur %s : %s", ligne_finale, e)
             resultat["estampille_imposee"] = False
 
-    resultat["relachee"] = _relacher(mcp, ligne_finale, p.get("namespace"),
-                                     p.get("org_id"), run_id)
-    backend.complete(job["id"], ok=True, run_id=run_id, result=resultat)
+    # ⚠️ On ne relâche plus soi-même. Le passage à l'alias `@claimed`, posé le
+    # 29/08, était INERTE : 27 refus pour 0 succès sur un seul passage — l'appel
+    # partait APRÈS la clôture, or l'alias résout la réservation DU TRAVAIL, et
+    # à cet instant le travail ne tient plus rien. Ce qui relâchait vraiment,
+    # c'était le repli sur l'identifiant : le chemin que l'alias remplaçait.
+    # Et deux travaux sur six ne se repliaient pas du tout — leur ligne était
+    # rendue par la clôture, côté plateforme, sans que rien ici ne le sache.
+    # La clôture rend un compte de lignes relâchées : on le LIT.
+    reponse = backend.complete(job["id"], ok=True, run_id=run_id, result=resultat)
+    rendues = _lignes_rendues(reponse)
+    if rendues is not None:
+        resultat["lignes_rendues"] = rendues
+        if rendues == 0 and ligne_finale:
+            # ⚠️ La libération à la clôture est au MIEUX-EFFORT : si elle échoue,
+            # la clôture réussit quand même et la ligne reste tenue jusqu'à
+            # l'expiration du bail. Ce compte est ce qui distingue les deux cas.
+            logger.warning("clôture sans libération sur %s — la ligne reste "
+                           "tenue jusqu'à expiration du bail", ligne_finale)
     logger.info("job %s : %s (%s)", job["id"], outcome, note)
 
 

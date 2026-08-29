@@ -231,13 +231,20 @@ class Backend:
 
     def complete(self, job_id: int, ok: bool, error: Optional[str] = None,
                  run_id: Optional[str] = None,
-                 result: Optional[dict] = None) -> str:
+                 result: Optional[dict] = None) -> dict:
         """`result` = le résumé déclaré du job (usage_tokens, stopped, steps…) :
-        c'est ce que l'ordonnanceur de flotte lit pour sa garde budget."""
-        out = self._post("/api/me/runner/jobs",
-                         {"op": "complete", "job_id": job_id, "ok": ok,
-                          "error": error, "run_id": run_id, "result": result})
-        return str(out.get("status") or "")
+        c'est ce que l'ordonnanceur de flotte lit pour sa garde budget.
+
+        ⚠️ Rend la RÉPONSE ENTIÈRE, pas seulement le statut. La clôture relâche
+        les lignes que le travail tient et le dit — un compte de lignes
+        relâchées, présent seulement quand il y en a. On jetait cette réponse
+        pour n'en garder qu'une chaîne, si bien que le seul témoin du bon
+        fonctionnement de la libération était hors de portée : on a supposé
+        pendant une journée entière ce que le serveur disait à chaque appel.
+        """
+        return self._post("/api/me/runner/jobs",
+                          {"op": "complete", "job_id": job_id, "ok": ok,
+                           "error": error, "run_id": run_id, "result": result})
 
     # ── la file de LIGNES (datastore) — lecture seule, pour les bornes ───────
     def count_rows(self, namespace: str, filter: Optional[dict] = None,
