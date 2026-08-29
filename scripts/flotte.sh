@@ -33,6 +33,8 @@ nom=${2:-}
 
 FLOTTE="oto-fleet-$nom"
 GARDE="garde-vivier-$nom"
+PROFILS="garde-profils-$nom"
+NS_MIROIR="${NS_MIROIR:-copie-eval-palier100}"
 
 case "$geste" in
 lancer)
@@ -43,8 +45,8 @@ lancer)
   # pouvoir armer sa garde. Le refus est le bon comportement ; le résidu ne l'est
   # pas. On nettoie donc AVANT, au lieu de laisser un état intermédiaire bloquer
   # le geste suivant.
-  systemctl stop "$GARDE.timer" "$GARDE" 2>/dev/null
-  systemctl reset-failed "$FLOTTE" "$GARDE" 2>/dev/null
+  systemctl stop "$GARDE.timer" "$GARDE" "$PROFILS.timer" "$PROFILS" 2>/dev/null
+  systemctl reset-failed "$FLOTTE" "$GARDE" "$PROFILS" 2>/dev/null
 
   # La GARDE D'ABORD : une flotte qui tourne une seconde sans surveillance est
   # une seconde pendant laquelle une écriture peut partir sans que rien ne la voie.
@@ -64,6 +66,18 @@ lancer)
       exit 1; }
   echo "garde $GARDE armée (toutes les 2 min, elle arrête $FLOTTE)"
 
+  # La garde des PROFILS PERSONNELS, armée dans le même geste que les autres.
+  # ⚠️ Ce n'est pas un cran : le harnais ne voit pas les appels d'outils sur ce
+  # chemin, donc il ne peut pas empêcher une consultation — seulement la
+  # constater et arrêter les frais. À deux consultations sur cent, elle coupe
+  # toutes les cinquante lignes : tenable pour un jalon, pas pour un lot.
+  systemd-run --unit="$PROFILS" --on-calendar="*:0/2" \
+    --property=EnvironmentFile="$RACINE/.env" --working-directory="$RACINE" \
+    "$PY" "$RACINE/garde-profils.py" "$NS_MIROIR" "$FLOTTE" >/dev/null || {
+      echo "ABANDON : garde des profils non armée — on ne lance pas sans elle."
+      systemctl stop "$GARDE.timer" 2>/dev/null; exit 1; }
+  echo "garde $PROFILS armée (profils personnels)"
+
   systemd-run --unit="$FLOTTE" --property=EnvironmentFile="$RACINE/.env" \
     --working-directory="$RACINE" "$PY" -m oto_runner.fleet "$yaml" >/dev/null || {
       echo "ABANDON : flotte non lancée — je retire la garde que je venais d'armer."
@@ -76,7 +90,7 @@ arreter)
   # L'ordre inverse : la flotte d'abord, sa garde ensuite. Retirer la garde en
   # premier laisserait la flotte tourner sans surveillance le temps de l'arrêt.
   systemctl stop "$FLOTTE" 2>/dev/null
-  systemctl stop "$GARDE.timer" 2>/dev/null
+  systemctl stop "$GARDE.timer" "$PROFILS.timer" 2>/dev/null
   for n in 1 2 3; do systemctl stop --no-block "oto-runner@$n"; done
   echo "flotte $(systemctl is-active "$FLOTTE") · garde retirée · agents en arrêt"
 
