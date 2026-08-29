@@ -84,3 +84,7 @@ def test_la_rampe_ne_bride_que_la_MONTEE_en_charge():
     src = inspect.getsource(fleet.run_fleet)
     assert "pleine_charge_atteinte" in src, "l'état de montée est suivi"
     assert "or not monte" in src, "et la rampe cesse de s'appliquer une fois montée"
+    # ⚠️ Elle se compte en DÉPARTS, pas en pleine charge atteinte : la première
+    # version attendait `len(en_vol) >= concurrency`, et c'est la rampe qui
+    # empêchait d'y arriver. Elle ne s'est jamais désactivée.
+    assert "departs < spec.concurrency" in src

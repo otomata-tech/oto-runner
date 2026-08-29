@@ -252,6 +252,7 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
     faux_departs_consecutifs = 0
     relachements_rates = 0
     pleine_charge_atteinte = False
+    departs = 0
     # (jetons, écritures) des derniers jobs conclus — la matière du rendement.
     fenetre: deque = deque(maxlen=max(1, spec.rendement_fenetre))
     # Les erreurs BACKEND consécutives du driver lui-même (count/enqueue) : un
@@ -417,15 +418,26 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
             # ⚠️ On ne SUPPRIME pas la rampe : démarrer trois conversations à la
             # même seconde a déjà gelé la plateforme. Elle protège le départ,
             # elle n'a jamais eu à brider la croisière.
-            monte = not pleine_charge_atteinte
-            if len(en_vol) >= spec.concurrency:
-                pleine_charge_atteinte = True
+            # ⚠️ La rampe se compte en DÉPARTS, pas en pleine charge atteinte.
+            #
+            # La première version se désactivait quand `len(en_vol)` atteignait la
+            # concurrence — et c'est la rampe elle-même qui empêchait d'y arriver :
+            # elle n'enfilait qu'un travail par minute, les travaux se concluaient
+            # entre-temps, la file restait à deux en vol sur trois, et la
+            # désactivation n'arrivait jamais. Un cercle vicieux, mesuré le 29/08 :
+            # enfilements toujours à 62 s après le correctif censé les libérer.
+            #
+            # La rampe couvre donc les `concurrency` PREMIERS départs — le temps
+            # de la montée, littéralement — et cesse ensuite.
+            monte = departs < spec.concurrency
+            pleine_charge_atteinte = not monte
             if (len(en_vol) < spec.concurrency
                     and (dernier_depart is None
                          or not monte
                          or clock() - dernier_depart >= spec.ramp_seconds)):
                 try:
                     jid = backend.enqueue("start", _payload(spec))
+                    departs += 1
                 except BackendError as e:
                     erreurs_backend += 1
                     if erreurs_backend >= _MAX_ERREURS_BACKEND:
