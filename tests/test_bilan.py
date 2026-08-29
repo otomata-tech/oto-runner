@@ -331,3 +331,31 @@ def test_une_accumulation_d_absences_ne_prouve_rien():
     """« Aucun dépôt depuis 2016 » date une ABSENCE, pas un acte."""
     assert _eteintes_sans_acte(
         "Aucun dépôt de comptes depuis 2016, aucun salarié, aucune trace web.") == 1
+
+
+# ── Le refus du cran a DEUX formes ──────────────────────────────────────────
+# ⚠️ Le compteur n'en cherchait qu'une. Il a donc rangé dans « autre » le seul
+# cas grave du quatrième passage — un agent écrivant une clé factice qui, sans
+# le cran, aurait créé une ligne fantôme — et le bilan a annoncé ZÉRO création
+# refusée. Un compteur qui rate le cas qu'il existe pour voir certifie qu'il ne
+# s'est rien passé.
+
+def test_les_deux_formes_du_refus_de_creation_sont_comptees():
+    from oto_runner.backend import _motif
+    assert _motif(
+        "Error calling tool 'data_write': aucune ligne de copie-eval-palier100 ne "
+        "porte siren = \"{'valeur': 'NON_RENSEIGNE', 'comment': 'Ligne verrouillée'}\""
+    ) == "création refusée par le cran"
+    assert _motif("400 business_key_required: la clé `siren` ...") == \
+        "création refusée par le cran"
+    assert _motif("le champ `siren` n'est pas renseigné") == \
+        "création refusée par le cran"
+
+
+def test_une_ligne_tenue_par_un_autre_ne_devient_pas_une_creation():
+    """⚠️ Les deux motifs se ressemblent — « ne porte » ne doit pas avaler
+    « réservée par ». L'ordre des règles compte, et ce test le tient."""
+    from oto_runner.backend import _motif
+    assert _motif(
+        'ligne « 01a0 » réservée par « 9853 » jusqu\'à 2026-08-29'
+    ) == "ligne tenue par un autre travail"

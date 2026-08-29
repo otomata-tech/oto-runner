@@ -265,3 +265,58 @@ def test_une_relecture_en_panne_ne_declenche_pas_de_rappel(monkeypatch):
     W._traiter(b, _job(), provider=None)
     assert b.relectures == 1
     assert len(vus) == 1, "lecture en panne ⟹ on s'en remet au compteur"
+
+
+# ── Le HARNAIS relâche, plus l'agent ────────────────────────────────────────
+# ⚠️ 29 agents sur 30 relâchaient AVANT d'écrire, inversant l'ordre de leur
+# consigne. Le rappel leur rendait alors une ligne qu'un autre travail avait
+# reprise : 20 collisions, autant de tours repayés. La consigne le disait déjà —
+# on retire donc l'outil au lieu d'ajouter une phrase.
+
+class _McpRelache(_Mcp):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.relaches = []
+
+    def outil(self, name, arguments=None):
+        if name == "data_release":
+            self.relaches.append((arguments or {}).get("id"))
+            return {}
+        return super().outil(name, arguments)
+
+
+def test_le_harnais_relache_la_ligne_a_la_fin(monkeypatch):
+    vus = _monter(monkeypatch, [AgentResult(
+        reply="fait", stopped="end_turn",
+        steps=_pas("data_claim_next", "data_write"))])
+    monkeypatch.setattr(W, "McpSession", _McpRelache)
+    b = _Backend()
+    W._traiter(b, _job(), provider=None)
+    assert len(vus) == 1
+    assert _resultat(b)["relachee"] is True
+
+
+def test_le_relachement_vient_APRES_les_rappels(monkeypatch):
+    """⚠️ Relâcher avant le rappel rouvrirait la fenêtre qu'on ferme : un autre
+    travail prendrait la ligne pendant qu'on la rend à l'agent. Ce serait la
+    faute corrigée, commise par le harnais lui-même."""
+    ordre = []
+
+    class _Mcp2(_McpRelache):
+        def outil(self, name, arguments=None):
+            if name == "data_release":
+                ordre.append("release")
+            return super().outil(name, arguments)
+
+    def faux_run(spec, transport, provider, prompt=None, **_):
+        ordre.append("tour")
+        return AgentResult(reply="rien", stopped="end_turn",
+                           steps=_pas("data_claim_next")
+                           if len(ordre) < 3 else _pas("data_write"))
+
+    monkeypatch.setattr(W.agent_runtime, "run", faux_run)
+    monkeypatch.setattr(W, "McpSession", _Mcp2)
+    monkeypatch.setattr(W, "_estampille", lambda *a, **kw: {})
+    W._traiter(_Backend(), _job(), provider=None)
+    assert ordre.count("release") == 1, "une seule fois"
+    assert ordre[-1] == "release", f"le relâchement est le DERNIER geste : {ordre}"

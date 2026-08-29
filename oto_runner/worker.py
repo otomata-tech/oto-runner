@@ -233,6 +233,34 @@ def _ordre_de_renvoi(ligne: Optional[str]) -> str:
             "qu'une ligne sans trace. N'ajoute aucune recherche : écris ce que tu as.")
 
 
+def _relacher(mcp, ligne: Optional[str], ns: Optional[str], org) -> bool:
+    """Le HARNAIS rend la ligne, plus l'agent.
+
+    ⚠️ Pourquoi ce déplacement. Un agent qui relâche sa ligne AVANT d'avoir écrit
+    inverse l'ordre que sa consigne lui donne — « traite, écris, libère ». Vingt-neuf
+    sur trente l'ont fait le 29/08, et le rappel du harnais leur rendait alors un
+    identifiant qui ne leur appartenait plus : un autre travail avait repris la
+    ligne entre-temps. Vingt collisions, autant de tours repayés.
+
+    La consigne le disait déjà. Une phrase de plus contre un geste que la phrase
+    n'arrête pas ne sert à rien : **on retire l'outil**. L'agent ne peut plus rendre
+    sa ligne trop tôt parce qu'il n'a plus de quoi la rendre, et le harnais la rend
+    quand le travail est VRAIMENT fini — rappels compris.
+
+    Best-effort : un relâchement manqué laisse la ligne sous bail jusqu'à son
+    expiration, ce qui est le comportement d'avant. On ne tue jamais un travail
+    abouti pour un relâchement raté."""
+    if not (ligne and ns):
+        return False
+    try:
+        mcp.outil("data_release", {"namespace": ns, "id": ligne, "_org": org})
+        logger.info("ligne %s relâchée par le harnais", ligne)
+        return True
+    except Exception as e:  # noqa: BLE001 — cf. docstring
+        logger.warning("ligne %s non relâchée (%s) — bail laissé à expirer", ligne, e)
+        return False
+
+
 def _enregistrer_abandon(backend, spec_ns: Optional[str], org, ligne: Optional[str],
                          res) -> Optional[str]:
     """Après les renvois : l'abandon s'ENREGISTRE au lieu de se taire.
@@ -670,6 +698,11 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                          result=resultat)
         logger.warning("job %s : %s (%s)", job["id"], erreur, note)
         return
+    # ⚠️ APRÈS les rappels, jamais avant : relâcher plus tôt rouvrirait la fenêtre
+    # qu'on ferme — un autre travail prendrait la ligne pendant qu'on la rend à
+    # l'agent. C'est exactement la faute qu'on corrige, commise par le harnais.
+    resultat["relachee"] = _relacher(mcp, _ligne_reservee(res, mcp),
+                                     p.get("namespace"), p.get("org_id"))
     backend.complete(job["id"], ok=True, run_id=run_id, result=resultat)
     logger.info("job %s : %s (%s)", job["id"], outcome, note)
 
