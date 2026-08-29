@@ -125,6 +125,36 @@ Dans les deux cas la règle est la même : **ce qui a été enregistré en agiss
 sur ce qu'un champ raconte après coup.** Le champ reste la vérification croisée — s'il
 diverge du relevé, il y a autre chose à comprendre.
 
+## Mesurer : emprunter le client du produit
+
+⚠️ **Un outil de mesure qui refait son propre client refait les bugs déjà corrigés
+dans le produit — et les impute au produit.** `scripts/sonde.py` porte le client à
+emprunter ; un script d'analyse n'en écrit pas un autre.
+
+Trois fois en deux jours (28-29/08), un instrument a rapporté un défaut qu'il
+**fabriquait lui-même** :
+
+| l'instrument | ce qu'il affirmait | ce qui était vrai |
+|---|---|---|
+| une garde | « flotte ARRÊTÉE », cinq fois | rien n'était arrêté |
+| une vérification | « ordonnanceur vivant » | la commande se comptait elle-même |
+| quatre scripts d'analyse | « 203 outils servent du charabia » | ils lisaient `r.text` |
+
+Le dernier mérite son détail, parce qu'il est le plus facile à refaire : le flux MCP
+annonce `text/event-stream` **sans charset**. La bibliothèque HTTP retombe alors sur
+latin-1, et un UTF-8 valide devient du mojibake. Le produit fait
+`r.content.decode("utf-8")` **et le commente** ; le script jetable, écrit à côté, ne
+le savait pas. L'alerte a été diffusée avant vérification des octets bruts.
+
+**Mesurer avec le même client que le produit n'est pas une commodité : c'est ce qui
+rend la mesure opposable.**
+
+Corollaire pour les empreintes : elles se calculent sur du texte **décodé**. Une
+empreinte calculée sur du charabia reste comparable — le charabia est déterministe —
+mais le jour où le décodage se corrige, **des centaines d'outils paraissent modifiés
+d'un coup** sans qu'aucun n'ait changé. C'est arrivé : 253 « modifications », dont
+244 dues à la seule correction de lecture.
+
 ## Pièges vécus
 
 ⚠️ **Un déploiement en pleine campagne était interdit par DISCIPLINE, pas par le
