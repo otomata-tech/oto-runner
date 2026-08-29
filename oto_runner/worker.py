@@ -263,48 +263,43 @@ def _ordre_de_renvoi(ligne: Optional[str]) -> str:
             "qu'une ligne sans trace. N'ajoute aucune recherche : écris ce que tu as.")
 
 
-def _lignes_rendues(reponse) -> "Optional[int]":
-    """Combien de lignes la CLÔTURE du travail a relâchées.
+def _lignes_rendues(res) -> Optional[int]:
+    """Combien de lignes l'agent a rendues en fermant son run (`rows_released`).
 
-    ⚠️ On ne relâche plus soi-même. Le passage à l'alias `@claimed`, posé le
-    29/08, était INERTE : 27 refus pour 0 succès sur un seul passage. L'appel
-    partait après la clôture, or l'alias résout la réservation DU TRAVAIL — à
-    cet instant le travail est fermé et ne tient plus rien. Ce qui relâchait
-    vraiment, c'était le repli sur l'identifiant explicite : le chemin que
-    l'alias devait remplacer. Et deux travaux sur six ne se repliaient pas du
-    tout — leur ligne était rendue par la clôture, côté plateforme, sans que
-    rien chez nous ne le sache.
+    ⚠️ Lu dans le code servi, pas déduit : la clôture du travail côté harnais ne
+    libère AUCUNE ligne et ne porte aucun compte. Ce qui libère les baux, c'est
+    `run_finish` — l'appel de l'AGENT — et son `rows_released` n'est présent QUE
+    s'il y a au moins une ligne rendue : absent signifie zéro, il n'y a jamais de
+    zéro explicite.
 
-    Un effet juste obtenu par un mécanisme mort ne se distingue d'un effet juste
-    que si on regarde le mécanisme.
+    Pourquoi ce poste existe : notre propre libération était inerte — 27 refus
+    pour 0 succès le 29/08. L'appel par alias partait après la clôture, quand le
+    travail ne tenait plus rien ; ce qui relâchait réellement était le repli sur
+    l'identifiant, c'est-à-dire le chemin que l'alias devait remplacer. On a
+    cessé de relâcher nous-mêmes, et on LIT ce que l'agent obtient.
 
-    La clôture rend un compte de lignes relâchées, présent seulement quand il y
-    en a. On le LIT plutôt que de supposer — la mesure est gratuite, et elle
-    dira le jour où elle passera à zéro.
+    ⚠️ Ce qu'un zéro veut dire ici, et ce n'est pas anodin : soit le travail ne
+    tenait aucune ligne, soit l'agent est mort avant son `run_finish` — et dans
+    ce cas sa ligne reste tenue jusqu'à l'expiration du bail, la clôture du
+    travail n'y changeant rien.
 
-    ⚠️ Deux conditions, à connaître avant de s'y fier : la libération à la
-    clôture est au MIEUX-EFFORT — si elle échoue, la clôture réussit quand même
-    et la ligne reste tenue jusqu'à l'expiration du bail, et c'est précisément
-    ce compte qui distingue les deux cas. Et elle ne relâche que ce que le
-    TRAVAIL tient : une ligne réservée hors travail n'est concernée par aucun
-    des deux chemins.
+    Rend None — jamais 0 — quand le fournisseur ne rend pas ses sorties : un zéro
+    dirait « aucune ligne rendue » là où il faut lire « pas mesuré ».
     """
-    if not isinstance(reponse, dict):
+    sorties = getattr(res, "raw_outputs", None)
+    if not sorties:
         return None
-    for cle in ("released_rows", "released", "rows_released"):
-        if cle in reponse:
-            try:
-                return int(reponse[cle])
-            except (TypeError, ValueError):
-                return None
-    # ⚠️ Aucun nom reconnu : on le DIT, avec les clés reçues. Ces trois noms sont
-    # une supposition, et une supposition qui rend `None` se lit « pas mesuré » —
-    # on cesse vite de regarder un poste qui ne dit jamais rien. Au premier
-    # travail, le nom réel apparaîtra ici et remplacera la devinette par un fait.
-    logger.warning("témoin de libération non reconnu dans la réponse de clôture "
-                   "— clés reçues : %s", sorted(reponse))
-    return None
-
+    total = 0
+    for e in sorties:
+        if (e or {}).get("type") != "tool.execution":
+            continue
+        info = e.get("info")
+        if info is None:
+            continue
+        brut = json.dumps(info, ensure_ascii=False) if not isinstance(info, str) else info
+        for m in re.finditer(r'"rows_released"\s*:\s*(\d+)', brut):
+            total += int(m.group(1))
+    return total
 
 def _enregistrer_abandon(backend, spec_ns: Optional[str], org, ligne: Optional[str],
                          res) -> Optional[str]:
@@ -914,19 +909,26 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # partait APRÈS la clôture, or l'alias résout la réservation DU TRAVAIL, et
     # à cet instant le travail ne tient plus rien. Ce qui relâchait vraiment,
     # c'était le repli sur l'identifiant : le chemin que l'alias remplaçait.
-    # Et deux travaux sur six ne se repliaient pas du tout — leur ligne était
-    # rendue par la clôture, côté plateforme, sans que rien ici ne le sache.
-    # La clôture rend un compte de lignes relâchées : on le LIT.
-    reponse = backend.complete(job["id"], ok=True, run_id=run_id, result=resultat)
-    rendues = _lignes_rendues(reponse)
+    #
+    # ⚠️ Et ce n'est PAS la clôture du travail qui rend les lignes — je l'ai cru
+    # une heure et c'était faux. `complete` clôt le job, rien de plus. Les baux
+    # sont libérés par `run_finish`, l'appel de l'AGENT, qui rend `rows_released`
+    # et seulement s'il y a au moins une ligne rendue. On lit donc ce témoin dans
+    # les sorties d'outils, pas dans la réponse de clôture — un poste branché sur
+    # `complete` n'aurait jamais rien dit, et son silence se serait lu
+    # « pas mesuré ».
+    rendues = _lignes_rendues(res)
     if rendues is not None:
         resultat["lignes_rendues"] = rendues
         if rendues == 0 and ligne_finale:
-            # ⚠️ La libération à la clôture est au MIEUX-EFFORT : si elle échoue,
-            # la clôture réussit quand même et la ligne reste tenue jusqu'à
-            # l'expiration du bail. Ce compte est ce qui distingue les deux cas.
-            logger.warning("clôture sans libération sur %s — la ligne reste "
-                           "tenue jusqu'à expiration du bail", ligne_finale)
+            # ⚠️ Zéro ligne rendue alors qu'on en tenait une : l'agent n'a pas
+            # atteint son `run_finish`. Sa ligne reste alors tenue jusqu'à
+            # l'expiration du bail — et la clôture du travail n'y change rien,
+            # elle ne libère pas. C'est le seul cas où ce poste crie.
+            logger.warning("aucune ligne rendue sur %s — `run_finish` non atteint, "
+                           "la ligne reste tenue jusqu'à expiration du bail",
+                           ligne_finale)
+    backend.complete(job["id"], ok=True, run_id=run_id, result=resultat)
     logger.info("job %s : %s (%s)", job["id"], outcome, note)
 
 
