@@ -48,7 +48,29 @@ lancer)
   systemctl stop "$GARDE.timer" "$GARDE" "$PROFILS.timer" "$PROFILS" 2>/dev/null
   systemctl reset-failed "$FLOTTE" "$GARDE" "$PROFILS" 2>/dev/null
 
-  # ⚠️ LA SONDE D'ABORD : c'est le MODÈLE qui dit ce qu'on lui sert.
+  # ⚠️ LE CODE DÉPLOYÉ D'ABORD : on ne lance pas une campagne sur un dépôt en
+  # retard, parce qu'on la corrigerait EN VOL.
+  #
+  # Le 29/08, j'ai déployé deux fois pendant un passage — dont une modification
+  # du texte donné aux agents. Les travaux d'avant et d'après n'avaient pas reçu
+  # la même instruction : le passage a été abandonné à douze fiches. J'avais fait
+  # reporter deux mises en production le même jour pour cette raison exacte, et
+  # la règle a cédé chez celui qui l'imposait.
+  #
+  # Une règle qu'un humain doit tenir finit par céder. Celle-ci ne dépend donc
+  # plus de personne.
+  git -C "$RACINE" fetch origin main --quiet 2>/dev/null || true
+  retard=$(git -C "$RACINE" rev-list --count HEAD..origin/main 2>/dev/null || echo 0)
+  if [ "${retard:-0}" != "0" ]; then
+    echo "ABANDON : $retard commit(s) non déployé(s) sur cette box."
+    echo "  Une campagne lancée sur du code en retard se corrige EN VOL, et un"
+    echo "  passage corrigé en vol ne se juge plus. Déploie, puis relance."
+    git -C "$RACINE" log --oneline HEAD..origin/main | head -5
+    exit 1
+  fi
+  echo "code déployé : à jour avec origin/main ✅"
+
+  # ⚠️ LA SONDE ENSUITE : c'est le MODÈLE qui dit ce qu'on lui sert.
   #
   # La liste d'outils d'une déclaration de flotte est une DÉCLARATION. Le 29/08,
   # j'ai affirmé qu'elle n'était pas appliquée — sur la foi de 54 appels d'un
