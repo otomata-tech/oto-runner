@@ -320,3 +320,23 @@ def test_le_relachement_vient_APRES_les_rappels(monkeypatch):
     W._traiter(_Backend(), _job(), provider=None)
     assert ordre.count("release") == 1, "une seule fois"
     assert ordre[-1] == "release", f"le relâchement est le DERNIER geste : {ordre}"
+
+
+# ── La FORME de l'appel, imposée par le harnais ─────────────────────────────
+# ⚠️ Le 29/08, une consigne montrait `namespace: "@claimed"`. Les agents ont
+# copié la forme qu'on leur montrait — 2 écritures refusées sur 5. Une forme se
+# copie là où une règle se relit, y compris quand elle est fausse. Le harnais
+# donne donc l'appel entier plutôt que des morceaux à assembler.
+
+def test_l_ordre_impose_la_forme_complete_de_l_ecriture():
+    ordre = W._ordre_one_shot("fais", "run-1",
+                              {"namespace": "un-tableau", "project_id": 7}, None)
+    assert 'namespace: "un-tableau"' in ordre, "le tableau est nommé"
+    assert 'id: "@claimed"' in ordre, "et @claimed est montré À SA PLACE"
+    assert "NULLE PART ailleurs" in ordre, "avec l'interdit qui a été enfreint"
+
+
+def test_l_ordre_ne_suggere_jamais_claimed_comme_tableau():
+    """⚠️ LE piège : l'agent remplace le champ qu'on lui demandait de recopier."""
+    ordre = W._ordre_one_shot("fais", "run-1", {"namespace": "un-tableau"}, None)
+    assert 'namespace: "@claimed"' not in ordre

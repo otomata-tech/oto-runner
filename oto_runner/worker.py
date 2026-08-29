@@ -150,10 +150,23 @@ def _ordre_one_shot(ordre: str, run_id: str, payload: dict,
         identite += (f" Passe aussi `_project: {projet}` sur chaque appel, et "
                      f"AUCUN autre : c'est ce projet-ci qui résout les slots. "
                      f"Ignore tout numéro de projet écrit dans la procédure.")
+    # ⚠️ La FORME COMPLÈTE de l'appel, pas seulement le nom du tableau. Le 29/08,
+    # une consigne montrait `namespace: "@claimed"` : les agents ont copié la
+    # forme qu'on leur montrait, et 2 écritures sur 5 ont été refusées. Une forme
+    # se copie là où une règle se relit — ce qui vaut aussi quand la forme est
+    # fausse. Le harnais donne donc l'appel entier, avec chaque jeton à sa place,
+    # plutôt que des morceaux à assembler.
+    #
+    # ⚠️ `namespace` reste OBLIGATOIRE même avec `@claimed` : la réservation
+    # désigne la ligne, pas la table. Croire l'inverse a fait annoncer une famille
+    # d'erreurs « fermée par construction » alors qu'elle restait ouverte.
     if ns:
-        identite += (f" Le tableau se nomme EXACTEMENT `{ns}` : passe "
-                     f"`namespace: \"{ns}\"` tel quel — jamais `slot:…`, jamais "
-                     f"une variante.")
+        identite += (f" Le tableau se nomme EXACTEMENT `{ns}`. La forme de "
+                     f"l'écriture est : `data_write(namespace: \"{ns}\", "
+                     f"id: \"@claimed\", row: {{…}})` — le nom du tableau dans "
+                     f"`namespace`, le mot `@claimed` dans `id` et NULLE PART "
+                     f"ailleurs. Jamais `slot:…`, jamais une variante du nom, "
+                     f"jamais `@claimed` à la place du tableau.")
     # L'ESTAMPILLE par la prose : sur ce chemin la boucle d'outils tourne chez
     # le fournisseur, le worker ne voit pas les arguments d'un `data_write` et
     # ne peut donc pas l'injecter comme il le fait en stateless. Même recours
