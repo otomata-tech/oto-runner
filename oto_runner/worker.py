@@ -842,10 +842,24 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # Posée APRÈS les rappels et par-dessus ce que l'agent a pu y mettre : c'est
     # le relevé d'exécution qui fait foi, pas ce qu'un champ raconte.
     ligne_finale = _ligne_reservee(res, mcp)
-    if estampille and ligne_finale and p.get("namespace"):
+    if estampille and p.get("namespace"):
         try:
-            backend.patch_row(p["namespace"], ligne_finale, dict(estampille),
-                              org=p.get("org_id"))
+            # ⚠️ Par l'ALIAS d'abord — même raison que le relâchement : le harnais
+            # ne retrouve la ligne dans les sorties du fournisseur que trois fois
+            # sur quatre. Les 24 travaux où il ne l'a pas trouvée au sixième
+            # passage sont ceux où l'estampille de l'agent est restée telle
+            # quelle — et deux d'entre elles nommaient un modèle qui n'avait pas
+            # tourné. Le serveur, lui, sait toujours quelle ligne le travail tient.
+            if run_id:
+                mcp.outil("data_write", {"namespace": "@claimed", "id": "@claimed",
+                                         "row": dict(estampille),
+                                         "worker": run_id, "_run_id": run_id,
+                                         "_org": p.get("org_id")})
+            elif ligne_finale:
+                backend.patch_row(p["namespace"], ligne_finale, dict(estampille),
+                                  org=p.get("org_id"))
+            else:
+                raise RuntimeError("ni jeton de travail ni ligne connue")
             resultat["estampille_imposee"] = True
         except Exception as e:  # noqa: BLE001 — une estampille manquée n'annule
             # pas un travail abouti ; elle se voit au bilan.
