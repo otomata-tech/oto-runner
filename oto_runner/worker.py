@@ -247,7 +247,7 @@ def _ordre_de_renvoi(ligne: Optional[str]) -> str:
 
 
 def _relacher(mcp, ligne: Optional[str], ns: Optional[str], org,
-              run_id: Optional[str] = None) -> bool:
+              run_id: Optional[str] = None) -> Optional[bool]:
     """Le HARNAIS rend la ligne, plus l'agent.
 
     ⚠️ Pourquoi ce déplacement. Un agent qui relâche sa ligne AVANT d'avoir écrit
@@ -264,8 +264,20 @@ def _relacher(mcp, ligne: Optional[str], ns: Optional[str], org,
     Best-effort : un relâchement manqué laisse la ligne sous bail jusqu'à son
     expiration, ce qui est le comportement d'avant. On ne tue jamais un travail
     abouti pour un relâchement raté."""
+    # ⚠️ None, pas False : « il n'y avait RIEN À RENDRE » n'est pas un échec.
+    #
+    # Vécu à 16:22 le 29/08 : la borne « deux relâchements ratés arrêtent le
+    # passage », posée une heure plus tôt, a coupé le sixième à CINQ lignes sur
+    # cent. Elle comptait comme échecs les travaux qui n'avaient pas de ligne à
+    # relâcher — fin de file, ligne inconnue — parce que `_relacher` rendait le
+    # même `False` dans les deux cas.
+    #
+    # C'est le motif de la journée sous une forme de plus : un contrôle qui ne
+    # distingue pas « rien à faire » de « ça a raté ». Le test qui accompagnait
+    # la borne l'énonçait — « seul False compte » — et la fonction ne le
+    # respectait pas.
     if not (ligne and ns):
-        return False
+        return None
     try:
         # ⚠️ `worker` est OBLIGATOIRE, et son absence a fait échouer les 54
         # relâchements du cinquième passage — « worker Missing required

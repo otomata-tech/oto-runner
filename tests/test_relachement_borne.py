@@ -36,3 +36,17 @@ def test_seul_False_compte_comme_un_echec():
 def test_le_travail_declare_son_relachement():
     src = inspect.getsource(worker._traiter)
     assert '"relachee"' in src
+
+
+def test_rien_a_rendre_n_est_pas_un_echec():
+    """⚠️ LE cas qui a coupé le sixième passage à cinq lignes sur cent.
+
+    `_relacher` rendait `False` aussi bien pour un échec que pour « aucune ligne
+    à rendre ». La borne, posée une heure plus tôt, a donc arrêté un passage sain
+    au troisième travail sans ligne — fin de file, ligne inconnue, peu importe.
+
+    Le test de la borne disait déjà « seul False compte » ; la fonction ne le
+    respectait pas. Un contrôle qui ne distingue pas « rien à faire » de « ça a
+    raté » finit toujours par arrêter ce qui marche."""
+    assert worker._relacher(None, None, "un-tableau", 226, "r-1") is None
+    assert worker._relacher(None, "une-ligne", None, 226, "r-1") is None
