@@ -211,10 +211,17 @@ def _enregistrer_abandon(backend, spec_ns: Optional[str], org, ligne: Optional[s
     """Après les renvois : l'abandon s'ENREGISTRE au lieu de se taire.
 
     ⚠️ Le harnais n'écrit RIEN sur l'entreprise — seulement un fait sur NOTRE
-    traitement : `retraitement: epuise` et, en motif, la raison que l'agent a donnée
-    de s'arrêter. Le motif est BORNÉ : un motif de trois lignes se lit, un motif de
-    trois pages se saute, et on retombe dans le drapeau muet qu'on corrige ici.
-    Best-effort : une observation n'arrête jamais une file."""
+    traitement : `retraitement: arbitrage` et, en motif, la raison que l'agent a
+    donnée de s'arrêter. Le motif est BORNÉ : un motif de trois lignes se lit, un
+    motif de trois pages se saute, et on retombe dans le drapeau muet qu'on corrige
+    ici. Best-effort : une observation n'arrête jamais une file.
+
+    ⚠️ `arbitrage` a DEUX émetteurs, pour deux situations opposées : un agent qui
+    l'a JUGÉ (motif métier libre) et le harnais qui constate un abandon. Ils ne se
+    distinguent pas par la valeur — **c'est le motif qui les sépare**, et c'est
+    pourquoi celui du harnais s'ouvre toujours par « conclu sans écrire après N
+    rappels ». Compter les abandons en filtrant sur la valeur seule les mélangerait
+    aux jugements d'agent, et gonflerait un taux d'échec de traitements réussis."""
     if not (spec_ns and ligne):
         return False
     raison = " ".join(str(getattr(res, "reply", "") or "").split())[:280]

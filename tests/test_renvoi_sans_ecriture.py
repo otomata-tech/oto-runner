@@ -139,6 +139,10 @@ def test_apres_deux_rappels_l_abandon_s_enregistre(monkeypatch):
         "« épuisé » affirmerait une recherche conclue ; l'agent n'a rien conclu"
     motif = patch[2]["retraitement_motif"]
     assert "rien trouvé de probant" in motif, "le motif porte la raison DE L'AGENT"
+    # ⚠️ La SIGNATURE du harnais, seul moyen de distinguer cet abandon d'un
+    # `arbitrage` qu'un agent a JUGÉ : la valeur est la même, le motif non.
+    assert motif.startswith("conclu sans écrire"), \
+        "sans signature en tête, un abandon se compte comme un jugement d'agent"
     assert len(motif) < 500, "borné : un motif de trois pages se saute"
     # Aucun champ métier touché : ni qualification, ni notes, ni contact.
     assert set(patch[2]) == {"retraitement", "retraitement_motif"}
