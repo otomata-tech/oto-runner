@@ -714,7 +714,28 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # ⚠️ APRÈS les rappels, jamais avant : relâcher plus tôt rouvrirait la fenêtre
     # qu'on ferme — un autre travail prendrait la ligne pendant qu'on la rend à
     # l'agent. C'est exactement la faute qu'on corrige, commise par le harnais.
-    resultat["relachee"] = _relacher(mcp, _ligne_reservee(res, mcp),
+    # ⚠️ L'ESTAMPILLE EST POSÉE PAR LE HARNAIS, PLUS PAR L'AGENT.
+    #
+    # Une valeur recopiée de mémoire dérive, quelle que soit la consigne : le
+    # 28/08 une fiche portait `mistral-large-2407`, le 29/08 une autre
+    # `mistral-large-2511`, alors que les 102 travaux du passage enregistraient
+    # tous `2512`. Le harnais SAIT quel modèle il a lancé — l'agent n'a pas à
+    # connaître son propre nom, et il n'a pas à le recopier.
+    #
+    # Posée APRÈS les rappels et par-dessus ce que l'agent a pu y mettre : c'est
+    # le relevé d'exécution qui fait foi, pas ce qu'un champ raconte.
+    ligne_finale = _ligne_reservee(res, mcp)
+    if estampille and ligne_finale and p.get("namespace"):
+        try:
+            backend.patch_row(p["namespace"], ligne_finale, dict(estampille),
+                              org=p.get("org_id"))
+            resultat["estampille_imposee"] = True
+        except Exception as e:  # noqa: BLE001 — une estampille manquée n'annule
+            # pas un travail abouti ; elle se voit au bilan.
+            logger.warning("estampille non imposée sur %s : %s", ligne_finale, e)
+            resultat["estampille_imposee"] = False
+
+    resultat["relachee"] = _relacher(mcp, ligne_finale,
                                      p.get("namespace"), p.get("org_id"))
     backend.complete(job["id"], ok=True, run_id=run_id, result=resultat)
     logger.info("job %s : %s (%s)", job["id"], outcome, note)

@@ -54,6 +54,11 @@ class _Backend:
         self.appels.append(("patch", row_id, valeurs))
         return {}
 
+    def row(self, namespace, row_id, org=None):
+        # Lecture indisponible par défaut : le harnais retombe alors sur le
+        # compteur d'appels, ce qui est le comportement voulu dans le doute.
+        return None
+
 
 def _job():
     return {"id": 1, "kind": "start", "run_id": None,
@@ -340,3 +345,36 @@ def test_l_ordre_ne_suggere_jamais_claimed_comme_tableau():
     """⚠️ LE piège : l'agent remplace le champ qu'on lui demandait de recopier."""
     ordre = W._ordre_one_shot("fais", "run-1", {"namespace": "un-tableau"}, None)
     assert 'namespace: "@claimed"' not in ordre
+
+
+# ── L'estampille est POSÉE par le harnais, plus recopiée par l'agent ────────
+# ⚠️ `mistral-large-2407` le 28/08, `mistral-large-2511` le 29/08, alors que TOUS
+# les travaux enregistraient `2512`. Une valeur recopiée de mémoire dérive, quelle
+# que soit la consigne. Le harnais sait quel modèle il a lancé.
+
+def test_le_harnais_impose_l_estampille_apres_le_travail(monkeypatch):
+    vus = _monter(monkeypatch, [AgentResult(
+        reply="fait", stopped="end_turn",
+        steps=_pas("data_claim_next", "data_write"))])
+    monkeypatch.setattr(W, "_estampille",
+                        lambda *a, **kw: {"modele": "mistral-large-2512"})
+    monkeypatch.setattr(W, "McpSession", _McpRelache)
+    b = _Backend()
+    W._traiter(b, _job(), provider=None)
+    assert len(vus) == 1
+    patch = [a for a in b.appels if a[0] == "patch"]
+    assert patch, "le harnais écrit l'estampille lui-même"
+    assert patch[-1][2] == {"modele": "mistral-large-2512"}
+    assert patch[-1][1] == "01a0-la-ligne", "sur la ligne réservée"
+    assert _resultat(b)["estampille_imposee"] is True
+
+
+def test_sans_estampille_configuree_le_harnais_n_ecrit_rien(monkeypatch):
+    """On n'invente pas une valeur qu'on n'a pas : un champ non déclaré ferait
+    rejeter TOUTE l'écriture sur un tableau strict."""
+    _monter(monkeypatch, [AgentResult(reply="fait", stopped="end_turn",
+                                      steps=_pas("data_claim_next", "data_write"))])
+    monkeypatch.setattr(W, "McpSession", _McpRelache)
+    b = _Backend()
+    W._traiter(b, _job(), provider=None)
+    assert not [a for a in b.appels if a[0] == "patch"]
