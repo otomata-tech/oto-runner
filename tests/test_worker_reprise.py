@@ -126,6 +126,10 @@ def test_le_resultat_declare_compte_les_appels_par_outil(monkeypatch):
 
     monkeypatch.setattr(W2.agent_runtime, "run", faux_run)
     monkeypatch.setattr(W2, "McpSession", FauxMcp)
+    # Ce test porte sur le COMPTE, pas sur le renvoi : sans ça, le mécanisme
+    # relancerait deux fois un faux qui rend toujours les mêmes pas, et le
+    # cumul les triplerait. Le renvoi a ses propres tests.
+    monkeypatch.setattr(W2, "RENVOIS_MAX", 0)
     b = FauxBackend()
     W2._traiter(b, _job("start"), provider=None)
     result = next(a for a in b.appels if a[0] == "complete_result")[1]

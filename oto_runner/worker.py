@@ -19,6 +19,7 @@ recharge le fil, et continue — c'est le scénario prouvé au spike du 12/08.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -165,6 +166,69 @@ def _ordre_one_shot(ordre: str, run_id: str, payload: dict,
                          f"recopie ces valeurs telles quelles, elles identifient "
                          f"ce qui a produit la fiche.")
     return identite + "\n\n" + ordre
+
+
+RENVOIS_MAX = 2       # deux rappels, puis on enregistre l'abandon au lieu de le taire
+
+
+def _ligne_reservee(res, mcp) -> Optional[str]:
+    """L'identifiant de la ligne que l'agent a réservée — deux sources selon le chemin.
+
+    ⚠️ Le harnais ne connaît pas cette ligne autrement : c'est l'AGENT qui réserve.
+    En stateless, la session MCP l'a notée au vol (elle voit les sorties d'outils) ;
+    en conversations elle ne voit rien, mais le fournisseur rend ses entrées brutes
+    et la réservation y figure avec son résultat."""
+    if getattr(mcp, "derniere_ligne", None):
+        return mcp.derniere_ligne
+    for e in (getattr(res, "raw_outputs", None) or []):
+        if (e or {}).get("type") != "tool.execution":
+            continue
+        if not str(e.get("name") or "").endswith("data_claim_next"):
+            continue
+        brut = json.dumps(e.get("info"), ensure_ascii=False) if e.get("info") else ""
+        trouve = re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                           brut)
+        if trouve:
+            return trouve.group(0)
+    return None
+
+
+def _ordre_de_renvoi(ligne: Optional[str]) -> str:
+    """Ce qu'on redit à un agent qui a conclu sans écrire.
+
+    ⚠️ Une instruction reçue AU MOMENT DE LA FAUTE vaut plus que la même phrase lue
+    vingt pages plus tôt — c'est le seul endroit où elle est encore actionnable. La
+    consigne dit déjà « arrête-toi en écrivant » ; 7 lignes sur 100 l'ont ignorée."""
+    ou = f" Ta ligne est `{ligne}`." if ligne else ""
+    return ("Tu as conclu sans écrire ta fiche : aucun appel d'écriture n'est parti."
+            f"{ou} Écris-la MAINTENANT avec `data_write`, même en `indetermine` si tu "
+            "n'as rien établi — une case vide accompagnée de tes notes vaut mieux "
+            "qu'une ligne sans trace. N'ajoute aucune recherche : écris ce que tu as.")
+
+
+def _enregistrer_abandon(backend, spec_ns: Optional[str], org, ligne: Optional[str],
+                         res) -> bool:
+    """Après les renvois : l'abandon s'ENREGISTRE au lieu de se taire.
+
+    ⚠️ Le harnais n'écrit RIEN sur l'entreprise — seulement un fait sur NOTRE
+    traitement : `retraitement: epuise` et, en motif, la raison que l'agent a donnée
+    de s'arrêter. Le motif est BORNÉ : un motif de trois lignes se lit, un motif de
+    trois pages se saute, et on retombe dans le drapeau muet qu'on corrige ici.
+    Best-effort : une observation n'arrête jamais une file."""
+    if not (spec_ns and ligne):
+        return False
+    raison = " ".join(str(getattr(res, "reply", "") or "").split())[:280]
+    try:
+        backend.patch_row(spec_ns, ligne, {
+            "retraitement": "epuise",
+            "retraitement_motif": (
+                f"conclu sans écrire après {RENVOIS_MAX} rappels du harnais — "
+                f"raison donnée par l'agent : « {raison or 'aucune'} »")}, org=org)
+        logger.info("abandon enregistré sur la ligne %s", ligne)
+        return True
+    except Exception as e:  # noqa: BLE001 — cf. docstring
+        logger.warning("abandon non enregistré sur %s : %s", ligne, e)
+        return False
 
 
 def _conserver_faux_depart(job: dict, payload: dict, res) -> None:
@@ -393,6 +457,70 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                                 history=historique, on_turn=apposer,
                                 a_vide=_claim_sans_ligne)
 
+    # ── Un travail SANS ÉCRITURE n'est pas un travail terminé ────────────────
+    # 7 lignes sur 100 conclues en prose, sans qu'aucun appel d'écriture ne parte
+    # (28/08). La consigne l'interdit déjà en toutes lettres — « arrête-toi en
+    # écrivant » — et n'a pas empêché. On ne peut pas empêcher un agent de se
+    # taire ; on peut REFUSER QUE SON SILENCE COMPTE COMME UN TRAVAIL FINI, et lui
+    # rendre la main AU MOMENT DE LA FAUTE, seul endroit où la phrase est encore
+    # actionnable. Deux rappels, puis l'abandon s'enregistre au lieu de se taire.
+    renvois, abandon = 0, False
+    while renvois < RENVOIS_MAX:
+        faits = {s.tool for s in res.steps if s.ok}
+        a_reserve = any(k.endswith(_CLAIM) for k in faits)
+        a_ecrit = any(k.endswith("data_write") for k in faits)
+        if not a_reserve or a_ecrit:
+            break
+        renvois += 1
+        ligne = _ligne_reservee(res, mcp)
+        rappel = _ordre_de_renvoi(ligne)
+        logger.info("job %s : conclu sans écriture — rappel %d/%d%s",
+                    job["id"], renvois, RENVOIS_MAX,
+                    f" (ligne {ligne})" if ligne else " (ligne inconnue)")
+        # ⚠️ Le rappel RETIRE l'outil de réservation. Sans ça l'agent recommence :
+        # il réserve une NOUVELLE ligne au lieu d'écrire celle qu'il tient, et l'on
+        # compte trois réservations pour une seule ligne traitée — en laissant deux
+        # lignes sous bail pour rien. Le rappel n'est pas une nouvelle tâche, c'est
+        # une FINITION : il ne doit permettre que d'écrire.
+        outils_rappel = tuple(o for o in (p.get("tools") or ())
+                              if not str(o).endswith(_CLAIM))
+        try:
+            if getattr(provider, "ONE_SHOT", False):
+                suite = provider.run_once(
+                    instructions=spec.system,
+                    inputs=_ordre_one_shot(rappel, run_id, p, estampille),
+                    tools=outils_rappel)
+            else:
+                suite = agent_runtime.run(
+                    dataclasses.replace(spec, tools=frozenset(outils_rappel)),
+                    mcp, provider, prompt=rappel, history=historique,
+                    on_turn=apposer, a_vide=_claim_sans_ligne)
+        except Exception as e:  # noqa: BLE001 — un rappel qui échoue ne tue pas le
+            # job : on garde le résultat initial et on enregistre l'abandon.
+            logger.warning("job %s : rappel %d impossible (%s)", job["id"], renvois, e)
+            break
+        # Les deux passages se CUMULENT : le coût réel du travail est leur somme, et
+        # le compte d'outils doit refléter tout ce qui a été appelé.
+        # ⚠️ `suite is res` doublerait le cumul sur lui-même. Le fournisseur rend
+        # un objet neuf à chaque passage, mais un cumul qui n'est juste que si
+        # l'appelant coopère n'est pas un cumul : on s'en protège ici.
+        if suite is not res:
+            for k in ("input_tokens", "output_tokens", "cache_read_input_tokens",
+                      "cache_creation_input_tokens"):
+                suite.usage[k] = int(suite.usage.get(k) or 0) + int(res.usage.get(k) or 0)
+        # ⚠️ SAUF les réservations du rappel : l'outil lui a été retiré, donc une
+        # réservation qui apparaîtrait dans ses pas n'a pas eu lieu. Les cumuler
+        # ferait compter trois lignes réservées là où une seule a été traitée — et
+        # `claims` est ce qui fonde le faux départ et les bornes de flotte.
+        if suite is not res:
+            suite.steps = list(res.steps) + [x for x in suite.steps
+                                             if not x.tool.endswith(_CLAIM)]
+        suite.model = suite.model or res.model
+        res = suite
+    if renvois and not any(s.ok and s.tool.endswith("data_write") for s in res.steps):
+        abandon = _enregistrer_abandon(backend, p.get("namespace"), p.get("org_id"),
+                                       _ligne_reservee(res, mcp), res)
+
     entree = int(res.usage.get("input_tokens") or 0)
     sortie = int(res.usage.get("output_tokens") or 0)
     jetons = entree + sortie
@@ -467,7 +595,11 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 "faux_depart": faux_depart, "model": res.model,
                 # Un oubli d'estampille doit SE VOIR au bilan : le geste
                 # manuel qu'on remplace ici avait été oublié sans bruit.
-                "estampille": bool(estampille)}
+                "estampille": bool(estampille),
+                # Combien de fois le harnais a dû rendre la main, et si l'abandon a
+                # fini par être enregistré : sans ces deux postes, le mécanisme
+                # travaillerait en silence — le défaut même qu'il corrige.
+                "renvois": renvois, "abandon_enregistre": abandon}
     if echec_transport:
         outils = ", ".join(sorted({s.tool for s in res.steps
                                    if s.transport_ko}))[:200]

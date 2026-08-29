@@ -32,6 +32,7 @@ def _jouer(monkeypatch, job, reply, outils):
 
     monkeypatch.setattr(W.agent_runtime, "run", faux_run)
     monkeypatch.setattr(W, "McpSession", FauxMcp)
+    monkeypatch.setattr(W, "RENVOIS_MAX", 0)   # la capture porte sur le faux départ, pas sur le renvoi
     W._traiter(FauxBackend(), job, provider=None)
 
 
