@@ -47,6 +47,13 @@ _MAX_ERREURS_BACKEND = 10   # ~3-4 min de panne DENSE (reset au 1er succès)
 # le compteur à zéro : la remise à zéro rendrait la borne contournable par
 # alternance (un vrai faux départ, un claim à vide, indéfiniment).
 _MAX_FAUX_DEPARTS_CONSECUTIFS = 5
+# ⚠️ DEUX suffisent, et le seuil est bas exprès. Un relâchement qui échoue laisse
+# la ligne sous bail : le travail suivant ne la prend pas, la file paraît avancer
+# alors qu'elle se vide en laissant des lignes derrière, et le passage MENT SUR SON
+# DÉBIT. Le 29/08, 54 échecs consécutifs sont passés inaperçus parce que le
+# relâchement journalisait et continuait — un best-effort sans destination.
+# Un échec de relâchement compte donc comme un échec d'écriture.
+_MAX_RELACHEMENTS_RATES_CONSECUTIFS = 2
 # ⚠️ Le message de lancement NOMME la file : un agent à qui on dit « la file de
 # travail » sans la nommer DEVINE des noms de tableaux (vécu : entreprises,
 # projet_220, data… tous inconnus, puis des SIREN hallucinés et une conclusion
@@ -243,6 +250,7 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
     dernier_depart: Optional[float] = None
     failed_consecutifs = 0
     faux_departs_consecutifs = 0
+    relachements_rates = 0
     # (jetons, écritures) des derniers jobs conclus — la matière du rendement.
     fenetre: deque = deque(maxlen=max(1, spec.rendement_fenetre))
     # Les erreurs BACKEND consécutives du driver lui-même (count/enqueue) : un
@@ -314,6 +322,17 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                                            jid, faux_departs_consecutifs)
                         else:
                             faux_departs_consecutifs = 0
+                        # Le relâchement est un poste À PART ENTIÈRE : `False`
+                        # est un échec, `None`/absent veut dire « pas de ligne à
+                        # rendre » et ne compte pas.
+                        if resultat.get("relachee") is False:
+                            relachements_rates += 1
+                            logger.warning("job %s : LIGNE NON RELÂCHÉE — %d "
+                                           "d'affilée ; elle reste sous bail et "
+                                           "le débit du passage est faussé",
+                                           jid, relachements_rates)
+                        elif resultat.get("relachee"):
+                            relachements_rates = 0
                 else:
                     bilan.failed += 1
                     failed_consecutifs += 1
@@ -356,6 +375,10 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                          "c'est payer pour re-crasher")
             elif (panne := _outil_critique_en_panne(spec, backend, clock)):
                 borne = panne
+            elif relachements_rates >= _MAX_RELACHEMENTS_RATES_CONSECUTIFS:
+                borne = (f"{relachements_rates} relâchements ratés d'affilée — "
+                         "les lignes restent sous bail et le passage ment sur "
+                         "son débit")
             elif faux_departs_consecutifs >= _MAX_FAUX_DEPARTS_CONSECUTIFS:
                 borne = (f"{faux_departs_consecutifs} faux départs consécutifs (réservation "
                          "sans écriture) — la flotte tourne à vide")
