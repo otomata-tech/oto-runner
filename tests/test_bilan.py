@@ -183,7 +183,11 @@ def test_le_json_se_pose_a_cote_de_la_declaration_et_se_reecrit(tmp_path):
                                   # `lignes_sorties` : ajouté le 28/08. Vaut None
                                   # au bilan intermédiaire — une ligne peut encore
                                   # sortir tant que la flotte tourne.
-                                  "lignes_sorties"}, "la forme du bilan est un contrat"
+                                  "lignes_sorties",
+                                  # `controles` : ajouté le 28/08 — estampille
+                                  # exacte et fiches qui se contredisent. Vaut
+                                  # None au bilan intermédiaire, comme sorties.
+                                  "controles"}, "la forme du bilan est un contrat"
     assert intermediaire["final"] is False and intermediaire["arret"] is None
     assert intermediaire["lignes"]["abouties"] == 12
 

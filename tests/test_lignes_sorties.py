@@ -123,3 +123,63 @@ def test_une_declaration_sans_tableau_ne_fait_rien():
     b = _Backend(sorties=[{"_id": "r1"}])
     assert annoter_lignes_sorties(_SansNs(), b, {1: _job()}) == {"sorties": 0, "annotees": 0}
     assert b.ecrites == []
+
+
+# ── Les deux contrôles déterministes du bilan de fin ─────────────────────────
+# Ils existent parce que deux défauts ont traversé une grille de six critères tous
+# à zéro (28/08). Aucun n'est une question de jugement : ce sont des contradictions
+# internes qu'une requête attrape et qu'une relecture humaine rate.
+from oto_runner.bilan import controler_fiches  # noqa: E402
+
+
+class _BackendFiches(_Backend):
+    def __init__(self, fiches, casse=False):
+        super().__init__()
+        self._fiches = fiches
+        self._casse = casse
+
+    def rows(self, namespace, filter=None, org=None, limit=200):
+        if self._casse:
+            raise RuntimeError("illisible")
+        return self._fiches if (filter or {}).get("statut") == "enrichi" else []
+
+
+def test_une_estampille_qui_nomme_le_mauvais_modele_est_relevee():
+    """Une estampille absente se VOIT ; une estampille fausse MENT, et elle ment
+    sur ce qui sert à trier."""
+    b = _BackendFiches([{"siren": "1", "modele": "un-modele-2512"},
+                        {"siren": "2", "modele": "un-modele-2407"}])
+    r = controler_fiches(_Spec(), b, {1: _job(model="un-modele-2512")})
+    assert r["estampille_fausse"] == ["2"]
+    assert r["estampille_exacte"] == 1
+
+
+def test_une_fiche_eteinte_dont_les_notes_disent_actif_est_relevee():
+    """Le verrou forçait l'agent à CHOISIR une pièce, pas à en AVOIR une : il a
+    coché « cessation au registre » avec des notes qui le démentent."""
+    b = _BackendFiches([
+        {"siren": "1", "qualification": "dormante_ou_introuvable",
+         "notes_verification": "registre — état administratif actif, aucun acte"},
+        {"siren": "2", "qualification": "dormante_ou_introuvable",
+         "notes_verification": "registre — radiation publiée au BODACC"},
+        {"siren": "3", "qualification": "en_activite",
+         "notes_verification": "registre — état administratif actif"},
+    ])
+    r = controler_fiches(_Spec(), b, {1: _job()})
+    # Seule la première se contredit : la deuxième est cohérente, et la troisième
+    # dit « actif » sans se déclarer éteinte — ce qui est le cas NORMAL.
+    assert r["fiches_contradictoires"] == ["1"]
+
+
+def test_plusieurs_modeles_dans_la_flotte_rendent_le_controle_impossible():
+    """On ne peut pas dire laquelle ment, et l'affirmer serait pire que se taire."""
+    b = _BackendFiches([{"siren": "1", "modele": "a"}])
+    r = controler_fiches(_Spec(), b, {1: _job(model="a"), 2: _job(model="b")})
+    assert r["estampille_fausse"] is None
+    assert r["estampille_exacte"] is None
+
+
+def test_des_fiches_illisibles_ne_font_pas_echouer_le_bilan():
+    r = controler_fiches(_Spec(), _BackendFiches([], casse=True), {1: _job()})
+    assert r["estampille_exacte"] is None and r["fiches_contradictoires"] is None
+    assert "illisibles" in r["omis"]

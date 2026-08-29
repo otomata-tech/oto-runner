@@ -281,6 +281,84 @@ def annoter_lignes_sorties(spec, backend, jobs: dict) -> dict:
     return {"sorties": len(sorties), "annotees": annotees}
 
 
+def controler_fiches(spec, backend, jobs: dict) -> dict:
+    """Deux contrôles DÉTERMINISTES sur les fiches produites, au bilan de fin.
+
+    ⚠️ Ils existent parce que deux défauts ont traversé une grille de six critères
+    pourtant tous à zéro (28/08). Aucun n'est une question de jugement : ce sont des
+    contradictions internes, qu'une requête attrape et qu'une relecture humaine rate.
+
+    **1. L'estampille est-elle EXACTE ?** Sur ce chemin le harnais ne peut pas
+    injecter le modèle — la boucle d'outils tourne chez le fournisseur — il le
+    DEMANDE par la consigne. Une fiche a recopié `mistral-large-2407` quand les 144
+    travaux du journal disaient tous `2512`. Une estampille absente se voit ; une
+    estampille FAUSSE ment, et elle ment sur ce qui sert à trier. Le taux à suivre
+    n'est donc pas « posées » mais « exactes ».
+
+    **2. Une fiche se contredit-elle ?** Une entreprise déclarée éteinte dont les
+    notes disent « état administratif actif » est fausse par construction, quelle
+    que soit la pièce cochée. Le verrou posé la veille forçait l'agent à CHOISIR une
+    pièce, pas à en AVOIR une : il a coché « cessation au registre » sans acte, avec
+    ses propres notes qui le démentent deux lignes plus haut.
+
+    ⚠️ BEST-EFFORT : une lecture impossible rend des postes `null` qui disent
+    POURQUOI ils sont absents, jamais un zéro. Un contrôle n'arrête pas une file."""
+    ns = getattr(spec, "namespace", None)
+    if not ns:
+        return {"estampille_exacte": None, "fiches_contradictoires": None,
+                "omis": "déclaration sans tableau"}
+    try:
+        fiches = backend.rows(ns, {"statut": "enrichi"},
+                              org=getattr(spec, "org", None), limit=500)
+    except Exception as e:  # noqa: BLE001 — cf. docstring
+        logger.warning("bilan : fiches illisibles pour contrôle : %s", e)
+        return {"estampille_exacte": None, "fiches_contradictoires": None,
+                "omis": f"fiches illisibles : {e}"}
+
+    def valeur(x):
+        return x.get("valeur") if isinstance(x, dict) and "valeur" in x else x
+
+    # ── 1. estampille exacte ────────────────────────────────────────────────
+    attendus = {(j.get("result") or {}).get("model") for j in jobs.values()}
+    attendus = {m for m in attendus if m}
+    fausses = []
+    if len(attendus) == 1:
+        attendu = next(iter(attendus))
+        fausses = [str(f.get("siren")) for f in fiches
+                   if valeur(f.get("modele")) and valeur(f.get("modele")) != attendu]
+    elif len(attendus) > 1:
+        # Plusieurs modèles dans la même flotte : on ne peut pas dire laquelle ment,
+        # et l'affirmer serait pire que se taire.
+        logger.warning("bilan : %d modèles distincts dans la flotte — contrôle "
+                       "d'estampille impossible : %s", len(attendus), attendus)
+        fausses = None
+
+    # ── 2. fiche qui se contredit ───────────────────────────────────────────
+    # Le mot est cherché dans les notes de vérification ET le motif de qualification :
+    # l'agent écrit son constat dans l'un ou l'autre selon les cas.
+    contradictoires = []
+    for f in fiches:
+        if valeur(f.get("qualification")) != "dormante_ou_introuvable":
+            continue
+        dit = " ".join(str(valeur(f.get(c)) or "")
+                       for c in ("notes_verification", "qualification_motif",
+                                 "motif_ecartement")).lower()
+        if "actif" in dit:
+            contradictoires.append(str(f.get("siren")))
+
+    if fausses:
+        logger.warning("bilan : %d estampille(s) FAUSSE(S) : %s", len(fausses), fausses[:6])
+    if contradictoires:
+        logger.warning("bilan : %d fiche(s) déclarée(s) éteinte(s) alors que leurs "
+                       "notes disent « actif » : %s", len(contradictoires),
+                       contradictoires[:6])
+    return {"fiches": len(fiches),
+            "estampille_fausse": fausses,
+            "estampille_exacte": (None if fausses is None
+                                  else len(fiches) - len(fausses)),
+            "fiches_contradictoires": contradictoires}
+
+
 def ecrire_bilan(spec, backend, jobs: dict, *, lignes_initiales: int,
                  secondes: float, arret: str = "") -> dict:
     """Calcule le bilan de la flotte, le journalise et le pose en JSON.
@@ -297,6 +375,7 @@ def ecrire_bilan(spec, backend, jobs: dict, *, lignes_initiales: int,
     # Seulement au bilan de FIN : une ligne peut encore sortir pendant la flotte,
     # et l'annoter à chaque tour ferait du bruit sans rien apprendre.
     sorties = annoter_lignes_sorties(spec, backend, jobs) if arret else None
+    controles = controler_fiches(spec, backend, jobs) if arret else None
     bilan = {
         "horodatage": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         # Le nom de la flotte est le TAG apposé à ses jobs : c'est par lui
@@ -315,6 +394,10 @@ def ecrire_bilan(spec, backend, jobs: dict, *, lignes_initiales: int,
         # « 98 traitées » sans dire que 2 sont sorties muettes rend un
         # dénominateur amputé qui a l'air complet.
         "lignes_sorties": sorties,
+        # Deux contradictions internes qu'une grille de six critères a laissées
+        # passer, toutes deux attrapables par une requête : une estampille qui
+        # nomme le mauvais modèle, une fiche éteinte dont les notes disent « actif ».
+        "controles": controles,
         "jetons": {"total": postes["jetons"],
                    "par_job": round(postes["jetons"] / conclus) if conclus else None,
                    # Le vrai coût d'une campagne : ce que coûte une ligne qui
