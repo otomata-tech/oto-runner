@@ -42,7 +42,16 @@ lancer)
 
   # La GARDE D'ABORD : une flotte qui tourne une seconde sans surveillance est
   # une seconde pendant laquelle une écriture peut partir sans que rien ne la voie.
+  # ⚠️ La fenêtre de la garde démarre AU LANCEMENT, jamais à une date fixe.
+  # Le 29/08, son défaut « depuis hier 21:00 » englobait les réparations faites à
+  # la main la veille au soir : elle a vu trois écritures légitimes dans le
+  # fichier de la cliente et coupé un passage à 2 lignes sur 100. Une garde dont
+  # la référence est plus ancienne que le geste qu'elle surveille crie sur le
+  # passé — c'est la troisième fois cette semaine, sous trois formes.
+  DEPUIS=$(date -u "+%Y-%m-%d %H:%M:%S")
+  echo "fenêtre de la garde : depuis $DEPUIS (le lancement, pas une date fixe)"
   systemd-run --unit="$GARDE" --on-calendar="*:0/2" \
+    --setenv=GARDE_DEPUIS="$DEPUIS" \
     --property=EnvironmentFile="$RACINE/.env" --working-directory="$RACINE" \
     "$PY" "$RACINE/garde-vivier.py" "$a" "$b" "$c" "$FLOTTE" >/dev/null || {
       echo "ABANDON : la garde n'a pas pu être créée — on ne lance pas sans elle."
