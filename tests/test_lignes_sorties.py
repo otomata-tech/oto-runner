@@ -154,21 +154,36 @@ def test_une_estampille_qui_nomme_le_mauvais_modele_est_relevee():
     assert r["estampille_exacte"] == 1
 
 
-def test_une_fiche_eteinte_dont_les_notes_disent_actif_est_relevee():
+def test_une_extinction_sans_acte_de_registre_est_relevee():
     """Le verrou forçait l'agent à CHOISIR une pièce, pas à en AVOIR une : il a
-    coché « cessation au registre » avec des notes qui le démentent."""
+    coché « cessation au registre » sans citer le moindre acte."""
     b = _BackendFiches([
         {"siren": "1", "qualification": "dormante_ou_introuvable",
-         "notes_verification": "registre — état administratif actif, aucun acte"},
+         "qualification_motif": "aucun dépôt, aucun salarié, aucune trace en ligne"},
         {"siren": "2", "qualification": "dormante_ou_introuvable",
-         "notes_verification": "registre — radiation publiée au BODACC"},
+         "qualification_motif": "radiation publiée au BODACC le 04/06/2013"},
         {"siren": "3", "qualification": "en_activite",
-         "notes_verification": "registre — état administratif actif"},
+         "qualification_motif": "aucune trace récente"},
     ])
     r = controler_fiches(_Spec(), b, {1: _job()})
-    # Seule la première se contredit : la deuxième est cohérente, et la troisième
-    # dit « actif » sans se déclarer éteinte — ce qui est le cas NORMAL.
+    # La 1 accumule des absences, qui ne prouvent rien. La 2 cite un acte daté.
+    # La 3 ne se déclare pas éteinte — le contrôle ne la regarde pas.
     assert r["fiches_contradictoires"] == ["1"]
+
+
+def test_une_fiche_qui_cite_un_acte_ET_un_repertoire_actif_est_BONNE():
+    """⚠️ Le cas qui a fait retirer la première version du contrôle. Le répertoire
+    RETARDE les radiations : une fiche qui cite l'acte ET signale honnêtement que
+    le répertoire affiche encore « actif » est une bonne fiche, pas un manquement.
+    La première version en criait cinq sur six."""
+    b = _BackendFiches([
+        {"siren": "1", "qualification": "dormante_ou_introuvable",
+         "qualification_motif": "jugement de clôture du 08/11/2016 ; le répertoire "
+                                "affiche encore un état administratif actif"},
+        {"siren": "2", "qualification": "dormante_ou_introuvable",
+         "qualification_motif": "liquidation pour insuffisance d'actif, jugement 2019"},
+    ])
+    assert controler_fiches(_Spec(), b, {1: _job()})["fiches_contradictoires"] == []
 
 
 def test_plusieurs_modeles_dans_la_flotte_rendent_le_controle_impossible():
@@ -183,3 +198,19 @@ def test_des_fiches_illisibles_ne_font_pas_echouer_le_bilan():
     r = controler_fiches(_Spec(), _BackendFiches([], casse=True), {1: _job()})
     assert r["estampille_exacte"] is None and r["fiches_contradictoires"] is None
     assert "illisibles" in r["omis"]
+
+
+def test_une_annee_seule_ne_vaut_pas_un_acte():
+    """⚠️ LE cas qui a fait resserrer le critère. « Aucun dépôt depuis 2016 » date
+    une ABSENCE, pas un acte — c'est l'accumulation de riens qu'on veut refuser.
+    Avec l'année acceptée, le contrôle retenait ZÉRO fiche sur un palier réel, y
+    compris le seul manquement."""
+    b = _BackendFiches([
+        {"siren": "1", "qualification": "dormante_ou_introuvable",
+         "qualification_motif": "Aucun dépôt de comptes depuis 2016, aucun salarié "
+                                "déclaré, aucune trace d'activité récente sur le web."},
+        {"siren": "2", "qualification": "dormante_ou_introuvable",
+         "qualification_motif": "Radiation au BODACC en 2015."},
+    ])
+    # La 1 n'a qu'une année d'absence ; la 2 nomme l'acte, même sans jour.
+    assert controler_fiches(_Spec(), b, {1: _job()})["fiches_contradictoires"] == ["1"]

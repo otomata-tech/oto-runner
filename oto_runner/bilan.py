@@ -53,6 +53,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 from datetime import datetime, timezone
 from typing import Optional
@@ -333,25 +334,45 @@ def controler_fiches(spec, backend, jobs: dict) -> dict:
                        "d'estampille impossible : %s", len(attendus), attendus)
         fausses = None
 
-    # ── 2. fiche qui se contredit ───────────────────────────────────────────
-    # Le mot est cherché dans les notes de vérification ET le motif de qualification :
-    # l'agent écrit son constat dans l'un ou l'autre selon les cas.
+    # ── 2. extinction déclarée SANS acte de registre ────────────────────────
+    # ⚠️ Première version RETIRÉE avant d'être posée : elle cherchait le mot
+    # « actif » dans les notes d'une fiche éteinte. Six alertes, UNE SEULE vraie —
+    # deux fiches citaient un acte daté (radiation BODACC du 04/06/2013, jugement de
+    # clôture du 08/11/2016) ET signalaient honnêtement que le répertoire affiche
+    # encore « actif », parce qu'il retarde les radiations : ce sont de BONNES
+    # fiches. Une autre accrochait sur « insuffisance d'ACTIF ». Une garde qui crie
+    # à tort cesse d'être lue, et celle-ci aurait crié cinq fois sur six.
+    #
+    # Le critère juste porte sur ce qui FONDE l'extinction, pas sur un mot : une
+    # fiche éteinte doit citer un ÉVÉNEMENT DE REGISTRE DATÉ. Un acte avec sa date,
+    # son numéro ou son jugement d'un côté ; une accumulation d'absences — « aucun
+    # dépôt, aucun salarié, aucune trace » — de l'autre, qui ne prouve rien.
+    # ⚠️ L'ANNÉE SEULE NE COMPTE PAS, et c'est le point qui fait tout le contrôle.
+    # Éprouvé sur les huit fiches éteintes d'un palier réel : avec l'année, le
+    # critère retenait ZÉRO — y compris le seul vrai manquement, dont le motif dit
+    # « aucun dépôt de comptes depuis 2016, aucun salarié, aucune trace ». Cette
+    # année-là date une ABSENCE, pas un acte : c'est exactement l'accumulation de
+    # riens qu'on veut refuser. Sans elle, le critère retient ce cas et écarte les
+    # sept autres, qui citent tous un acte nommé.
+    ACTE = re.compile(
+        r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"          # une date COMPLÈTE (un acte se date au jour)
+        r"|bodacc|jugement|radiation|clôture|cloture|liquidation judiciaire"
+        r"|cessation déclarée|cessation declaree|dissolution",
+        re.I)
     contradictoires = []
     for f in fiches:
         if valeur(f.get("qualification")) != "dormante_ou_introuvable":
             continue
-        dit = " ".join(str(valeur(f.get(c)) or "")
-                       for c in ("notes_verification", "qualification_motif",
-                                 "motif_ecartement")).lower()
-        if "actif" in dit:
+        fonde = " ".join(str(valeur(f.get(c)) or "")
+                         for c in ("qualification_motif", "motif_ecartement"))
+        if not ACTE.search(fonde):
             contradictoires.append(str(f.get("siren")))
 
     if fausses:
         logger.warning("bilan : %d estampille(s) FAUSSE(S) : %s", len(fausses), fausses[:6])
     if contradictoires:
-        logger.warning("bilan : %d fiche(s) déclarée(s) éteinte(s) alors que leurs "
-                       "notes disent « actif » : %s", len(contradictoires),
-                       contradictoires[:6])
+        logger.warning("bilan : %d fiche(s) déclarée(s) éteinte(s) SANS citer d'acte "
+                       "de registre daté : %s", len(contradictoires), contradictoires[:6])
     return {"fiches": len(fiches),
             "estampille_fausse": fausses,
             "estampille_exacte": (None if fausses is None
