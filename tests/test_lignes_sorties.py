@@ -214,3 +214,25 @@ def test_une_annee_seule_ne_vaut_pas_un_acte():
     ])
     # La 1 n'a qu'une année d'absence ; la 2 nomme l'acte, même sans jour.
     assert controler_fiches(_Spec(), b, {1: _job()})["fiches_contradictoires"] == ["1"]
+
+
+def test_la_piece_cochee_suffit_a_prouver_l_extinction():
+    """⚠️ Le contrôle fouillait la prose et ignorait `qualification_piece` — le
+    champ CODÉ qui porte la nature de l'acte. Neuf fiches valides criées à tort."""
+    b = _BackendFiches([
+        {"siren": "1", "qualification": "dormante_ou_introuvable",
+         "qualification_motif": "plus aucune trace en ligne",
+         "qualification_piece": "radiation"},
+        {"siren": "2", "qualification": "dormante_ou_introuvable",
+         "qualification_motif": "site fermé", "qualification_piece": "liquidation"},
+    ])
+    assert controler_fiches(_Spec(), b, {1: _job()})["fiches_contradictoires"] == []
+
+
+def test_une_piece_qui_ne_prouve_pas_une_FIN_ne_suffit_pas():
+    """Symétrique : une pièce d'activité reste une pièce d'activité."""
+    b = _BackendFiches([
+        {"siren": "1", "qualification": "dormante_ou_introuvable",
+         "qualification_motif": "aucune trace", "qualification_piece": "depot_comptes"},
+    ])
+    assert controler_fiches(_Spec(), b, {1: _job()})["fiches_contradictoires"] == ["1"]

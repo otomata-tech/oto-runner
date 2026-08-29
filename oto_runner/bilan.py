@@ -405,8 +405,21 @@ def controler_fiches(spec, backend, jobs: dict) -> dict:
     for f in fiches:
         if valeur(f.get("qualification")) != "dormante_ou_introuvable":
             continue
+        # ⚠️ TROISIÈME correction, et cette fois ce n'est pas un mot de plus :
+        # c'est le CHAMP. Le contrôle lisait le motif et l'écartement, jamais
+        # `qualification_piece` — qui porte précisément la NATURE de l'acte
+        # (« radiation », « liquidation », « cessation_registre »). Il a donc
+        # crié sur neuf fiches qui cochaient toutes une pièce d'extinction
+        # valide : un faux positif intégral, sur le champ le mieux structuré du
+        # tableau, pendant que le contrôle fouillait de la prose à côté.
+        #
+        # La note d'avant disait : « s'il faut affiner une troisième fois, aller
+        # lire l'état au registre ». Elle visait le vocabulaire. Le vrai défaut
+        # était de chercher dans le texte libre une information qui existait,
+        # nommée et codée, dans un champ voisin.
         fonde = " ".join(str(valeur(f.get(c)) or "")
-                         for c in ("qualification_motif", "motif_ecartement"))
+                         for c in ("qualification_motif", "motif_ecartement",
+                                   "qualification_piece"))
         if not ACTE.search(fonde):
             contradictoires.append(str(f.get("siren")))
 
