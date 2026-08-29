@@ -56,6 +56,44 @@ durée d'un travail  <  bail de la ligne (10 min)  <  patience de systemd (16 mi
 n'échoue, les travaux se font tuer à nouveau, et le journal n'écrit plus la ligne de
 sortie propre. C'est le seul témoin — son absence est le signal.
 
+## Lancer une flotte : en unité, JAMAIS à la main
+
+```bash
+systemd-run --unit="oto-fleet-$FLEET" --working-directory=/opt/oto-runner \
+  --property=EnvironmentFile=/opt/oto-runner/.env \
+  /opt/oto-runner/.venv/bin/python -m oto_runner.fleet "/opt/oto-runner/$FLEET.yaml"
+```
+
+⚠️ **Un ordonnanceur lancé directement dans une connexion à distance MEURT avec
+elle.** Le gestionnaire de session s'éteint dès qu'il ne reste plus aucune
+connexion ouverte, et il emporte tout ce qui tournait dedans — sans borne, sans
+bilan final, sans une ligne dans le journal qui dise pourquoi.
+
+**Vécu le 2026-08-29** : une campagne de cent lignes lancée à la main a tourné trois
+heures, puis s'est arrêtée à `03:17:42`, à trois lignes de la fin. Le journal système
+dit tout :
+
+```
+03:17:42  Stopping User Manager for UID 0...
+03:17:42  Stopped User Manager for UID 0.
+```
+
+Le gestionnaire s'est arrêté **81 fois entre 00:30 et 03:45** — une fois par
+connexion refermée. La campagne n'a pas survécu trois heures parce qu'elle tenait :
+elle a survécu parce que les connexions se succédaient assez vite. **Elle est morte
+au premier trou.** Sur un lot de plusieurs jours, ce trou arrive la première nuit.
+
+**Le même écart produit un second défaut, et c'est ce qui le rend traître** : les
+gardes arrêtent la flotte *par le nom de son unité*. Pas d'unité, pas d'arrêt
+possible — la garde a détecté la violation qu'elle surveillait, tenté d'arrêter une
+unité inexistante, et **annoncé « flotte ARRÊTÉE »** toutes les deux minutes pendant
+que les agents continuaient. Une flotte mortelle et une garde aveugle sur elle, pour
+un seul `systemd-run` oublié.
+
+**Le script existait.** `essai-reprise.sh` et `palier.sh` lancent en unité depuis le
+début. Ce n'est pas une règle de plus : c'est le rappel que la règle était déjà
+écrite, et qu'une exception « juste pour cette fois » a coûté une campagne.
+
 ## Ce qui fait foi
 
 Un travail rend un **relevé d'exécution** — jetons, outils appelés, lignes réservées,
