@@ -405,3 +405,15 @@ def test_le_relachement_porte_l_identite_du_travail(monkeypatch):
     # sait toujours ce que le travail tient.
     assert args_vus[-1].get("id") == "@claimed"
     assert args_vus[-1].get("namespace") == "@claimed"
+
+
+def test_l_ordre_contredit_la_prescription_de_liberation():
+    """⚠️ La description de `data_claim_next` prescrit de libérer la ligne — un
+    outil que le harnais ne sert plus. Privés du geste, deux agents ont écrit
+    `_liberation: "run_finish"` et `_action: "release"` DANS DES FICHES.
+
+    Le harnais ne peut pas retirer cette phrase de ce que le modèle lit ; il la
+    contredit au plus près du geste, et dit où l'intention ne va pas."""
+    ordre = W._ordre_one_shot("fais", "run-1", {"namespace": "t"}, None)
+    assert "PAS à libérer" in ordre
+    assert "aucun champ pour ça" in ordre, "et la destination absente est NOMMÉE"
