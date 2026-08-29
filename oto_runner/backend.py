@@ -192,6 +192,23 @@ class Backend:
                         _params_filtre(filter, limit=limit), org=org)
         return out.get("rows") or []
 
+    def row(self, namespace: str, row_id: str,
+            org: Optional[int] = None) -> Optional[dict[str, Any]]:
+        """Une ligne, par son identifiant. Sert à CONSTATER un effet.
+
+        ⚠️ Le harnais ne peut pas croire ses propres compteurs d'appels : sur le
+        chemin où la boucle d'outils tourne chez le fournisseur, un refus
+        applicatif revient par un transport parfaitement sain et se compte comme
+        un succès (vécu le 29/08 — un travail à « 2 écritures » sur une ligne
+        restée vierge). Relire la ligne est le seul moyen de savoir ce qui s'est
+        VRAIMENT passé. Rend None si la lecture échoue : on ne conclut jamais
+        d'une panne de lecture qu'il ne s'est rien écrit."""
+        try:
+            return self._get(f"/api/datastore/namespaces/{namespace}/rows/{row_id}",
+                             {}, org=org) or None
+        except Exception:  # noqa: BLE001 — cf. docstring
+            return None
+
     def patch_row(self, namespace: str, row_id: str, valeurs: dict,
                   org: Optional[int] = None) -> dict:
         """Écriture PARTIELLE d'une ligne, par son identifiant.

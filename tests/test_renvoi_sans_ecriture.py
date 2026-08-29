@@ -194,3 +194,74 @@ def test_un_rappel_impossible_ne_tue_pas_le_travail(monkeypatch):
     r = _resultat(b)
     assert r["renvois"] == 1
     assert r["abandon_enregistre"] is True, "l'abandon est enregistré malgré l'échec"
+
+
+# ── Le compteur d'appels ment : constater l'effet ───────────────────────────
+# Reproduit `f89d393d` (29/08) : deux `data_write` comptés RÉUSSIS, une ligne
+# restée vierge, et le rappel qui n'a pas tiré sur le cas qu'il vise.
+
+class _BackendLigne(_Backend):
+    """Un backend dont la ligne relue porte, ou non, l'estampille."""
+
+    def __init__(self, estampillee: bool):
+        super().__init__()
+        self.estampillee = estampillee
+        self.relectures = 0
+
+    def row(self, namespace, row_id, org=None):
+        self.relectures += 1
+        return {"siren": "924260243",
+                "modele": "mistral-large-2512" if self.estampillee else None}
+
+
+def _monter_estampille(monkeypatch, suites):
+    vus = _monter(monkeypatch, suites)
+    monkeypatch.setattr(W, "_estampille", lambda *a, **kw: {"modele": "mistral-large-2512"})
+    return vus
+
+
+def test_une_ecriture_refusee_ne_compte_pas_comme_une_ecriture(monkeypatch):
+    """⚠️ LE cas de f89d393d : l'agent appelle data_write, le transport réussit,
+    la plateforme REFUSE, la ligne reste vierge. Le compteur voit une écriture ;
+    la ligne dit le contraire. C'est la ligne qui a raison."""
+    vus = _monter_estampille(monkeypatch, [
+        AgentResult(reply="j'ai écrit", stopped="end_turn",
+                    steps=_pas("data_claim_next", "data_write", "data_write")),
+        AgentResult(reply="cette fois pour de bon", stopped="end_turn",
+                    steps=_pas("data_write")),
+    ])
+    b = _BackendLigne(estampillee=False)
+    W._traiter(b, _job(), provider=None)
+    assert b.relectures >= 1, "la ligne est RELUE, pas déduite du compteur"
+    assert len(vus) >= 2, "le rappel tire malgré deux écritures comptées"
+    assert "01a0-la-ligne" in vus[1]["prompt"], "et il nomme la ligne"
+
+
+def test_une_ecriture_reelle_ne_declenche_aucun_rappel(monkeypatch):
+    """Le pendant : la ligne porte l'estampille, donc l'écriture a abouti. Un
+    rappel ici ferait retravailler un agent qui a bien fini — un tour payé pour
+    rien, et le mécanisme deviendrait plus coûteux que le défaut qu'il corrige."""
+    vus = _monter_estampille(monkeypatch, [
+        AgentResult(reply="fait", stopped="end_turn",
+                    steps=_pas("data_claim_next", "data_write"))])
+    b = _BackendLigne(estampillee=True)
+    W._traiter(b, _job(), provider=None)
+    assert len(vus) == 1, "aucun rappel : la ligne PORTE l'estampille"
+
+
+def test_une_relecture_en_panne_ne_declenche_pas_de_rappel(monkeypatch):
+    """On ne conclut jamais « rien écrit » d'une incertitude. Une lecture qui
+    échoue laisse le compteur décider — se tromper vers le rappel coûterait un
+    tour entier à chaque incident réseau."""
+    class _Muet(_BackendLigne):
+        def row(self, namespace, row_id, org=None):
+            self.relectures += 1
+            return None
+
+    vus = _monter_estampille(monkeypatch, [
+        AgentResult(reply="fait", stopped="end_turn",
+                    steps=_pas("data_claim_next", "data_write"))])
+    b = _Muet(estampillee=False)
+    W._traiter(b, _job(), provider=None)
+    assert b.relectures == 1
+    assert len(vus) == 1, "lecture en panne ⟹ on s'en remet au compteur"

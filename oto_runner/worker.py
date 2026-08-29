@@ -171,6 +171,33 @@ def _ordre_one_shot(ordre: str, run_id: str, payload: dict,
 RENVOIS_MAX = 2       # deux rappels, puis on enregistre l'abandon au lieu de le taire
 
 
+def _ecriture_constatee(backend, spec_ns, org, ligne, estampille,
+                        a_ecrit_selon_compteur: bool) -> bool:
+    """L'agent a-t-il VRAIMENT écrit ? On regarde la ligne, pas le compteur.
+
+    ⚠️ Le compteur d'appels ment par construction sur le chemin où la boucle
+    d'outils tourne chez le fournisseur : un refus applicatif (« identifiant
+    inconnu ») revient avec un transport sain et s'ajoute aux écritures
+    réussies. Le 29/08, un travail affichait deux écritures sur une ligne
+    restée vierge — et le rappel, qui vise exactement ce cas, n'a pas tiré.
+
+    Le constat s'appuie sur l'estampille, que le harnais impose lui-même à
+    CHAQUE écriture : présente ⟹ au moins une écriture a abouti.
+
+    ⚠️ On ne conclut JAMAIS « rien écrit » d'une incertitude — pas d'estampille
+    configurée, pas d'identifiant, lecture en panne : on retombe sur le
+    compteur. Un rappel injustifié ferait retravailler un agent qui a bien
+    fini, et coûterait un tour entier pour rien."""
+    if not (estampille and spec_ns and ligne):
+        return a_ecrit_selon_compteur
+    ligne_lue = backend.row(spec_ns, ligne, org=org)
+    if ligne_lue is None:
+        return a_ecrit_selon_compteur
+    def _val(x):
+        return x.get("valeur") if isinstance(x, dict) and "valeur" in x else x
+    return any(_val(ligne_lue.get(k)) for k in estampille)
+
+
 def _ligne_reservee(res, mcp) -> Optional[str]:
     """L'identifiant de la ligne que l'agent a réservée — deux sources selon le chemin.
 
@@ -489,7 +516,13 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     while renvois < RENVOIS_MAX:
         faits = {s.tool for s in res.steps if s.ok}
         a_reserve = any(k.endswith(_CLAIM) for k in faits)
-        a_ecrit = any(k.endswith("data_write") for k in faits)
+        # ⚠️ CONSTATER, pas compter. `data_write` appelé ≠ ligne écrite : un
+        # refus applicatif revient par un transport sain et se compte comme un
+        # succès. On relit la ligne.
+        a_ecrit = _ecriture_constatee(
+            backend, p.get("namespace"), p.get("org_id"),
+            _ligne_reservee(res, mcp), estampille,
+            any(k.endswith("data_write") for k in faits))
         if not a_reserve or a_ecrit:
             break
         renvois += 1
