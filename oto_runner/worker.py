@@ -881,23 +881,36 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             # passage sont ceux où l'estampille de l'agent est restée telle
             # quelle — et deux d'entre elles nommaient un modèle qui n'avait pas
             # tourné. Le serveur, lui, sait toujours quelle ligne le travail tient.
-            if run_id:
-                # ⚠️ PAS de `worker` ici : `data_write` ne l'accepte pas, et
-                # le lui passer a fait échouer CHAQUE estampillage du septième
-                # passage — quinze refus « worker Unexpected keyword argument »,
-                # un par travail. L'estampille était pourtant posée sur 77 fiches
-                # sur 77 : c'est l'AGENT qui la pose, comme la consigne le lui
-                # demande. Cet appel-ci n'a donc jamais rien imposé, et son échec
-                # se lisait comme un simple bruit dans le journal.
-                mcp.outil("data_write", {"namespace": "@claimed", "id": "@claimed",
-                                         "row": dict(estampille),
-                                         "_run_id": run_id,
-                                         "_org": p.get("org_id")})
-            elif ligne_finale:
+            # ⚠️ L'ALIAS `@claimed` A ÉTÉ RETIRÉ D'ICI, et c'est la deuxième
+            # fois que ce mécanisme se révèle mort. Au septième passage, cet
+            # appel échouait sur un `worker` que `data_write` n'accepte pas —
+            # quinze refus. Corrigé, il a échoué au huitième pour une autre
+            # raison, quatre-vingt-dix-neuf fois : « @claimed en tableau : ton
+            # travail ne tient aucune ligne en ce moment ».
+            #
+            # La cause est la même que celle de la libération inerte : le geste
+            # part APRÈS la fin du travail de l'agent, donc après `run_finish`,
+            # qui a libéré les baux. L'alias résout la réservation DU TRAVAIL —
+            # à cet instant, il n'y en a plus.
+            #
+            # > L'alias est utilisable PENDANT le travail, inutilisable APRÈS.
+            #
+            # Et cet appel n'a jamais rien imposé : l'estampille est posée par
+            # l'AGENT — 77/77 au septième, 100/100 au huitième. On garde la seule
+            # branche qui fonctionne, l'écriture sur la ligne connue par son
+            # identifiant. Le taux d'estampille au bilan dira le jour où l'agent
+            # cessera de la poser.
+            if ligne_finale:
                 backend.patch_row(p["namespace"], ligne_finale, dict(estampille),
                                   org=p.get("org_id"))
             else:
-                raise RuntimeError("ni jeton de travail ni ligne connue")
+                # La ligne n'est pas connue du harnais : sur le chemin
+                # Conversations il ne voit pas les arguments des appels, donc il
+                # ne sait pas toujours laquelle l'agent a prise. Ce n'est pas une
+                # panne — l'estampille est de toute façon posée par l'agent —
+                # mais le bilan doit la compter comme non imposée.
+                raise RuntimeError("ligne inconnue du harnais : estampille "
+                                   "laissée à l'agent")
             resultat["estampille_imposee"] = True
         except Exception as e:  # noqa: BLE001 — une estampille manquée n'annule
             # pas un travail abouti ; elle se voit au bilan.
