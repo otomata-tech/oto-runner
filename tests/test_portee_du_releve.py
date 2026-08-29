@@ -123,3 +123,23 @@ def test_sans_sorties_du_fournisseur_on_retombe_sur_le_repli():
                     steps=[AgentStep(tool="data_claim_next", ok=True, duration_ms=1),
                            AgentStep(tool="data_write", ok=True, duration_ms=1)])
     assert W._lignes_reservees(r, 1, one_shot=True) == 1
+
+
+# ── Les résultats écartés par le périmètre ─────────────────────────────────
+
+def test_le_compte_hors_perimetre_se_lit_dans_les_sorties():
+    r = AgentResult(reply="", stopped="end_turn", steps=[])
+    r.raw_outputs = [
+        {"type": "tool.execution", "name": "serper_search",
+         "info": {"results": [], "excluded_by_perimeter": 3}},
+        {"type": "tool.execution", "name": "serper_search",
+         "info": {"results": [], "excluded_by_perimeter": 1}},
+    ]
+    assert W._hors_perimetre(r) == 4
+
+
+def test_sans_sorties_le_compte_est_NON_MESURE_et_pas_zero():
+    """⚠️ Un zéro dirait « aucune tentative vers un profil » là où il faut lire
+    « pas mesuré ». Sur la mesure d'un interdit, la différence est tout."""
+    assert W._hors_perimetre(AgentResult(reply="", stopped="end_turn",
+                                         steps=[])) is None

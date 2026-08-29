@@ -437,6 +437,34 @@ def _claim_sans_ligne(nom: str, sortie: str) -> bool:
     return isinstance(charge, dict) and "row" in charge and charge["row"] is None
 
 
+def _hors_perimetre(res) -> Optional[int]:
+    """Combien de résultats de recherche ont été ÉCARTÉS par le périmètre.
+
+    ⚠️ C'est la mesure des tentatives vers ce qu'on interdit — les profils
+    personnels — et elle ne s'obtient nulle part ailleurs : les réponses d'outils
+    ne sont conservées que pour les faux départs. Le harnais les a en main
+    PENDANT le travail ; s'il ne compte pas là, personne ne comptera.
+
+    ⚠️ Rend None, jamais 0, quand le fournisseur ne rend pas ses sorties : un
+    zéro dirait « aucune tentative » là où il faut lire « pas mesuré ». C'est la
+    règle de la journée — un poste dit ce qu'il vaut, ou il ment par omission.
+    """
+    sorties = getattr(res, "raw_outputs", None)
+    if not sorties:
+        return None
+    total = 0
+    for e in sorties:
+        if (e or {}).get("type") != "tool.execution":
+            continue
+        info = e.get("info")
+        if info is None:
+            continue
+        brut = json.dumps(info, ensure_ascii=False) if not isinstance(info, str) else info
+        for m in re.finditer(r'"excluded_by_perimeter"\s*:\s*(\d+)', brut):
+            total += int(m.group(1))
+    return total
+
+
 def _ligne_depuis_sorties(res) -> Optional[str]:
     """L'identifiant rendu par la réservation, lu dans les sorties du fournisseur.
 
@@ -789,6 +817,10 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 "stopped": res.stopped,
                 "steps": len(res.steps), "tool_counts": compte,
                 "claims": claims, "writes": writes,
+                # Les résultats écartés par le périmètre : la mesure des
+                # tentatives vers ce qu'on interdit. `None` = non mesuré, jamais
+                # confondu avec « aucune tentative ».
+                "hors_perimetre": _hors_perimetre(res),
                 # ⚠️ `claims_mesures` DIT CE QUE `claims` VAUT. Sur le chemin où
                 # la boucle d'outils tourne chez le fournisseur, aucune sortie de
                 # `data_claim_next` ne remonte : `claims` est une RÈGLE DE REPLI
