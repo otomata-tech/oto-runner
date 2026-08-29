@@ -157,8 +157,19 @@ def _refus_ecriture(spec, backend, secondes: float) -> tuple[Optional[dict],
     except Exception as e:  # noqa: BLE001 — la sonde ne tue pas la flotte
         logger.warning("bilan : santé de %s illisible : %s", _REFUS_OUTIL, e)
         return None, f"journal des appels illisible : {e}"
+    # ⚠️ Le DÉTAIL par motif, et non le seul compte. Sous un cran qui empêche la
+    # création, une tentative de fabriquer une entreprise ne laisse plus de ligne :
+    # elle devient un refus. Un refus ne se voit que si on le compte — sans ce
+    # poste, on lirait un progrès là où il n'y a qu'une protection qui tient.
+    try:
+        motifs = backend.refus_par_motif(spec.org, _REFUS_OUTIL, minutes=minutes,
+                                         limit=_REFUS_LIMITE)
+    except Exception as e:  # noqa: BLE001 — la sonde ne tue pas la flotte
+        logger.warning("bilan : motifs de refus illisibles : %s", e)
+        motifs = None
     return ({"outil": _REFUS_OUTIL, "fenetre_minutes": minutes,
-             "limite": _REFUS_LIMITE, "appels": n, "refuses": ko}, None)
+             "limite": _REFUS_LIMITE, "appels": n, "refuses": ko,
+             "motifs": motifs}, None)
 
 
 def _jetons_lisibles(n: Optional[int]) -> str:
@@ -187,6 +198,11 @@ def _ligne(bilan: dict) -> str:
     if refus:
         postes.append(f"{refus['outil']} {refus['appels']} appels, "
                       f"{refus['refuses']} refusé{'s' if refus['refuses'] > 1 else ''}")
+        # Le motif qui compte le plus se dit sur la ligne : « 12 refusés » ne dit
+        # pas si les agents inventent des entreprises ou oublient un jeton.
+        for poste, n in sorted((refus.get("motifs") or {}).items(),
+                               key=lambda kv: -kv[1])[:2]:
+            postes.append(f"{poste} ×{n}")
     else:
         postes.append(f"{_REFUS_OUTIL} non mesuré "
                       f"({bilan['refus_ecriture_omis']})")

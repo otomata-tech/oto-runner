@@ -39,6 +39,31 @@ def _params_filtre(filter: Optional[dict], limit: int) -> dict:
     return params
 
 
+_MOTIFS = (
+    # (fragment cherché dans le message, nom du poste au bilan)
+    ("business_key_required", "création refusée par le cran"),
+    ("introuvable", "ligne inconnue (identifiant inventé ou périmé)"),
+    ("not found", "ligne inconnue (identifiant inventé ou périmé)"),
+    ("réservée par", "ligne tenue par un autre travail"),
+    ("reserved by", "ligne tenue par un autre travail"),
+    ("required_when", "champ conditionnel manquant"),
+    ("run_id", "jeton de travail manquant"),
+)
+
+
+def _motif(message: str) -> str:
+    """Range un message de refus dans un poste lisible au bilan.
+
+    ⚠️ Un refus non classé garde son texte tronqué plutôt que d'aller dans un
+    « divers » : un poste fourre-tout masque précisément le motif neuf qu'on
+    aurait voulu voir apparaître."""
+    bas = message.lower()
+    for fragment, poste in _MOTIFS:
+        if fragment in bas:
+            return poste
+    return "autre : " + " ".join(message.split())[:60]
+
+
 class BackendError(RuntimeError):
     def __init__(self, message: str, *, status: Optional[int] = None):
         super().__init__(message)
@@ -132,6 +157,41 @@ class Backend:
             if not c.get("ok"):
                 ko += 1
         return n, ko
+
+    def refus_par_motif(self, org: int, tool: str, *, minutes: int = 15,
+                        limit: int = 200) -> dict[str, int]:
+        """Les refus de `tool`, comptés PAR MOTIF, sur la fenêtre.
+
+        ⚠️ Pourquoi ce poste existe. Tant qu'aucun cran n'empêchait la création,
+        une tentative de fabriquer une entreprise LAISSAIT UNE LIGNE : on la
+        voyait, on la comptait, on remontait à sa cause. Sous le cran
+        `key_required`, la même tentative devient un refus — et **un refus ne se
+        voit que si quelqu'un le compte**.
+
+        Un zéro obtenu sous une garde ne dit pas que le geste a cessé : il dit
+        que le geste ne réussit plus. Sans ce comptage, on lirait un progrès là
+        où il n'y a qu'une protection qui tient — et une hausse ici serait un
+        signal, pas un échec : elle dirait que la consigne n'a pas porté et que
+        seul le cran retient."""
+        from collections import Counter
+        from datetime import datetime, timedelta, timezone
+        d = self._get(f"/api/orgs/{org}/monitoring/calls",
+                      {"tool": tool, "limit": limit})
+        seuil = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+        motifs: Counter = Counter()
+        for c in d.get("calls") or []:
+            if c.get("ok"):
+                continue
+            quand = str(c.get("called_at") or "")[:19].replace("T", " ")
+            try:
+                t = datetime.strptime(quand, "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if t < seuil:
+                continue
+            motifs[_motif(str(c.get("error") or ""))] += 1
+        return dict(motifs)
 
     # ── la file de jobs (runner.jobs, R2) ────────────────────────────────────
     def claim(self, lease_seconds: int = 600) -> Optional[dict]:

@@ -118,7 +118,11 @@ def test_les_refus_decriture_se_lisent_au_journal_des_appels():
     b = BackendBilan(restantes=0, journal=(14, 2))
     bilan = ecrire_bilan(_spec(org=226), b, {}, lignes_initiales=3, secondes=3600)
     assert bilan["refus_ecriture"] == {"outil": "data_write", "fenetre_minutes": 60,
-                                       "limite": 200, "appels": 14, "refuses": 2}
+                                       "limite": 200, "appels": 14, "refuses": 2,
+                                       # `None` et non `{}` : un backup de test qui
+                                       # ne sait pas rendre les motifs ne doit pas
+                                       # se lire « aucun refus classé ».
+                                       "motifs": None}
     assert bilan["refus_ecriture_omis"] is None
     assert b.sondes == [("data_write", 60, 200)]
 
@@ -260,3 +264,27 @@ def test_une_flotte_sans_declaration_sur_disque_ne_pose_rien(tmp_path):
     ecrire_bilan(_spec(), BackendBilan(restantes=0), {}, lignes_initiales=1,
                  secondes=60)
     assert list(tmp_path.iterdir()) == []
+
+
+# ── Les refus, comptés PAR MOTIF ────────────────────────────────────────────
+# ⚠️ Sous un cran qui empêche la création, fabriquer une entreprise ne laisse
+# plus de ligne : ça devient un refus. Un zéro de lignes fantômes ne dira donc
+# plus que le geste a cessé — seulement qu'il ne réussit plus.
+
+def test_le_motif_d_un_refus_est_range_dans_un_poste_lisible():
+    from oto_runner.backend import _motif
+    assert _motif("400 business_key_required: la clé `siren` ...") == \
+        "création refusée par le cran"
+    assert _motif("row `000...` introuvable") == \
+        "ligne inconnue (identifiant inventé ou périmé)"
+    assert _motif("ligne déjà réservée par un autre run") == \
+        "ligne tenue par un autre travail"
+
+
+def test_un_motif_inconnu_garde_son_texte_plutot_que_d_aller_en_divers():
+    """⚠️ Un poste fourre-tout masque exactement le motif NEUF qu'on aurait
+    voulu voir apparaître — celui qu'aucune version précédente ne produisait."""
+    from oto_runner.backend import _motif
+    m = _motif("quota dépassé sur le connecteur amont")
+    assert m.startswith("autre : ")
+    assert "quota" in m
