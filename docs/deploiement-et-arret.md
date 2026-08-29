@@ -94,6 +94,18 @@ un seul `systemd-run` oublié.
 début. Ce n'est pas une règle de plus : c'est le rappel que la règle était déjà
 écrite, et qu'une exception « juste pour cette fois » a coûté une campagne.
 
+**Depuis, la règle n'est plus à tenir : `scripts/flotte.sh` la rend mécanique.**
+`flotte.sh lancer` arme la garde **avant** la flotte et renonce au lancement si elle
+n'a pas pu l'armer ; `flotte.sh arreter` arrête la flotte **puis** sa garde. On ne
+peut plus obtenir l'un sans l'autre en se trompant de geste.
+
+⚠️ **Mettre une garde en pause n'existe pas, et ce n'est pas un choix de style.**
+Ses unités sont **transitoires** : `systemctl stop` ne les suspend pas, il les
+**supprime**. Le 2026-08-29, des gardes mises « en pause » le temps d'essais ont été
+détruites — sans conséquence, rien ne tournant, mais rien ne le disait avant de le
+faire, et rien ne l'aurait dit après. Il n'existe donc qu'un geste : **arrêter la
+campagne**, qui emporte sa garde. Vouloir désarmer seul, c'est déjà se tromper.
+
 ## Ce qui fait foi
 
 Un travail rend un **relevé d'exécution** — jetons, outils appelés, lignes réservées,
