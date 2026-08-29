@@ -251,6 +251,7 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
     failed_consecutifs = 0
     faux_departs_consecutifs = 0
     relachements_rates = 0
+    pleine_charge_atteinte = False
     # (jetons, écritures) des derniers jobs conclus — la matière du rendement.
     fenetre: deque = deque(maxlen=max(1, spec.rendement_fenetre))
     # Les erreurs BACKEND consécutives du driver lui-même (count/enqueue) : un
@@ -399,8 +400,29 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                 return bilan
 
             # 3. Enfiler, sous la rampe — un départ au plus par tour de boucle.
+            #
+            # ⚠️ La rampe est une MONTÉE EN CHARGE, pas un débit permanent.
+            # Elle s'appliquait à chaque enfilement, pour toujours : un travail
+            # au plus toutes les 60 s, quelle que soit la vitesse des agents.
+            # Mesuré le 29/08 : travaux de 107 s, enfilements toutes les 64 s —
+            # **c'est l'ordonnanceur qui donnait le tempo, pas les agents**, et
+            # le débit plafonnait là où trois agents auraient pu faire trois fois
+            # mieux. Sur un lot de 1 136 lignes, c'est des dizaines d'heures.
+            #
+            # Elle ne s'applique donc que TANT QU'ON MONTE — jusqu'à ce que la
+            # concurrence visée soit atteinte une première fois. Ensuite, un
+            # travail conclu libère immédiatement sa place : c'est la
+            # concurrence qui borne, et elle seule.
+            #
+            # ⚠️ On ne SUPPRIME pas la rampe : démarrer trois conversations à la
+            # même seconde a déjà gelé la plateforme. Elle protège le départ,
+            # elle n'a jamais eu à brider la croisière.
+            monte = not pleine_charge_atteinte
+            if len(en_vol) >= spec.concurrency:
+                pleine_charge_atteinte = True
             if (len(en_vol) < spec.concurrency
                     and (dernier_depart is None
+                         or not monte
                          or clock() - dernier_depart >= spec.ramp_seconds)):
                 try:
                     jid = backend.enqueue("start", _payload(spec))
