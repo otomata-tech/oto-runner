@@ -79,6 +79,35 @@ arreter)
   systemctl stop "$GARDE.timer" 2>/dev/null
   for n in 1 2 3; do systemctl stop --no-block "oto-runner@$n"; done
   echo "flotte $(systemctl is-active "$FLOTTE") · garde retirée · agents en arrêt"
+
+  # ⚠️ « Flotte arrêtée » N'EST PAS « zéro travail en vol ». Ce qui était déjà
+  # parti finit après : le 29/08, un travail écrivait encore dix-sept secondes
+  # après l'arrêt de la garde, et un autre est resté réservé cinquante secondes
+  # après l'arrêt de la flotte. L'état de l'unité est un STOCK ; les travaux en
+  # vol sont le DÉBIT, et c'est lui qui décide quand on peut lire ou repartir.
+  #
+  # Compte pour l'export de l'instantané : exporté trop tôt, il prendrait une
+  # écriture née d'avant l'arrêt — la référence contaminée par ce qu'elle mesure.
+  echo "attente du dernier travail en vol…"
+  for _ in $(seq 1 60); do
+    reserves=$("$PY" - <<'PY' 2>/dev/null
+import json, os, urllib.request
+h = {"Authorization": "Bearer " + os.environ["OTO_TOKEN"],
+     "Content-Type": "application/json"}
+r = urllib.request.Request("https://mcp.oto.cx/api/me/runner/jobs", headers=h,
+                           data=json.dumps({"op": "list", "limit": 50}).encode())
+print(sum(1 for j in json.load(urllib.request.urlopen(r, timeout=90))["jobs"]
+          if j.get("status") == "claimed"))
+PY
+)
+    actifs=$(systemctl is-active oto-runner@1 oto-runner@2 oto-runner@3 | grep -c '^active')
+    if [ "${reserves:-1}" = "0" ] && [ "$actifs" = "0" ]; then
+      echo "✅ zéro travail en vol, CONSTATÉ à $(date -u '+%H:%M:%S UTC')"
+      break
+    fi
+    sleep 5
+  done
+  [ "${reserves:-1}" = "0" ] || echo "⚠️ des travaux sont ENCORE en vol — ne rien lire, ne rien exporter."
   echo "⚠️ La garde est SUPPRIMÉE, pas suspendue : la relancer demande 'lancer'."
   ;;
 
