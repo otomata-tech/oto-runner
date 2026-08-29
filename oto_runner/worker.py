@@ -384,6 +384,24 @@ def _claim_sans_ligne(nom: str, sortie: str) -> bool:
     return isinstance(charge, dict) and "row" in charge and charge["row"] is None
 
 
+def _ligne_depuis_sorties(res) -> Optional[str]:
+    """L'identifiant rendu par la réservation, lu dans les sorties du fournisseur.
+
+    Rend None quand la réservation n'a rendu AUCUNE ligne — `row: null`, la fin
+    de file. C'est une réponse, pas une absence d'information."""
+    for e in (getattr(res, "raw_outputs", None) or []):
+        if (e or {}).get("type") != "tool.execution":
+            continue
+        if not str(e.get("name") or "").endswith(_CLAIM):
+            continue
+        brut = json.dumps(e.get("info"), ensure_ascii=False) if e.get("info") else ""
+        trouve = re.search(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", brut)
+        if trouve:
+            return trouve.group(0)
+    return None
+
+
 def _lignes_reservees(res, appels_claim: int, one_shot: bool) -> int:
     """Les lignes RÉSERVÉES — jamais le nombre d'APPELS de réservation.
 
@@ -408,6 +426,23 @@ def _lignes_reservees(res, appels_claim: int, one_shot: bool) -> int:
       départs le 28/08 par la première version de ce repli, qui s'arrêtait à
       « un seul appel »)."""
     if one_shot:
+        # ⚠️ MESURE D'ABORD, repli seulement à défaut.
+        #
+        # Le fournisseur RETOURNE ses exécutions d'outils (`tool.execution` avec
+        # leur `info`) : quand la réservation a rendu une ligne, son identifiant
+        # y est, et `_ligne_reservee` sait l'en extraire. C'est une mesure, pas
+        # une inférence — et elle vaut mieux que le repli, qui a fait affirmer le
+        # 29/08 qu'une ligne avait été attribuée alors que le claim avait rendu
+        # `row: null` (fin de file, la dernière ligne sous le bail d'un pair).
+        # Ce repli présenté comme une mesure a fait accuser la plateforme.
+        #
+        # ⚠️ `row: null` est une FIN NORMALE : l'agent n'a rien à écrire, rien
+        # n'est perdu, et le travail ne doit pas compter une ligne qu'il n'a
+        # jamais eue.
+        if any(str(e.get("type") or "") == "tool.execution"
+               and str(e.get("name") or "").endswith(_CLAIM)
+               for e in (getattr(res, "raw_outputs", None) or [])):
+            return 1 if _ligne_depuis_sorties(res) else 0
         travail = [s for s in res.steps
                    if not any(s.tool.endswith(t) for t in OUTILS_DE_TENUE)]
         return appels_claim if travail else 0

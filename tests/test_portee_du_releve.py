@@ -91,3 +91,35 @@ def test_sur_le_chemin_du_fournisseur_elles_sont_ESTIMEES(monkeypatch):
     """⚠️ Aucune sortie ne remonte : `claims` est un repli, et le relevé doit le
     dire — sinon il sera lu comme une mesure par qui n'a pas lu la docstring."""
     assert _lancer(monkeypatch, _UnShot)["claims_mesures"] is False
+
+
+# ── La réservation se MESURE quand le fournisseur rend ses sorties ──────────
+
+def _res_avec_sorties(info):
+    r = AgentResult(reply="fait", stopped="end_turn",
+                    steps=[AgentStep(tool="data_claim_next", ok=True, duration_ms=1),
+                           AgentStep(tool="data_write", ok=True, duration_ms=1)])
+    r.raw_outputs = [{"type": "tool.execution", "name": "data_claim_next",
+                      "info": info}]
+    return r
+
+
+def test_une_reservation_qui_rend_une_ligne_compte_pour_une():
+    res = _res_avec_sorties({"row": {"_id": "01a04aef-26c0-7c16-9c58-abcdef012345"}})
+    assert W._lignes_reservees(res, 1, one_shot=True) == 1
+
+
+def test_row_null_est_une_FIN_NORMALE_et_ne_compte_aucune_ligne():
+    """⚠️ Fin de file : la dernière ligne est sous le bail d'un pair. L'agent n'a
+    rien à écrire, rien n'est perdu — et le 29/08, compter cette réservation a
+    fait accuser la plateforme d'avoir perdu un lien qu'elle n'avait jamais eu."""
+    assert W._lignes_reservees(_res_avec_sorties({"row": None}), 1,
+                               one_shot=True) == 0
+
+
+def test_sans_sorties_du_fournisseur_on_retombe_sur_le_repli():
+    """Le repli reste, mais seulement à défaut de mesure."""
+    r = AgentResult(reply="fait", stopped="end_turn",
+                    steps=[AgentStep(tool="data_claim_next", ok=True, duration_ms=1),
+                           AgentStep(tool="data_write", ok=True, duration_ms=1)])
+    assert W._lignes_reservees(r, 1, one_shot=True) == 1
