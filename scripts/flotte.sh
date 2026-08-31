@@ -93,6 +93,82 @@ lancer)
   fi
   echo "code déployé : à jour avec origin/main ✅"
 
+  # ⚠️ LOT EXIGÉ HORS DES TABLEAUX D'ESSAI
+  #
+  # Le cran comparatif ci-dessous ne voit rien quand les deux valeurs sont
+  # fausses ensemble : deux périmètres larges et d'accord le satisfont. Cette
+  # borne-ci ne compare rien — elle exige une forme, et se trompe du côté qui
+  # gêne : un tableau d'essai oublié dans la liste bloque le départ ; un fichier
+  # de cliente oublié, lui, reste exigeant. La liste est LUE dans la garde, pas
+  # recopiée.
+  _essai=$("$PY" - "$NS_MIROIR" <<'PYESSAI'
+import ast, os, sys
+p = "/opt/oto-runner/garde-vivier.py"
+if not os.path.exists(p):
+    print("absent")          # ⚠️ dit par le lecteur, pas déduit d'un vide
+    raise SystemExit(0)
+src = open(p, encoding="utf-8").read()
+noms = ()
+for n in ast.parse(src).body:
+    if isinstance(n, ast.Assign) and any(
+            getattr(t, "id", "") == "TRAVAIL" for t in n.targets):
+        noms = tuple(ast.literal_eval(n.value))
+print("oui" if sys.argv[1] in noms else "non")
+PYESSAI
+)
+  if [ "$_essai" = "absent" ] || [ -z "$_essai" ]; then
+    echo "⛔ REFUS DE LANCER — LISTE DES TABLEAUX D'ESSAI INTROUVABLE"
+    echo "   « garde-vivier.py » est absente ou illisible : le cran ne peut pas"
+    echo "   savoir si « $NS_MIROIR » est un tableau d'essai. Il refuse plutôt"
+    echo "   que de deviner. ⚠️ Cette liste n'est pas versionnée — elle ne vit"
+    echo "   que sur la box. Rien n'a été armé."
+    exit 1
+  fi
+  if [ "$_essai" != "oui" ] && [ -z "$_lot" ]; then
+    echo "⛔ REFUS DE LANCER — « $NS_MIROIR » n'est pas un tableau d'essai"
+    echo "   et la déclaration ne nomme AUCUN lot."
+    echo "   Un fichier de cliente ne se travaille jamais en entier : une vague"
+    echo "   sans nom ne se compare à rien et ne se défait pas. Rien n'a été armé."
+    exit 1
+  fi
+  if [ "$_essai" = "oui" ] && [ -z "$_lot" ]; then
+    echo "tableau d'essai « $NS_MIROIR » sans lot — le tableau EST le périmètre ✅"
+  fi
+
+  # ⚠️ LE PÉRIMÈTRE SERVI EST-IL CELUI QU'ON DEMANDE ?
+  #
+  # Le tableau déclare ce qui est réservable (`lifecycle.claimable`). Un
+  # périmètre plus large que le filtre de la flotte ouvre des lignes qu'on
+  # n'a pas demandées — un `claimable` réduit à `{statut: a_enrichir}` rendrait
+  # les 8 871 lignes du fichier réservables d'un coup, et le lancement partirait
+  # content. C'est la garde qui a manqué le 31/08 à 14:07, quand un travail en
+  # vol a écrit sur le lot après l'arrêt du passage.
+  #
+  # On compare donc ce que le tableau SERT à ce que la déclaration DEMANDE, et
+  # on refuse en nommant l'écart. Mécanique : personne n'a à se rappeler.
+  if [ -n "$_lot" ]; then
+    _servi=$("$PY" - "$NS_MIROIR" <<'PYCRAN'
+import json, os, sys, urllib.request
+ns = sys.argv[1]
+H = {"Authorization": "Bearer " + os.environ["OTO_TOKEN"], "X-Oto-Org": "226"}
+d = json.load(urllib.request.urlopen(urllib.request.Request(
+    "https://mcp.oto.cx/api/datastore/namespaces/%s/schema" % ns,
+    headers=H), timeout=90))
+c = d.get("schema") if isinstance(d.get("schema"), dict) else d
+st = next((f for f in (c.get("fields") or []) if f.get("key") == "statut"), {})
+print(((st.get("lifecycle") or {}).get("claimable") or {}).get("lot_test") or "")
+PYCRAN
+)
+    if [ "$_servi" != "$_lot" ]; then
+      echo "⛔ REFUS DE LANCER — périmètre de réservation servi : « ${_servi:-AUCUN} »"
+      echo "   la déclaration demande le lot « $_lot »."
+      echo "   Un périmètre plus large ouvre des lignes qu'on n'a pas demandées ;"
+      echo "   un périmètre absent les ouvre TOUTES. Rien n'a été armé."
+      exit 1
+    fi
+    echo "périmètre servi : « $_servi » — conforme à la déclaration ✅"
+  fi
+
   # ⚠️ LES EXÉCUTANTS, avant tout le reste. Le 29/08, le septième départ est
   # parti avec flotte, garde, ordonnanceur et code TOUS VERTS et les trois
   # agents éteints : la flotte a enfilé dans le vide pendant quarante secondes.
@@ -190,19 +266,19 @@ lancer)
   # fiches sont déjà écrites — alors que la bonne référence existe déjà et
   # précède ces écritures. On la déclare, on vérifie qu'elle porte le bon
   # tableau, et on le DIT : un instantané repris n'est pas un instantané frais.
-  if [ -n "$SOCLE_REPRIS" ]; then
-    [ -f "$SOCLE_REPRIS" ] || { echo "⛔ instantané repris introuvable : $SOCLE_REPRIS"; exit 1; }
-    _ns_repris=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('namespace') or '')" "$SOCLE_REPRIS" 2>/dev/null)
+  if [ -n "${SOCLE_REPRIS:-}" ]; then
+    [ -f "${SOCLE_REPRIS:-}" ] || { echo "⛔ instantané repris introuvable : $SOCLE_REPRIS"; exit 1; }
+    _ns_repris=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('namespace') or '')" "${SOCLE_REPRIS:-}" 2>/dev/null)
     if [ "$_ns_repris" != "$NS_MIROIR" ]; then
       echo "⛔ l'instantané repris porte « $_ns_repris », la flotte travaille « $NS_MIROIR »"
       exit 1
     fi
-    echo "instantané REPRIS (pas ré-exporté) : $(basename "$SOCLE_REPRIS")"
-    echo "   md5 : $(md5sum "$SOCLE_REPRIS" | cut -d' ' -f1)"
+    echo "instantané REPRIS (pas ré-exporté) : $(basename "${SOCLE_REPRIS:-}")"
+    echo "   md5 : $(md5sum "${SOCLE_REPRIS:-}" | cut -d' ' -f1)"
     echo "   ⚠️ le bilan compare à CETTE référence, antérieure aux fiches déjà écrites."
   fi
-  if [ -n "$SOCLE_REPRIS" ]; then
-    _socle="$SOCLE_REPRIS"
+  if [ -n "${SOCLE_REPRIS:-}" ]; then
+    _socle="${SOCLE_REPRIS:-}"
   elif ! "$PY" "$RACINE/exporter-socle.py" "$NS_MIROIR" $_arg_lot; then
     echo "ABANDON : instantané non exporté — on ne lance pas sans référence."
     systemctl stop "$GARDE.timer" "$PROFILS.timer" 2>/dev/null
