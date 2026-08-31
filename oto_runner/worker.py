@@ -676,6 +676,49 @@ def _effectif_non_atteste(mcp, siren: str, fiche: Optional[dict]) -> Optional[st
     return tranche if tranche.upper() in ("NN", "", "NULL", "NONE") else None
 
 
+def _mots_du_nom(nom: str) -> set:
+    """Les mots significatifs d'un nom, pour une comparaison indulgente.
+
+    On retire les accents, la casse et la ponctuation, et on ignore les mots
+    d'un ou deux caractères — les particules et initiales ne discriminent rien.
+    """
+    import unicodedata
+    plat = unicodedata.normalize("NFD", str(nom or ""))
+    plat = "".join(c for c in plat if unicodedata.category(c) != "Mn").lower()
+    return {m for m in re.split(r"[^a-z0-9]+", plat) if len(m) > 2}
+
+
+def _nom_present(attendu: str, fiche: Optional[dict]) -> bool:
+    """Le nom que le REGISTRE rend figure-t-il parmi les contacts de la fiche ?
+
+    ⚠️ C'est la véracité, pas la présence. Une garde qui vérifie qu'une case est
+    remplie ne vérifie pas qu'elle est remplie juste : sur le jalon du 31/08,
+    une fiche portait « SARL LES ÉDITIONS DU LIVRE » comme contact de direction
+    là où le registre nomme une personne physique — le dirigeant réel manqué, et
+    le rappel muet parce que la case était pleine.
+
+    Indulgent sur la forme, strict sur le fond : il suffit qu'un mot
+    significatif du nom du registre — en pratique le nom de famille — apparaisse
+    dans un contact. Trop strict, on rappellerait sur des variantes légitimes
+    (nom d'usage, ordre inversé) ; trop lâche, on laisserait passer une société
+    écrite à la place d'une personne.
+    """
+    if not fiche:
+        return True   # pas de fiche lue : on ne conclut pas, on ne rappelle pas
+    cherches = _mots_du_nom(attendu)
+    if not cherches:
+        return True
+    contacts = fiche.get("contacts")
+    if not isinstance(contacts, list):
+        return False
+    for c in contacts:
+        if not isinstance(c, dict):
+            continue
+        if cherches & _mots_du_nom(_nu(c.get("nom"))):
+            return True
+    return False
+
+
 def _sans_contact_direction(fiche: Optional[dict]) -> bool:
     """La fiche porte-t-elle un contact de direction ? Sur la fiche RELUE."""
     # ⚠️ `None` (pas lu) et `{}` (lu, vide) ne disent PAS la même chose. La
@@ -1047,7 +1090,14 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             break
         tranche_nn = _effectif_non_atteste(
             mcp, _nu((fiche or {}).get("siren")), fiche)
-        if not _sans_contact_direction(fiche) and not tranche_nn:
+        # ⚠️ Deux questions, pas une : la fiche porte-t-elle un contact de
+        # direction, ET porte-t-elle CELUI que le registre nomme ? La seconde a
+        # manqué au jalon du 31/08 — une société écrite à la place d'une
+        # personne satisfaisait la première.
+        trouve = _dirigeant_a_contacter(mcp, _nu((fiche or {}).get("siren")))
+        manque = _sans_contact_direction(fiche)
+        faux_nom = bool(trouve) and not _nom_present(trouve[0], fiche)
+        if not manque and not faux_nom and not tranche_nn:
             contact_rattrape = rappels_contact > 0
             break
         # ⚠️ Si l'agent a RÉPONDU sans ajouter de contact — une raison écrite dans
@@ -1059,14 +1109,17 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                         "ajouter de contact, on n'insiste pas", job["id"])
             break
         empreinte_avant = empreinte
-        trouve = _dirigeant_a_contacter(mcp, _nu((fiche or {}).get("siren")))
         if not trouve and not tranche_nn:
             break
         rappels_contact += 1
         motifs = []
-        if trouve:
+        if trouve and manque:
             motifs.append("contact de direction manquant (le registre nomme "
                           "%s, qualité %s)" % (trouve[0], trouve[1]))
+        elif trouve and faux_nom:
+            motifs.append("contact de direction présent mais SANS le nom du "
+                          "registre (%s) — un contact fabriqué ne le remplace "
+                          "pas" % trouve[0])
         if tranche_nn:
             motifs.append("« sans salarié » écrit là où le registre rend %r"
                           % tranche_nn)
