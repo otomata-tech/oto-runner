@@ -91,6 +91,19 @@ lancer)
     git -C "$RACINE" log --oneline HEAD..origin/main | head -5
     exit 1
   fi
+  # ⚠️ … ET DU CODE QUI N'EXISTE QU'ICI. Le retard n'est qu'une moitié : un
+  # fichier suivi modifié sur la box, ou un commit local jamais poussé, font
+  # tourner le passage sur un code que personne d'autre ne peut relire.
+  sales=$(git -C "$RACINE" status --porcelain --untracked-files=no | head -20)
+  avance=$(git -C "$RACINE" rev-list --count origin/main..HEAD 2>/dev/null || echo 0)
+  if [ -n "$sales" ] || [ "${avance:-0}" != "0" ]; then
+    echo "⛔ REFUS DE LANCER — du code ne vit QUE sur cette box."
+    [ -n "$sales" ] && { echo "   fichiers suivis modifiés :"; echo "$sales" | sed "s/^/     /"; }
+    [ "${avance:-0}" != "0" ] && echo "   $avance commit(s) local(aux) jamais poussé(s)."
+    echo "   Un passage tourné sur un code non publié ne se reproduit pas et ne"
+    echo "   se compare à rien. Publie, puis relance. Rien n'a été armé."
+    exit 1
+  fi
   echo "code déployé : à jour avec origin/main ✅"
 
   # ⚠️ LOT EXIGÉ HORS DES TABLEAUX D'ESSAI
