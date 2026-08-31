@@ -402,6 +402,38 @@ def _valeurs_cliente_detruites(fiche) -> list:
     return perdues
 
 
+def _contacts_a_retirer(fiche, dirigeants_reels) -> tuple:
+    """Les entrées à retirer, et la liste des contacts qui RESTE.
+
+    ⚠️ Un contact n'est retiré QUE s'il invoque le registre et que le registre
+    ne porte pas son nom — registre vide, ou registre qui nomme quelqu'un
+    d'autre. **Tout ce qui vient de la cliente porte `fichier-client —` et
+    n'est jamais touché.** Une provenance absente ne suffit pas non plus : elle
+    est une faute en soi, elle n'autorise pas à supprimer une donnée.
+    """
+    if not isinstance(fiche, dict):
+        return [], None
+    reels = [_mots_du_nom(x) for x in (dirigeants_reels or ())
+             if isinstance(x, str)]
+    garde, retires = [], []
+    for c in (fiche.get("contacts") or []):
+        if not isinstance(c, dict):
+            garde.append(c)
+            continue
+        prov = str(c.get("nom.comment") or "").strip().lower()
+        nom = _nu(c.get("nom"))
+        if not prov.startswith("registre") or _vide(nom):
+            garde.append(c)                     # jamais de la cliente ni sans nom
+            continue
+        mots = _mots_du_nom(nom)
+        au_registre = any(mots & r for r in reels)
+        if au_registre:
+            garde.append(c)
+        else:
+            retires.append(str(nom))
+    return retires, garde
+
+
 def _contact_invente_sur_registre_vide(fiche, dirigeants_reels) -> list:
     """Des contacts qui invoquent le registre alors qu'il ne nomme personne.
 
@@ -779,7 +811,7 @@ def _nom_present(attendu: str, fiche: Optional[dict]) -> bool:
 
     ⚠️ C'est la véracité, pas la présence. Une garde qui vérifie qu'une case est
     remplie ne vérifie pas qu'elle est remplie juste : sur le jalon du 31/08,
-    une fiche portait ⟨une SOCIÉTÉ⟩ comme contact de direction
+    une fiche portait « SARL LES ÉDITIONS DU LIVRE » comme contact de direction
     là où le registre nomme une personne physique — le dirigeant réel manqué, et
     le rappel muet parce que la case était pleine.
 
@@ -1289,7 +1321,7 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # ⚠️ Elle se compte à part de la destruction : une ligne réparée reste une
     # FAUTE au verdict. Sans ce compte, la réparation ferait disparaître le
     # défaut des relevés et l'on croirait la consigne guérie.
-    valeurs_reparees = []
+    valeurs_reparees, contacts_retires = [], []
     if rappels_contact >= RENVOIS_MAX and ligne_rc:
         try:
             fiche = backend.row(p["namespace"], ligne_rc, org=p.get("org_id"))
@@ -1309,6 +1341,22 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                     logger.error("job %s : la restauration a été refusée ou "
                                  "partielle — la valeur de la cliente est "
                                  "TOUJOURS perdue", job["id"])
+            # ⚠️ Et le contact fabriqué : on RETIRE l'entrée, on ne se contente
+            # pas de marquer. Une fiche marquée reste appelée.
+            reels = _dirigeant_a_contacter(mcp, _nu((fiche or {}).get("siren")))
+            retires, restants = _contacts_a_retirer(
+                fiche, [reels[0]] if reels else [])
+            if retires:
+                backend.patch_row(p["namespace"], ligne_rc,
+                                  {"contacts": restants}, org=p.get("org_id"))
+                contacts_retires = retires
+                logger.warning("job %s : %d contact(s) fabriqué(s) RETIRÉ(S) "
+                               "après %d rappels — %s", job["id"], len(retires),
+                               RENVOIS_MAX, ", ".join(retires))
+                verif = backend.row(p["namespace"], ligne_rc, org=p.get("org_id"))
+                if _contacts_a_retirer(verif, [reels[0]] if reels else [])[0]:
+                    logger.error("job %s : le retrait a échoué — le contact "
+                                 "fabriqué est TOUJOURS dans la fiche", job["id"])
         except Exception as e:  # noqa: BLE001 — une réparation qui échoue se dit
             logger.error("job %s : restauration impossible (%s)", job["id"], e)
 
@@ -1452,6 +1500,7 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 "rappel_contact_mesure": bool(ligne_rc),
                 "rappels_contact": rappels_contact,
                 "valeurs_cliente_reparees": valeurs_reparees,
+                "contacts_fabriques_retires": contacts_retires,
                 "valeurs_cliente_detruites": (None if detruites is None
                                               else [c for c, _, _ in detruites]),
                 # ⚠️ Rendu MÊME À ZÉRO : un zéro lisible dit « aucun cas », un
