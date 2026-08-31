@@ -1165,9 +1165,14 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     if isinstance(reponse, dict):
         rendues_cloture = reponse.get("rows_released")
         motif = reponse.get("release")
-        resultat["lignes_rendues_cloture"] = rendues_cloture
-        if motif:
-            resultat["liberation_motif"] = motif
+        # ⚠️ PAS dans `resultat` : il vient d'être transmis au backend à la ligne
+        # précédente. Tout ce qu'on y ajoute ici meurt avec le processus — le
+        # poste était calculé et n'atteignait personne, ce que seule une épreuve
+        # dans le sens du geste réel pouvait montrer. On le journalise, ce qui le
+        # rend lisible là où on le cherche : à côté de la conclusion du travail.
+        logger.info("job %s : libération à la clôture — rendues=%s motif=%s "
+                    "(run_finish en avait rendu %s)",
+                    job["id"], rendues_cloture, motif or "—", rendues)
         if motif == "failed" and ligne_finale:
             logger.warning("libération ÉCHOUÉE à la clôture sur %s — la ligne "
                            "reste tenue jusqu'à expiration du bail", ligne_finale)
