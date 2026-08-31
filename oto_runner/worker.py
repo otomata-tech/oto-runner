@@ -348,6 +348,92 @@ def _ligne_par_alias(mcp, run_id: Optional[str], org) -> Optional[str]:
     return trouve.group(0) if trouve else None
 
 
+# ⚠️ Les colonnes de la cliente OUVERTES à l'agent : il doit pouvoir les
+# remplir quand elles sont vides, jamais les vider ni les remplacer. Toutes
+# portent `origine: "system"` — la plateforme y garde la valeur d'avant.
+# `contacts` n'y est pas : c'est une liste, et le serveur refuse la couche
+# `origine` dessus. Sa garde est la ②, qui compare au registre et n'a pas
+# besoin de l'état d'avant.
+COLONNES_CLIENTE = ("effectif", "effectif_exact", "site_web",
+                    "entreprise_email", "entreprise_telephone")
+
+
+def _vide(x) -> bool:
+    return x in (None, "", [], {}) or str(x).strip() == ""
+
+
+def _ordre_valeur_cliente(detruites) -> str:
+    """Le message du renvoi. Il NOMME la valeur : l'agent doit pouvoir la
+    remettre sans la chercher, sinon le rappel lui demande un travail qu'il
+    vient justement de rater."""
+    lignes = ["⚠️ Tu as écrit par-dessus une valeur du fichier de la cliente."]
+    for col, av, ap in detruites:
+        lignes.append("  · %s : elle portait %r, ta fiche porte %r"
+                      % (col, av, ap if not _vide(ap) else "(vide)"))
+    lignes.append("")
+    lignes.append("Remets sa valeur telle quelle. Ce que tu n'as pas pu "
+                  "établir va dans le COMMENTAIRE de la colonne, pas à la "
+                  "place de sa donnée : une abstention remplit un vide, elle "
+                  "ne creuse pas un plein.")
+    return "\n".join(lignes)
+
+
+def _valeurs_cliente_detruites(fiche) -> list:
+    """Les valeurs de la cliente vidées ou remplacées, d'après ce que le
+    SERVEUR a gardé. Rend [(colonne, valeur_avant, valeur_apres), …].
+
+    ⚠️ L'exemption de l'arbitrage se lit ICI et pas ailleurs : une écriture qui
+    porte `retraitement: arbitrage` avec son motif est une décision prévue par
+    la consigne. La réparer serait défaire la règle en silence.
+    """
+    if not isinstance(fiche, dict):
+        return []
+    if (str(_nu(fiche.get("retraitement")) or "") == "arbitrage"
+            and not _vide(_nu(fiche.get("retraitement_motif")))):
+        return []
+    perdues = []
+    for col in COLONNES_CLIENTE:
+        avant = fiche.get("%s.origine" % col)
+        apres = _nu(fiche.get(col))
+        if _vide(avant):
+            continue                      # rien n'a été écrasé sur cette colonne
+        if _vide(apres) or str(apres) != str(avant):
+            perdues.append((col, avant, apres))
+    return perdues
+
+
+def _contact_invente_sur_registre_vide(fiche, dirigeants_reels) -> list:
+    """Des contacts qui invoquent le registre alors qu'il ne nomme personne.
+
+    ⚠️ La garde du nom compare le contact à celui que le registre rend ; elle ne
+    mord pas quand le registre est VIDE, et c'est là qu'une fabrication passe.
+    """
+    if dirigeants_reels or not isinstance(fiche, dict):
+        return []
+    faux = []
+    for c in (fiche.get("contacts") or []):
+        if not isinstance(c, dict):
+            continue
+        prov = str(c.get("nom.comment") or "").strip().lower()
+        nom = _nu(c.get("nom"))
+        if prov.startswith("registre") and not _vide(nom):
+            faux.append(str(nom))
+    return faux
+
+
+def _sirens_etrangers_dans_notes(fiche) -> list:
+    """Des numéros d'entreprise cités dans les notes qui ne sont pas celui de
+    la ligne. Un numéro fabriqué produit un constat d'absence crédible."""
+    if not isinstance(fiche, dict):
+        return []
+    sien = re.sub(r"\D", "", str(_nu(fiche.get("siren")) or ""))
+    texte = " ".join(str(_nu(fiche.get(k)) or "")
+                     for k in ("notes_verification", "qualification_motif",
+                               "retraitement_motif", "motif_ecartement"))
+    vus = {n for n in re.findall(r"(?<!\d)(\d{9})(?!\d)", texte) if n != sien}
+    return sorted(vus)
+
+
 def _ordre_de_renvoi(ligne: Optional[str]) -> str:
     """Ce qu'on redit à un agent qui a conclu sans écrire.
 
@@ -1069,6 +1155,9 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # l'agent. Il ne lui demande plus de reconnaître : il lui laisse le geste, et
     # garde la porte.
     rappels_contact, contact_rattrape, contact_arbitre = 0, False, False
+    # ⚠️ None, pas [] : sans ligne, la boucle ne tourne pas et le poste doit
+    # dire « non mesuré », jamais « aucune destruction ».
+    detruites = None
     ligne_rc = (_ligne_par_alias(mcp, run_id, p.get("org_id"))
                 or _ligne_reservee(res, mcp)
                 or _ligne_par_journal(backend, run_id)
@@ -1097,7 +1186,13 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         trouve = _dirigeant_a_contacter(mcp, _nu((fiche or {}).get("siren")))
         manque = _sans_contact_direction(fiche)
         faux_nom = bool(trouve) and not _nom_present(trouve[0], fiche)
-        if not manque and not faux_nom and not tranche_nn:
+        # ⚠️ Les trois gardes du 01/09 — le harnais ne peut pas refuser
+        # l'écriture, il renvoie l'agent et répare en dernier recours.
+        detruites = _valeurs_cliente_detruites(fiche)
+        inventes = _contact_invente_sur_registre_vide(fiche, trouve)
+        etrangers = _sirens_etrangers_dans_notes(fiche)
+        if (not manque and not faux_nom and not tranche_nn
+                and not detruites and not inventes and not etrangers):
             contact_rattrape = rappels_contact > 0
             break
         # ⚠️ Si l'agent a RÉPONDU sans ajouter de contact — une raison écrite dans
@@ -1109,7 +1204,8 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                         "ajouter de contact, on n'insiste pas", job["id"])
             break
         empreinte_avant = empreinte
-        if not trouve and not tranche_nn:
+        if not trouve and not tranche_nn and not detruites and not inventes \
+                and not etrangers:
             break
         rappels_contact += 1
         motifs = []
@@ -1123,6 +1219,15 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         if tranche_nn:
             motifs.append("« sans salarié » écrit là où le registre rend %r"
                           % tranche_nn)
+        for col, av, ap in detruites:
+            motifs.append("valeur de la cliente %s : %r → %r"
+                          % (col, av, ap))
+        for nom_ in inventes:
+            motifs.append("contact %r attribué au registre, qui ne nomme "
+                          "PERSONNE" % nom_)
+        for si_ in etrangers:
+            motifs.append("numéro %s cité dans les notes, ce n'est pas celui "
+                          "de la ligne" % si_)
         logger.info("job %s : rappel %d/%d — %s",
                     job["id"], rappels_contact, RENVOIS_MAX, " ; ".join(motifs))
         # ⚠️ UN SEUL rappel porte tout ce qui manque : l'agent corrige d'un
@@ -1132,6 +1237,21 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             morceaux.append(_ordre_rappel_contact(trouve[0], trouve[1], ligne_rc))
         if tranche_nn:
             morceaux.append(_ordre_effectif(tranche_nn))
+        if detruites:
+            morceaux.append(_ordre_valeur_cliente(detruites))
+        if inventes:
+            morceaux.append(
+                "⚠️ Un contact que tu attribues au registre n'y est pas : le "
+                "registre ne nomme AUCUNE personne sur cette entreprise. "
+                "Retire cette entrée, ou change sa provenance pour la source "
+                "où tu as réellement lu ce nom. Une fiche sans contact est une "
+                "fiche honnête.")
+        if etrangers:
+            morceaux.append(
+                "⚠️ Tes notes citent le numéro %s, qui n'est pas celui de "
+                "cette ligne. Vérifie le numéro que tu as interrogé : un "
+                "constat d'absence obtenu sur le mauvais numéro n'établit "
+                "rien." % ", ".join(etrangers))
         rappel = "\n\n---\n\n".join(morceaux)
         outils_rappel = tuple(o for o in (p.get("tools") or ())
                               if not str(o).endswith(_CLAIM))
@@ -1162,6 +1282,36 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # dit : la fiche part en arbitrage avec son motif, comme le rappel d'écriture.
     # On n'écrit PAS le contact à sa place — ce serait décider d'une donnée que la
     # cliente recevra, sur une lecture que personne n'a faite.
+    # ⚠️ RÉPARATION — dernier recours, et seulement si le renvoi n'a rien donné.
+    # Le serveur garde la valeur d'avant dans `<colonne>.origine` : on la remet
+    # telle quelle. On n'invente rien, on restaure ce qui était là.
+    #
+    # ⚠️ Elle se compte à part de la destruction : une ligne réparée reste une
+    # FAUTE au verdict. Sans ce compte, la réparation ferait disparaître le
+    # défaut des relevés et l'on croirait la consigne guérie.
+    valeurs_reparees = []
+    if rappels_contact >= RENVOIS_MAX and ligne_rc:
+        try:
+            fiche = backend.row(p["namespace"], ligne_rc, org=p.get("org_id"))
+            restantes = _valeurs_cliente_detruites(fiche)
+            if restantes:
+                backend.patch_row(p["namespace"], ligne_rc,
+                                  {col: av for col, av, _ in restantes},
+                                  org=p.get("org_id"))
+                valeurs_reparees = [c for c, _, _ in restantes]
+                logger.warning("job %s : %d valeur(s) de la cliente restaurée(s) "
+                               "après %d rappels — %s",
+                               job["id"], len(restantes), RENVOIS_MAX,
+                               ", ".join(valeurs_reparees))
+                # on RELIT : une réparation annoncée n'est pas une réparation faite
+                apres = backend.row(p["namespace"], ligne_rc, org=p.get("org_id"))
+                if _valeurs_cliente_detruites(apres):
+                    logger.error("job %s : la restauration a été refusée ou "
+                                 "partielle — la valeur de la cliente est "
+                                 "TOUJOURS perdue", job["id"])
+        except Exception as e:  # noqa: BLE001 — une réparation qui échoue se dit
+            logger.error("job %s : restauration impossible (%s)", job["id"], e)
+
     if rappels_contact >= RENVOIS_MAX and ligne_rc and not contact_rattrape:
         try:
             fiche = backend.row(p["namespace"], ligne_rc, org=p.get("org_id"))
@@ -1301,6 +1451,9 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 # valaient donc rien sur les travaux à ligne inconnue.
                 "rappel_contact_mesure": bool(ligne_rc),
                 "rappels_contact": rappels_contact,
+                "valeurs_cliente_reparees": valeurs_reparees,
+                "valeurs_cliente_detruites": (None if detruites is None
+                                              else [c for c, _, _ in detruites]),
                 # ⚠️ Rendu MÊME À ZÉRO : un zéro lisible dit « aucun cas », un
                 # poste absent ne dit rien. Trente-cinq fiches sur cent au
                 # neuvième passage — si ce compte reste à zéro au suivant, c'est
