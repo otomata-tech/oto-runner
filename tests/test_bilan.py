@@ -343,7 +343,7 @@ def test_une_accumulation_d_absences_ne_prouve_rien():
 def test_les_deux_formes_du_refus_de_creation_sont_comptees():
     from oto_runner.backend import _motif
     assert _motif(
-        "Error calling tool 'data_write': aucune ligne de copie-eval-palier100 ne "
+        "Error calling tool 'data_write': aucune ligne de un-tableau-d-essai ne "
         "porte siren = \"{'valeur': 'NON_RENSEIGNE', 'comment': 'Ligne verrouillée'}\""
     ) == "création refusée par le cran"
     assert _motif("400 business_key_required: la clé `siren` ...") == \

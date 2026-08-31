@@ -35,7 +35,7 @@ FLOTTE="oto-fleet-$nom"
 GARDE="garde-tableaux-$nom"
 PROFILS="garde-profils-$nom"
 # ⚠️ Le tableau surveillé est LU DANS LA DÉCLARATION de flotte, pas supposé.
-# Il valait `copie-eval-palier100` par défaut quelle que soit la flotte : pour
+# Il valait le tableau d'essai par défaut quelle que soit la flotte : pour
 # un passage sur un autre tableau, la garde des profils aurait surveillé le
 # miroir — armée, active, et regardant ce que personne ne touche. Inerte, et
 # rassurante. Un garde-fou qui dépend d'une variable à ne pas oublier est une

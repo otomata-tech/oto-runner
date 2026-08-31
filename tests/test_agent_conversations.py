@@ -251,10 +251,10 @@ def test_le_worker_one_shot_impose_lidentite_de_run_et_le_nom_du_tableau(monkeyp
 
     monkeypatch.setattr(W, "McpSession", Mcp)
     job = _job("start")
-    job["payload"]["namespace"] = "edition-vivier"
+    job["payload"]["namespace"] = "un-tableau-de-production"
     W._traiter(FauxBackend(), job, provider=FauxConv)
     assert '_run_id: "r-ID"' in vu["inputs"] and 'worker: "r-ID"' in vu["inputs"]
-    assert 'namespace: "edition-vivier"' in vu["inputs"]
+    assert 'namespace: "un-tableau-de-production"' in vu["inputs"]
     assert vu["inputs"].endswith("Vas-y."), "l'ordre de la flotte suit, intact"
 
 
