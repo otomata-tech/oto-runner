@@ -13,6 +13,9 @@ from typing import Any, Optional
 import requests
 
 from .deadline import DeadlineExceeded, get_with_deadline, post_with_deadline
+import logging
+
+logger = logging.getLogger(__name__)
 
 _TIMEOUT = (10, 60)
 
@@ -295,8 +298,37 @@ class Backend:
         livrable client, repérée au compte qui passait de 504 à 505). Ici on
         annote une ligne dont on vient de lire l'identifiant : la création est
         impossible par construction."""
-        return self._patch(f"/api/datastore/namespaces/{namespace}/rows/{row_id}",
-                           valeurs, org=org)
+        rep = self._patch(f"/api/datastore/namespaces/{namespace}/rows/{row_id}",
+                          valeurs, org=org)
+        # ⚠️ LE CANAL REST AUSSI. Le relevé de colonnes fantômes lit les sorties
+        # d'outils rendues au modèle ; une écriture faite ici n'y apparaît
+        # JAMAIS. Il a rendu zéro sur cent trois travaux là où la table portait
+        # une colonne non déclarée — pas un rapporteur muet, un relevé qui
+        # regardait un canal ne portant pas ces écritures.
+        #
+        # Une colonne fantôme née d'un geste du HARNAIS est plus grave que celle
+        # d'un agent : personne ne relit ce que le harnais écrit.
+        if isinstance(rep, dict):
+            fantomes = rep.get("hors_schema")
+            if fantomes:
+                logger.warning(
+                    "écriture HORS SCHÉMA par le harnais sur %s/%s : %s — "
+                    "stockée, lisible, et invisible à tout contrôle qui "
+                    "s'appuie sur le schéma", namespace, row_id, fantomes)
+        return rep
+
+    def appels_du_run(self, run_id: str, limit: int = 60) -> list:
+        """Les appels d'outils d'un run, avec leurs ARGUMENTS.
+
+        ⚠️ C'est le seul canal qui porte l'identifiant de la ligne travaillée sur
+        le chemin Conversations : le harnais n'y reçoit pas les résultats
+        d'outils, et toute lecture par les sorties rend None. Sans cette route,
+        le rappel de contact et la garde du `NN` ne s'exécutent jamais.
+        """
+        out = self._get("/api/orgs/226/monitoring/calls",
+                        {"tool": "data_write", "limit": limit})
+        appels = (out or {}).get("calls") or []
+        return [c for c in appels if str(c.get("run_id") or "") == str(run_id)]
 
     # ── le fil d'un run (runs.thread, R1) ────────────────────────────────────
     def thread_append(self, run_id: str, role: str, content: dict,

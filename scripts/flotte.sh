@@ -34,12 +34,35 @@ nom=${2:-}
 FLOTTE="oto-fleet-$nom"
 GARDE="garde-vivier-$nom"
 PROFILS="garde-profils-$nom"
-NS_MIROIR="${NS_MIROIR:-copie-eval-palier100}"
+# ⚠️ Le tableau surveillé est LU DANS LA DÉCLARATION de flotte, pas supposé.
+# Il valait `copie-eval-palier100` par défaut quelle que soit la flotte : pour
+# un passage sur un autre tableau, la garde des profils aurait surveillé le
+# miroir — armée, active, et regardant ce que personne ne touche. Inerte, et
+# rassurante. Un garde-fou qui dépend d'une variable à ne pas oublier est une
+# friction, et la friction se contourne.
+NS_MIROIR="${NS_MIROIR:-}"
 
 case "$geste" in
 lancer)
   yaml=${3:?fichier de flotte}; a=${4:?référence a}; b=${5:?référence b}; c=${6:?référence c}
   [ -f "$yaml" ] || { echo "fichier de flotte introuvable : $yaml"; exit 1; }
+  # ⚠️ Le lot est lu ICI, avant tout le reste : la garde du vivier le reçoit
+  # bien avant l'export, et l'ordre du script suivait l'ordre d'écriture des
+  # correctifs plutôt que l'ordre des besoins (`_lot: unbound variable`).
+  _lot=$(sed -n 's/^[[:space:]]*lot_test:[[:space:]]*//p' "$yaml" | head -1)
+  _arg_lot=""
+  if [ -n "$_lot" ]; then
+    _arg_lot="lot_test=$_lot"
+    echo "instantané : restreint au lot $_lot"
+  fi
+  # Le tableau que la garde des profils doit surveiller : celui que la flotte
+  # travaille, lu dans sa déclaration. Une valeur passée à la main garde la
+  # priorité, mais on ne dépend plus d'elle.
+  if [ -z "$NS_MIROIR" ]; then
+    NS_MIROIR=$(sed -n 's/^namespace:[[:space:]]*//p' "$yaml" | head -1)
+  fi
+  [ -n "$NS_MIROIR" ] || { echo "ABANDON : pas de 'namespace' dans $yaml — la garde des profils n'aurait rien à surveiller."; exit 1; }
+  echo "garde des profils : surveille « $NS_MIROIR » (lu dans la déclaration)"
   # ⚠️ Un lancement AVORTÉ laisse son minuteur derrière lui, et le suivant se
   # voit refuser « unit already exists » — donc refuser de lancer, faute de
   # pouvoir armer sa garde. Le refus est le bon comportement ; le résidu ne l'est
@@ -126,7 +149,7 @@ lancer)
   DEPUIS=$(date -u "+%Y-%m-%d %H:%M:%S")
   echo "fenêtre de la garde : depuis $DEPUIS (le lancement, pas une date fixe)"
   systemd-run --unit="$GARDE" --on-calendar="*:0/2" \
-    --setenv=GARDE_DEPUIS="$DEPUIS" \
+    --setenv=GARDE_DEPUIS="$DEPUIS" --setenv=GARDE_LOT="$_lot" \
     --property=EnvironmentFile="$RACINE/.env" --working-directory="$RACINE" \
     "$PY" "$RACINE/garde-vivier.py" "$a" "$b" "$c" "$FLOTTE" >/dev/null || {
       echo "ABANDON : la garde n'a pas pu être créée — on ne lance pas sans elle."
@@ -153,12 +176,52 @@ lancer)
   # contient des deux côtés devient invisible à la comparaison.
   # Placé après les gardes et avant la flotte : dernier instant où le tableau
   # est intact, premier où la surveillance est en place.
-  if ! "$PY" "$RACINE/exporter-socle.py"; then
+  # ATTENTION Le tableau est PASSE : sans lui, l export sauvegardait le miroir
+  # quel que soit ce que la flotte travaille. Le 31/08 le jalon est parti sur le
+  # fichier de production avec une reference prise sur le tableau d essai — donc
+  # sans reprise possible, et la sortie affichait un succes avec une empreinte.
+  # ⚠️ Le LOT que la flotte travaille, lu dans sa déclaration : le cran de
+  # vacuité de l'export doit porter sur ce qu'il emporte, pas sur le tableau
+  # entier. Le 31/08 il a refusé deux départs à cause de 39 lignes d'essais
+  # antérieurs qui n'appartenaient pas au lot du jalon — un cran qui refuse
+  # pour des lignes qu'il n'emporte pas protège d'un risque imaginaire.
+  # ⚠️ REPRISE : un passage qui repart où il s'est arrêté garde SA référence.
+  # Ré-exporter ferait échouer le cran de vacuité — à juste titre, puisque des
+  # fiches sont déjà écrites — alors que la bonne référence existe déjà et
+  # précède ces écritures. On la déclare, on vérifie qu'elle porte le bon
+  # tableau, et on le DIT : un instantané repris n'est pas un instantané frais.
+  if [ -n "$SOCLE_REPRIS" ]; then
+    [ -f "$SOCLE_REPRIS" ] || { echo "⛔ instantané repris introuvable : $SOCLE_REPRIS"; exit 1; }
+    _ns_repris=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('namespace') or '')" "$SOCLE_REPRIS" 2>/dev/null)
+    if [ "$_ns_repris" != "$NS_MIROIR" ]; then
+      echo "⛔ l'instantané repris porte « $_ns_repris », la flotte travaille « $NS_MIROIR »"
+      exit 1
+    fi
+    echo "instantané REPRIS (pas ré-exporté) : $(basename "$SOCLE_REPRIS")"
+    echo "   md5 : $(md5sum "$SOCLE_REPRIS" | cut -d' ' -f1)"
+    echo "   ⚠️ le bilan compare à CETTE référence, antérieure aux fiches déjà écrites."
+  fi
+  if [ -n "$SOCLE_REPRIS" ]; then
+    _socle="$SOCLE_REPRIS"
+  elif ! "$PY" "$RACINE/exporter-socle.py" "$NS_MIROIR" $_arg_lot; then
     echo "ABANDON : instantané non exporté — on ne lance pas sans référence."
     systemctl stop "$GARDE.timer" "$PROFILS.timer" 2>/dev/null
     exit 1
   fi
   _socle=$(ls -t "$RACINE"/socle-*.json 2>/dev/null | head -1)
+  # ⚠️ PRÉ-VOL : l'instantané est-il celui du tableau que la flotte va traiter ?
+  # Le 31/08 il ne l'était pas — le jalon partait sur la production avec une
+  # référence prise sur le tableau d'essai, et la sortie affichait un succès.
+  # Le nom est dans les deux ; les comparer coûte une ligne.
+  _ns_socle=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(d.get('namespace') or '')" "$_socle" 2>/dev/null)
+  if [ "$_ns_socle" != "$NS_MIROIR" ]; then
+    echo "⛔ REFUS DE LANCER — l'instantané porte « $_ns_socle », la flotte"
+    echo "   travaille « $NS_MIROIR ». Partir ainsi, c'est partir SANS RÉFÉRENCE :"
+    echo "   aucune reprise ne serait possible, et on ne le saurait qu'en essayant."
+    systemctl stop "$GARDE.timer" "$PROFILS.timer" 2>/dev/null
+    exit 1
+  fi
+  echo "pré-vol : l'instantané est bien celui de « $NS_MIROIR » ✅"
   echo "socle exporté par le lancement : $(basename "$_socle")"
   echo "   md5 : $(md5sum "$_socle" | cut -d" " -f1)"
   echo "   ⚠️ à DÉPOSER dans le dossier partagé de la mission avec son empreinte :"

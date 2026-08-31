@@ -250,6 +250,104 @@ def _ligne_reservee(res, mcp) -> Optional[str]:
     return None
 
 
+def _ligne_par_journal(backend, run_id: Optional[str]) -> Optional[str]:
+    """L'identifiant de la ligne, retrouvé dans le JOURNAL DES APPELS du run.
+
+    ⚠️ Dernier recours, et il est devenu le PREMIER en pratique : sur le chemin
+    Conversations le harnais ne reçoit pas les résultats d'outils, donc la
+    lecture par les sorties rend None à chaque travail. Le journal, lui, porte
+    les arguments de chaque appel — et l'écriture de l'agent porte l'identifiant
+    de sa ligne.
+
+    Sans ce recours, le rappel de contact et la garde du `NN` ne s'exécutent
+    jamais et leurs compteurs rendent zéro : indiscernable de « aucun cas ».
+    """
+    if not run_id:
+        return None
+    try:
+        appels = backend.appels_du_run(run_id)
+    except Exception as e:  # noqa: BLE001 — pas de journal, pas de ligne
+        logger.warning("ligne par journal indisponible (%s)", e)
+        return None
+    for a in reversed(appels or []):
+        args = (a or {}).get("args") or {}
+        rid = args.get("id")
+        if rid and str(rid) != "@claimed":
+            trouve = re.search(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                str(rid))
+            if trouve:
+                return trouve.group(0)
+    return None
+
+
+def _ligne_par_table(backend, p: dict, depuis: Optional[str],
+                     estampille: Optional[dict]) -> Optional[str]:
+    """La ligne travaillée, retrouvée en relisant le tableau. Non certain.
+
+    ⚠️ Dernier recours, employé quand ni les sorties d'outils ni le journal ne
+    donnent l'identifiant — c'est-à-dire, sur le chemin Conversations, toujours.
+
+    Il cherche les lignes mises à jour depuis le début du travail et portant
+    l'estampille de ce passage. **S'il en trouve plusieurs, il rend None** : à
+    trois agents en parallèle, deux lignes peuvent tomber dans la même fenêtre,
+    et une garde qui agit sur la mauvaise ligne est pire qu'une garde qui ne
+    s'exécute pas.
+    """
+    if not depuis:
+        return None
+    version = (estampille or {}).get("version_procedure")
+    try:
+        lignes = backend.rows(p["namespace"], org=p.get("org_id"), limit=500)
+    except Exception as e:  # noqa: BLE001 — pas de relecture, pas de verdict
+        logger.warning("ligne par table indisponible (%s)", e)
+        return None
+    candidates = []
+    for r in lignes or []:
+        maj = str(r.get("_updated_at") or "")
+        if not maj or maj < depuis:
+            continue
+        if version:
+            v = r.get("version_procedure")
+            v = v.get("valeur") if isinstance(v, dict) and "valeur" in v else v
+            if v != version:
+                continue
+        candidates.append(str(r.get("_id")))
+    if len(candidates) == 1:
+        return candidates[0]
+    if candidates:
+        logger.warning("ligne par table AMBIGUË (%d candidates) — on ne devine "
+                       "pas : les gardes resteront non mesurées sur ce travail",
+                       len(candidates))
+    return None
+
+
+def _ligne_par_alias(mcp, run_id: Optional[str], org) -> Optional[str]:
+    """La ligne que le travail tient, demandée AU SERVEUR.
+
+    ⚠️ Premier recours, et le seul certain : les sorties d'outils sont vides sur
+    le chemin Conversations, le journal ne porte que l'alias, et relire le
+    tableau est ambigu à plusieurs agents.
+
+    Une seule condition, éprouvée : **la ligne doit être encore tenue.** L'alias
+    refuse dès qu'elle est relâchée — c'est pourquoi la tâche ne demande plus à
+    l'agent de la libérer. Le harnais n'a pas besoin de connaître la ligne : il
+    lui suffit de tenir le jeton du travail, et celui-là il l'a toujours.
+    """
+    if not run_id:
+        return None
+    try:
+        rep = mcp.outil("data_rows", {"namespace": "@claimed", "id": "@claimed",
+                                      "_run_id": run_id, "_org": org})
+    except Exception as e:  # noqa: BLE001 — plus de réservation, plus de ligne
+        logger.info("ligne par alias indisponible (%s)", str(e)[:120])
+        return None
+    trouve = re.search(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        json.dumps(rep, ensure_ascii=False))
+    return trouve.group(0) if trouve else None
+
+
 def _ordre_de_renvoi(ligne: Optional[str]) -> str:
     """Ce qu'on redit à un agent qui a conclu sans écrire.
 
@@ -287,7 +385,8 @@ def _lignes_rendues(res) -> Optional[int]:
     dirait « aucune ligne rendue » là où il faut lire « pas mesuré ».
     """
     sorties = getattr(res, "raw_outputs", None)
-    if not sorties:
+    if not sorties or not _sorties_exploitables(res):
+        # ⚠️ « rien trouvé » et « rien à regarder » ne sont pas la même chose.
         return None
     total = 0
     for e in sorties:
@@ -396,6 +495,23 @@ def _claim_sans_ligne(nom: str, sortie: str) -> bool:
     return isinstance(charge, dict) and "row" in charge and charge["row"] is None
 
 
+def _sorties_exploitables(res) -> bool:
+    """Y a-t-il seulement quelque chose à lire dans les sorties d'outils ?
+
+    ⚠️ Sur le chemin Conversations, `raw_outputs` existe mais ne porte AUCUN
+    résultat d'outil : la boucle de lecture ne trouve rien, et les postes qui
+    s'en servent rendent zéro. Mesuré sur le neuvième passage : vingt travaux
+    sur vingt, trois postes à zéro, et `claims_mesures` à False partout.
+
+    Un zéro obtenu d'un canal vide est indiscernable d'un zéro mérité. Ce test
+    sépare les deux, et il est la condition de tous les postes qui suivent.
+    """
+    for e in (getattr(res, "raw_outputs", None) or []):
+        if (e or {}).get("type") == "tool.execution" and e.get("info") is not None:
+            return True
+    return False
+
+
 def _hors_perimetre(res) -> Optional[int]:
     """Combien de résultats de recherche ont été ÉCARTÉS par le périmètre.
 
@@ -409,7 +525,8 @@ def _hors_perimetre(res) -> Optional[int]:
     règle de la journée — un poste dit ce qu'il vaut, ou il ment par omission.
     """
     sorties = getattr(res, "raw_outputs", None)
-    if not sorties:
+    if not sorties or not _sorties_exploitables(res):
+        # ⚠️ « rien trouvé » et « rien à regarder » ne sont pas la même chose.
         return None
     total = 0
     for e in sorties:
@@ -443,7 +560,8 @@ def _hors_schema(res) -> Optional[Dict[str, int]]:
     « aucune colonne fantôme » là où il faut lire « pas mesuré ».
     """
     sorties = getattr(res, "raw_outputs", None)
-    if not sorties:
+    if not sorties or not _sorties_exploitables(res):
+        # ⚠️ « rien trouvé » et « rien à regarder » ne sont pas la même chose.
         return None
     par_colonne: Dict[str, int] = {}
     for e in sorties:
@@ -528,6 +646,36 @@ def _dirigeant_a_contacter(mcp, siren: str) -> Optional[tuple]:
     return None
 
 
+def _effectif_non_atteste(mcp, siren: str, fiche: Optional[dict]) -> Optional[str]:
+    """La fiche affirme-t-elle une absence de salarié que le registre n'atteste pas ?
+
+    Rend la tranche réelle du registre quand l'affirmation n'est pas fondée,
+    sinon None. **None aussi quand on n'a pas pu demander** — une absence de
+    réponse n'est pas une absence de faute.
+
+    ⚠️ `NN` au registre veut dire NON RENSEIGNÉ, pas « zéro salarié ». Écrire
+    `sans_salarie` là-dessus, c'est transformer « on ne sait pas » en « il n'y
+    en a pas », dans une colonne que la commerciale lit pour décider qui
+    démarcher. Mesuré le 31/08 : trente-cinq fiches sur cent, et trente-cinq
+    sur trente-cinq portaient `NN` au registre — zéro exception.
+    """
+    if not fiche or _nu(fiche.get("effectif")) != "sans_salarie" or not siren:
+        return None
+    try:
+        rep = mcp.outil("fr_get", {"siren": str(siren)})
+    except Exception as e:  # noqa: BLE001 — pas de réponse n'est pas une absence
+        logger.warning("garde NN : registre injoignable sur %s (%s)", siren, e)
+        return None
+    brut = json.dumps(rep, ensure_ascii=False) if not isinstance(rep, str) else rep
+    m = re.search(r'"tranche_effectif_salarie"\s*:\s*"?([^",}]{0,20})', brut)
+    if not m:
+        return None
+    tranche = (m.group(1) or "").strip()
+    # Une tranche VIDE ou `NN` n'atteste rien. Une tranche « 00 » atteste bien
+    # zéro salarié : dans ce cas la fiche a raison et on ne dit rien.
+    return tranche if tranche.upper() in ("NN", "", "NULL", "NONE") else None
+
+
 def _sans_contact_direction(fiche: Optional[dict]) -> bool:
     """La fiche porte-t-elle un contact de direction ? Sur la fiche RELUE."""
     # ⚠️ `None` (pas lu) et `{}` (lu, vide) ne disent PAS la même chose. La
@@ -544,6 +692,20 @@ def _sans_contact_direction(fiche: Optional[dict]) -> bool:
         if isinstance(c, dict) and str(_nu(c.get("categorie"))) == "direction":
             return False
     return True
+
+
+def _ordre_effectif(tranche: str) -> str:
+    """Le fait en main : ce que le registre rend, et ce que la fiche affirme."""
+    return (
+        f"Ta fiche écrit `effectif: \"sans_salarie\"`, mais le registre rend "
+        f"**{tranche or 'NN'}** sur cette entreprise — et `NN` veut dire NON "
+        f"RENSEIGNÉ, pas « zéro salarié ».\n\n"
+        f"Écrire « sans salarié » là-dessus affirme une absence que rien "
+        f"n'atteste, dans une colonne qu'une commerciale lit pour décider qui "
+        f"démarcher.\n\n"
+        f"Deux issues : écris `effectif: \"non_renseigne\"` — c'est ce que la "
+        f"source dit —, ou, si une autre source établit vraiment l'absence de "
+        f"salarié, écris LAQUELLE dans `notes_verification`.")
 
 
 def _ordre_rappel_contact(nom: str, qualite: str, ligne: Optional[str]) -> str:
@@ -788,6 +950,9 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # taire ; on peut REFUSER QUE SON SILENCE COMPTE COMME UN TRAVAIL FINI, et lui
     # rendre la main AU MOMENT DE LA FAUTE, seul endroit où la phrase est encore
     # actionnable. Deux rappels, puis l'abandon s'enregistre au lieu de se taire.
+    # L'heure de départ du travail : elle borne la recherche de la ligne quand
+    # aucun canal ne donne son identifiant.
+    debut_travail = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     renvois, abandon = 0, False
     while renvois < RENVOIS_MAX:
         faits = {s.tool for s in res.steps if s.ok}
@@ -861,15 +1026,28 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # l'agent. Il ne lui demande plus de reconnaître : il lui laisse le geste, et
     # garde la porte.
     rappels_contact, contact_rattrape, contact_arbitre = 0, False, False
-    ligne_rc = _ligne_reservee(res, mcp)
+    ligne_rc = (_ligne_par_alias(mcp, run_id, p.get("org_id"))
+                or _ligne_reservee(res, mcp)
+                or _ligne_par_journal(backend, run_id)
+                or _ligne_par_table(backend, p, debut_travail, estampille))
     empreinte_avant = None
+    # ⚠️ Sans la ligne, la boucle ne tourne pas — et son compteur rendrait zéro,
+    # indiscernable de « aucun cas à attraper ». Sur le chemin Conversations le
+    # harnais ne connaît pas toujours la ligne : il lit les sorties d'outils que
+    # le fournisseur veut bien rendre. Un relevé qui ne sait pas doit le DIRE.
+    if not ligne_rc:
+        logger.warning("job %s : ligne inconnue — le rappel de contact et la "
+                       "garde du NN ne peuvent pas s'exécuter ; leurs comptes "
+                       "sont NON MESURÉS, pas nuls", job["id"])
     while ligne_rc and not abandon and rappels_contact < RENVOIS_MAX:
         try:
             fiche = backend.row(p["namespace"], ligne_rc, org=p.get("org_id"))
         except Exception as e:  # noqa: BLE001 — pas de fiche relue, pas de verdict
             logger.warning("rappel contact : fiche illisible (%s)", e)
             break
-        if not _sans_contact_direction(fiche):
+        tranche_nn = _effectif_non_atteste(
+            mcp, _nu((fiche or {}).get("siren")), fiche)
+        if not _sans_contact_direction(fiche) and not tranche_nn:
             contact_rattrape = rappels_contact > 0
             break
         # ⚠️ Si l'agent a RÉPONDU sans ajouter de contact — une raison écrite dans
@@ -882,14 +1060,26 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             break
         empreinte_avant = empreinte
         trouve = _dirigeant_a_contacter(mcp, _nu((fiche or {}).get("siren")))
-        if not trouve:
+        if not trouve and not tranche_nn:
             break
-        nom, qualite = trouve
         rappels_contact += 1
-        logger.info("job %s : contact de direction manquant — rappel %d/%d "
-                    "(le registre nomme %s, qualité %s)",
-                    job["id"], rappels_contact, RENVOIS_MAX, nom, qualite)
-        rappel = _ordre_rappel_contact(nom, qualite, ligne_rc)
+        motifs = []
+        if trouve:
+            motifs.append("contact de direction manquant (le registre nomme "
+                          "%s, qualité %s)" % (trouve[0], trouve[1]))
+        if tranche_nn:
+            motifs.append("« sans salarié » écrit là où le registre rend %r"
+                          % tranche_nn)
+        logger.info("job %s : rappel %d/%d — %s",
+                    job["id"], rappels_contact, RENVOIS_MAX, " ; ".join(motifs))
+        # ⚠️ UN SEUL rappel porte tout ce qui manque : l'agent corrige d'un
+        # coup et le travail ne paie pas deux fois le prix d'un aller-retour.
+        morceaux = []
+        if trouve:
+            morceaux.append(_ordre_rappel_contact(trouve[0], trouve[1], ligne_rc))
+        if tranche_nn:
+            morceaux.append(_ordre_effectif(tranche_nn))
+        rappel = "\n\n---\n\n".join(morceaux)
         outils_rappel = tuple(o for o in (p.get("tools") or ())
                               if not str(o).endswith(_CLAIM))
         try:
@@ -1051,7 +1241,19 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 # rendrait la mesure aveugle à ce qu'il corrige : un zéro de
                 # contacts perdus au passage suivant ne dirait plus si c'est la
                 # consigne qui a porté ou le harnais qui a rattrapé.
+                # ⚠️ Le poste dit d'abord s'il a PU mesurer : sans la ligne
+                # réservée, la boucle ne tourne pas et un zéro ne voudrait rien
+                # dire. C'est la règle « non mesuré, jamais zéro » appliquée à
+                # mon propre relevé — les zéros des passages précédents ne
+                # valaient donc rien sur les travaux à ligne inconnue.
+                "rappel_contact_mesure": bool(ligne_rc),
                 "rappels_contact": rappels_contact,
+                # ⚠️ Rendu MÊME À ZÉRO : un zéro lisible dit « aucun cas », un
+                # poste absent ne dit rien. Trente-cinq fiches sur cent au
+                # neuvième passage — si ce compte reste à zéro au suivant, c'est
+                # que la garde n'a rien eu à attraper, et il faut pouvoir le
+                # distinguer d'une garde inerte.
+                "effectif_non_atteste": bool(locals().get("tranche_nn")),
                 "contact_rattrape": bool(contact_rattrape),
                 "contact_arbitre": bool(contact_arbitre),
                 "ligne_abandonnee": abandon}
