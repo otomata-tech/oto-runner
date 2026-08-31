@@ -77,6 +77,7 @@ avec = [r for r in lignes if v(r.get("effectif")) not in (None, "")]
 print("population : %d ligne(s) · portant un effectif : %d" % (len(lignes), len(avec)))
 
 faux, justes, sans_code = [], 0, 0
+affirme_muet, hors_registre = [], []
 import re
 for r in avec:
     siren = str(v(r.get("siren")))
@@ -89,7 +90,14 @@ for r in avec:
     m = re.search(r'"tranche_effectif_salarie"\s*:\s*"?([^",}]{0,6})',
                   json.dumps(rep, ensure_ascii=False))
     if not m:
-        sans_code += 1
+        # ⚠️ SOURCE MUETTE — le registre ne rend rien. La valeur n'est pas
+        # confrontable ; la PROVENANCE l'est. Elle se lit À PLAT.
+        prov = str(r.get("effectif.comment") or "").strip().lower()
+        if prov.startswith("registre"):
+            affirme_muet.append((siren, ecrit, " ".join(prov.split())[:70]))
+        else:
+            hors_registre.append((siren, ecrit,
+                                  (prov.split("—")[0].strip() or "(sans provenance)")))
         continue
     code = (m.group(1) or "").strip().upper()
     attendu, sens = TABLE.get(code, (None, "code inconnu de la table"))
@@ -104,10 +112,18 @@ print("\n=== LE DÉCODAGE, ÉCART PAR ÉCART ===")
 print("  bien traduits            : %d" % justes)
 print("  MAL TRADUITS             : %d" % len(faux))
 print("  code du registre illisible : %d" % sans_code)
+print("  ⛔ AFFIRME LE REGISTRE ALORS QU'IL SE TAIT : %d   (éliminatoire)"
+      % len(affirme_muet))
+for siren, ecrit, prov in affirme_muet[:10]:
+    print("     ⛔ %s · écrit %-14s · dit : %s" % (siren, ecrit, prov))
+print("  effectif non confrontable au registre, source légitime : %d   (descriptif)"
+      % len(hors_registre))
+for siren, ecrit, mot in hors_registre[:6]:
+    print("     · %s · écrit %-14s · provenance : %s" % (siren, ecrit, mot))
 for siren, code, ecrit, sens in faux[:20]:
     print("  ⛔ %s · registre rend %-3s · fiche écrit %-14s · %s"
           % (siren, code, ecrit, sens))
-if not faux and justes:
+if not faux and not affirme_muet and justes:
     print("  ✅ toutes les tranches écrites disent ce que le code signifie.")
 if sans_code:
     print("  ⚠️ %d non mesurées — ce n'est pas « justes », c'est « pas su »."
