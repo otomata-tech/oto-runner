@@ -811,7 +811,7 @@ def _nom_present(attendu: str, fiche: Optional[dict]) -> bool:
 
     ⚠️ C'est la véracité, pas la présence. Une garde qui vérifie qu'une case est
     remplie ne vérifie pas qu'elle est remplie juste : sur le jalon du 31/08,
-    une fiche portait « SARL LES ÉDITIONS DU LIVRE » comme contact de direction
+    une fiche portait ⟨une SOCIÉTÉ⟩ comme contact de direction
     là où le registre nomme une personne physique — le dirigeant réel manqué, et
     le rappel muet parce que la case était pleine.
 
