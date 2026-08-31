@@ -158,15 +158,40 @@ PYESSAI
     _servi=$("$PY" - "$NS_MIROIR" <<'PYCRAN'
 import json, os, sys, urllib.request
 ns = sys.argv[1]
-H = {"Authorization": "Bearer " + os.environ["OTO_TOKEN"], "X-Oto-Org": "226"}
-d = json.load(urllib.request.urlopen(urllib.request.Request(
-    "https://mcp.oto.cx/api/datastore/namespaces/%s/schema" % ns,
-    headers=H), timeout=90))
+# ⚠️ Le jeton n'est pas dans l'environnement d'un heredoc : sans ce chargement,
+# le lecteur lève, rend du vide, et le vide se lit « aucun périmètre ».
+if not os.environ.get("OTO_TOKEN"):
+    try:
+        for _l in open("/opt/oto-runner/.env", encoding="utf-8"):
+            if "=" in _l and not _l.strip().startswith("#"):
+                _k, _v = _l.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip().strip('"'))
+    except OSError:
+        pass
+if not os.environ.get("OTO_TOKEN"):
+    print("ILLISIBLE:pas de jeton")
+    raise SystemExit(0)
+try:
+    H = {"Authorization": "Bearer " + os.environ["OTO_TOKEN"], "X-Oto-Org": "226"}
+    d = json.load(urllib.request.urlopen(urllib.request.Request(
+        "https://mcp.oto.cx/api/datastore/namespaces/%s/schema" % ns,
+        headers=H), timeout=90))
+except Exception as e:
+    print("ILLISIBLE:%s" % type(e).__name__)   # dit par le lecteur, pas déduit
+    raise SystemExit(0)
 c = d.get("schema") if isinstance(d.get("schema"), dict) else d
 st = next((f for f in (c.get("fields") or []) if f.get("key") == "statut"), {})
 print(((st.get("lifecycle") or {}).get("claimable") or {}).get("lot_test") or "")
 PYCRAN
 )
+    case "$_servi" in
+      ILLISIBLE:*)
+        echo "⛔ REFUS DE LANCER — LE PÉRIMÈTRE SERVI EST ILLISIBLE (${_servi#ILLISIBLE:})"
+        echo "   Le cran n'a pas pu lire ce que le tableau réserve. Ce n'est PAS"
+        echo "   la même chose qu'un périmètre absent : il refuse sans conclure."
+        echo "   Rien n'a été armé."
+        exit 1 ;;
+    esac
     if [ "$_servi" != "$_lot" ]; then
       echo "⛔ REFUS DE LANCER — périmètre de réservation servi : « ${_servi:-AUCUN} »"
       echo "   la déclaration demande le lot « $_lot »."
