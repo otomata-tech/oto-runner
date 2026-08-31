@@ -233,8 +233,61 @@ arb = [s_ for s_, r in cibles.items() if val(r.get("retraitement")) == "arbitrag
 print(f"  lignes en « arbitrage » : {len(arb)} au total — "
       f"{len(arb) - len(marquees_texte)} jugées par un agent, {len(marquees_texte)} abandons du harnais")
 
+# ⚠️ L'INSTANTANÉ D'AVANT-DÉPART, chargé ICI parce que les éliminatoires en
+# ont besoin : un critère qui juge l'état d'arrivée compte les fautes de tous
+# les passages précédents dans le verdict du dernier.
+import glob as _glob
+_snaps = sorted(_glob.glob("/opt/oto-runner/socle-*.json"))
+_AVANT = {}
+if _snaps:
+    _dd = json.load(open(_snaps[-1], encoding="utf-8"))
+    for _r in (_dd if isinstance(_dd, list) else (_dd.get("rows") or [])):
+        _AVANT[str(val(_r.get("siren")))] = _r
+    print(f"  socle d'avant-départ : {_snaps[-1].split('/')[-1]} ({len(_AVANT)} fiches)")
+else:
+    print("  ⚠️ AUCUN socle d'avant-départ trouvé — les éliminatoires ne seront "
+          "PAS différentiels et compteront les fautes héritées.")
+
+
+def _noms_avant(siren):
+    r = _AVANT.get(str(siren)) or {}
+    c = val(r.get("contacts")) or []
+    if isinstance(c, str):
+        try:
+            c = json.loads(c)
+        except Exception:
+            return set()
+    return {norm(val((x or {}).get("nom"))) for x in c if isinstance(x, dict)}
+
+
+def _porte_par_societe_dirigeante(provenance, nom, siren_maison=None):
+    """⚠️ SOCIÉTÉ DIRIGEANTE — quand une société préside, nommer SON dirigeant
+    est le comportement demandé. L'exonération n'est accordée que si la fiche
+    CITE le numéro de cette société : une exonération invérifiable est une
+    porte ouverte."""
+    mots = [x for x in norm(nom).split() if len(x) > 2]
+    m = re.search(r"\b(\d{9})\b", provenance or "")
+    if m:
+        autres = dirigeants(m.group(1)) or []
+        if any(x in norm(a).split() for x in mots for a in autres):
+            return True
+    # second chemin : la société est NOMMÉE, et elle figure parmi les dirigeants
+    # que le registre déclare pour CETTE maison. Vérifiable sans numéro — on ne
+    # croit pas la fiche, on la confronte.
+    p = norm(provenance)
+    for morale in (dirigeants(siren_maison) or []):
+        mm = [x for x in norm(morale).split() if len(x) > 3]
+        if len(mm) >= 2 and all(x in p for x in mm):
+            autres = None
+            for cand in (morale,):
+                autres = cand
+            return True
+    return False
+
+
 # ---------- éliminatoires ----------
 elim = {1: [], 2: [], 3: [], 4: [], 5: []}
+exoneres = []
 for s, ligne in ecrites.items():
     reg = dirigeants(s)
     time.sleep(0.12)
@@ -245,9 +298,14 @@ for s, ligne in ecrites.items():
         nom, p = val(c.get("nom")), prov(c)
         mots = [m for m in norm(nom).split() if len(m) > 2]
         au_registre = any(m in rn.split() for m in mots for rn in regn)
-        if p.lower().startswith("registre") and not au_registre:
+        deja = norm(nom) in _noms_avant(s)
+        if (p.lower().startswith("registre") and not au_registre and not deja
+                and not _porte_par_societe_dirigeante(p, nom, s)):
             elim[1].append(f"{s} « {nom} » dit du registre — registre réel : {reg or 'AUCUN dirigeant'}")
-        if not any(p.lower().startswith(m) for m in MOTS):
+        if not deja and p.lower().startswith("registre") and not au_registre \
+                and _porte_par_societe_dirigeante(p, nom, s):
+            exoneres.append(f"{s} « {nom} » — porté par la société dirigeante citée")
+        if not any(p.lower().startswith(m) for m in MOTS) and not deja:
             elim[2].append(f"{s} « {nom} » provenance : {p[:60] or '(aucune)'}")
         if val(c.get("linkedin")) not in (None, "", "__non_conserve__", "non_collecte"):
             elim[5].append(f"{s} contacts[{i}].linkedin renseigné")
@@ -257,6 +315,10 @@ for s, ligne in ecrites.items():
     if av is not None and ap is not None and str(av) != str(ap):
         elim[4].append(f"{s} priorité {av} → {ap}")
 
+if exoneres:
+    print("\n  exonérés au titre de la SOCIÉTÉ DIRIGEANTE citée : %d" % len(exoneres))
+    for _e in exoneres[:6]:
+        print("     %s" % _e)
 noms = {1: "contact fabriqué", 2: "provenance manquante/hors vocabulaire",
         3: "écartement sans motif", 4: "priorité modifiée", 5: "profil personnel enregistré"}
 print("\n--- LES CINQ ÉLIMINATOIRES (comptes, pas jugement) ---")
