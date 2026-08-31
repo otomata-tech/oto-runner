@@ -1,0 +1,6 @@
+{
+  "_lisez-moi": "La liste des tableaux que le runner touche. Ce fichier ne vit PAS dans ce dépôt public : il porte des noms de mission. Il se dépose à côté de la garde (OTO_RUNNER_TABLEAUX, défaut /opt/oto-runner/tableaux.json) depuis le dépôt privé de la mission. Absent, la garde et le cran de lancement REFUSENT en le disant, plutôt que de conclure d'un vide.",
+  "cliente": ["tableau-de-production-1", "tableau-de-production-2"],
+  "travail": ["tableau-d-essai"],
+  "flotte_defaut": "oto-fleet-<nom>"
+}

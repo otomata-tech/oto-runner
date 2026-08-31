@@ -32,7 +32,7 @@ nom=${2:-}
 [ -n "$geste" ] && [ -n "$nom" ] || { sed -n '/^# Usage/,/^$/p' "$0"; exit 2; }
 
 FLOTTE="oto-fleet-$nom"
-GARDE="garde-vivier-$nom"
+GARDE="garde-tableaux-$nom"
 PROFILS="garde-profils-$nom"
 # ⚠️ Le tableau surveillé est LU DANS LA DÉCLARATION de flotte, pas supposé.
 # Il valait `copie-eval-palier100` par défaut quelle que soit la flotte : pour
@@ -115,26 +115,21 @@ lancer)
   # de cliente oublié, lui, reste exigeant. La liste est LUE dans la garde, pas
   # recopiée.
   _essai=$("$PY" - "$NS_MIROIR" <<'PYESSAI'
-import ast, os, sys
-p = "/opt/oto-runner/garde-vivier.py"
+import json, os, sys
+p = os.environ.get("OTO_RUNNER_TABLEAUX", "/opt/oto-runner/tableaux.json")
 if not os.path.exists(p):
     print("absent")          # ⚠️ dit par le lecteur, pas déduit d'un vide
     raise SystemExit(0)
-src = open(p, encoding="utf-8").read()
-noms = ()
-for n in ast.parse(src).body:
-    if isinstance(n, ast.Assign) and any(
-            getattr(t, "id", "") == "TRAVAIL" for t in n.targets):
-        noms = tuple(ast.literal_eval(n.value))
+noms = tuple(json.load(open(p, encoding="utf-8")).get("travail") or ())
 print("oui" if sys.argv[1] in noms else "non")
 PYESSAI
 )
   if [ "$_essai" = "absent" ] || [ -z "$_essai" ]; then
     echo "⛔ REFUS DE LANCER — LISTE DES TABLEAUX D'ESSAI INTROUVABLE"
-    echo "   « garde-vivier.py » est absente ou illisible : le cran ne peut pas"
-    echo "   savoir si « $NS_MIROIR » est un tableau d'essai. Il refuse plutôt"
-    echo "   que de deviner. ⚠️ Cette liste n'est pas versionnée — elle ne vit"
-    echo "   que sur la box. Rien n'a été armé."
+    echo "   la liste des tableaux est absente ou illisible : le cran ne peut"
+    echo "   pas savoir si « $NS_MIROIR » est un tableau d'essai. Il refuse"
+    echo "   plutôt que de deviner. ⚠️ Cette liste vit dans le dépôt privé de"
+    echo "   la mission et se dépose ici. Rien n'a été armé."
     exit 1
   fi
   if [ "$_essai" != "oui" ] && [ -z "$_lot" ]; then
@@ -240,7 +235,7 @@ PYCRAN
   systemd-run --unit="$GARDE" --on-calendar="*:0/2" \
     --setenv=GARDE_DEPUIS="$DEPUIS" --setenv=GARDE_LOT="$_lot" \
     --property=EnvironmentFile="$RACINE/.env" --working-directory="$RACINE" \
-    "$PY" "$RACINE/garde-vivier.py" "$a" "$b" "$c" "$FLOTTE" >/dev/null || {
+    "$PY" "$RACINE/garde-tableaux.py" "$a" "$b" "$c" "$FLOTTE" >/dev/null || {
       echo "ABANDON : la garde n'a pas pu être créée — on ne lance pas sans elle."
       exit 1; }
   echo "garde $GARDE armée (toutes les 2 min, elle arrête $FLOTTE)"
