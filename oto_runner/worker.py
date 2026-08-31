@@ -123,8 +123,8 @@ def _ordre_one_shot(ordre: str, run_id: str, payload: dict,
     des milliers de fiches travaillées pour rien. Le worker connaît le run_id
     avant de lancer la conversation : il l'impose dans l'ordre, l'agent le pose
     comme il pose déjà `_project`. Même geste pour le NOM EXACT du tableau : le
-    modèle inventait des slots et des variantes (`slot:edition-vivier`,
-    `edition_vivier`, `220-edition-vivier` — 700+ refus)."""
+    modèle inventait des slots et des variantes du nom (`slot:<nom>`, le nom
+    avec des soulignés, le nom préfixé du numéro de projet — 700+ refus)."""
     ns = (payload or {}).get("namespace") or ""
     projet = (payload or {}).get("project_id")
     identite = (
