@@ -388,11 +388,21 @@ def _valeurs_cliente_detruites(fiche) -> list:
     """
     if not isinstance(fiche, dict):
         return []
-    if (str(_nu(fiche.get("retraitement")) or "") == "arbitrage"
-            and not _vide(_nu(fiche.get("retraitement_motif")))):
-        return []
+    # ⚠️ L'exemption couvre le GESTE d'arbitrer, pas l'ÉTAT de la ligne. Une
+    # ligne qui portait déjà un arbitrage n'est pas un blanc-seing pour l'agent
+    # suivant : les cinq arbitrages posés le 31/08 sont dans le lot de
+    # production, et sans ce resserrement une destruction y passait invisible.
+    arbitre = (str(_nu(fiche.get("retraitement")) or "") == "arbitrage"
+               and not _vide(_nu(fiche.get("retraitement_motif"))))
     perdues = []
     for col in COLONNES_CLIENTE:
+        if arbitre and col == "effectif":
+            # ⚠️ ABSTENTIONS — un arbitrage retient la valeur du REGISTRE, une
+            # tranche précise. « non renseigné » n'est jamais le résultat d'un
+            # arbitrage : c'est le renoncement qu'on combat. L'exemption ne le
+            # couvre donc pas, même sur une ligne arbitrée.
+            if str(_nu(fiche.get(col)) or "") != "non_renseigne":
+                continue
         avant = fiche.get("%s.origine" % col)
         apres = _nu(fiche.get(col))
         if _vide(avant):
