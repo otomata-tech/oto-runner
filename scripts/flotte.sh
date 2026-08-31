@@ -44,6 +44,24 @@ NS_MIROIR="${NS_MIROIR:-}"
 
 case "$geste" in
 lancer)
+  # ⚠️ ENVIRONNEMENT CHARGÉ ICI, avant tout cran. Le jeton et l'id de connecteur
+  # vivent dans le fichier d'environnement ; un script appelé directement ne les
+  # a pas. Deux crans ont échoué au même départ pour cette seule raison — l'un
+  # en concluant « périmètre absent », l'autre en abandonnant sur la sonde.
+  if [ -f "$RACINE/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$RACINE/.env"
+    set +a
+  fi
+  for _v in OTO_TOKEN OTO_RUNNER_CONNECTOR_ID; do
+    if [ -z "$(eval echo "\$$_v")" ]; then
+      echo "⛔ REFUS DE LANCER — $_v absent de l'environnement ET de $RACINE/.env."
+      echo "   Les crans en aval le découvriraient chacun à sa façon, en donnant"
+      echo "   chacun une raison différente et fausse. Rien n'a été armé."
+      exit 1
+    fi
+  done
   yaml=${3:?fichier de flotte}; a=${4:?référence a}; b=${5:?référence b}; c=${6:?référence c}
   [ -f "$yaml" ] || { echo "fichier de flotte introuvable : $yaml"; exit 1; }
   # ⚠️ Le lot est lu ICI, avant tout le reste : la garde du vivier le reçoit
