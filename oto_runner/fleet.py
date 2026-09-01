@@ -146,6 +146,43 @@ def load_spec(path: str) -> FleetSpec:
         name=os.path.splitext(os.path.basename(path))[0])
 
 
+def spec_depuis_flotte(f: dict) -> FleetSpec:
+    """Une spec construite depuis la flotte DÉCLARÉE en base.
+
+    C'est le pendant de `load_spec` : la même chose, lue là où le dashboard et
+    les agents la lisent aussi. **Un passage piloté par sa configuration en base
+    est le même objet pour tout le monde** — piloté par un fichier posé à côté de
+    l'exécutable, il n'existe que pour qui a accès à la machine.
+
+    ⚠️ Ce qui n'a PAS d'équivalent en base reste au défaut du runner :
+    `ramp_seconds`, `critical_tools` et la cadence du bilan sont des réglages
+    d'EXÉCUTION locale, pas de la configuration déclarée du passage. Les inventer
+    en base pour « tout avoir au même endroit » mélangerait ce qu'un opérateur
+    déclare et ce qu'une machine règle.
+    """
+    manquants = [c for c in ("id", "procedure") if not f.get(c)]
+    if manquants:
+        raise ValueError(
+            f"flotte illisible — champs absents : {', '.join(manquants)}. "
+            "Une flotte se déclare avant d'être pilotée.")
+    return FleetSpec(
+        procedure=f["procedure"],
+        namespace=f.get("namespace") or "",
+        tools=tuple(f.get("tools") or ()),
+        filter=dict(f.get("row_filter") or {}),
+        project=f.get("project_id"),
+        org=f.get("org_id"),
+        concurrency=int(f.get("workers") or 3),
+        volume=f.get("max_rows"),
+        budget_tokens=f.get("max_tokens"),
+        max_steps=int(f.get("max_steps") or 40),
+        input=f.get("input") or DEFAULT_INPUT,
+        # La flotte EXISTE déjà : on la reprend, on n'en déclare pas une seconde.
+        fleet_id=int(f["id"]),
+        source=f"flotte #{f['id']}",
+        name=f.get("label") or f"flotte-{f['id']}")
+
+
 def _payload(spec: FleetSpec) -> dict:
     import json as _json
     # Interpolation PRUDENTE (replace, jamais .format : un input custom peut
@@ -453,9 +490,20 @@ def main() -> None:
     import sys
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     if len(sys.argv) != 2:
-        raise SystemExit("usage : python -m oto_runner.fleet <flotte.yaml>")
-    spec = load_spec(sys.argv[1])
-    bilan = run_fleet(spec, Backend())
+        raise SystemExit(
+            "usage : python -m oto_runner.fleet <flotte.yaml>\n"
+            "        python -m oto_runner.fleet #<id>     (flotte DÉCLARÉE en base)")
+    arg = sys.argv[1]
+    backend = Backend()
+    if arg.startswith("#"):
+        # Piloté par la configuration DÉCLARÉE : la même que celle que le
+        # dashboard affiche et qu'un agent peut lire. Le fichier YAML reste un
+        # moyen de déclarer, pas la seule façon d'exister.
+        spec = spec_depuis_flotte(backend.lire_flotte(int(arg[1:])))
+        logger.info("flotte #%s chargée depuis la base : %s", arg[1:], spec.name)
+    else:
+        spec = load_spec(arg)
+    bilan = run_fleet(spec, backend)
     logger.info("bilan : %s", bilan)
     if not any(bilan.arret.startswith(m) for m in _ARRETS_NORMAUX):
         sys.exit(1)   # panne → systemd relance (jamais sur une fin normale)

@@ -266,6 +266,17 @@ class Backend:
         return self._post("/api/me/runner/jobs",
                           {"op": "get", "job_id": job_id}).get("job") or {}
 
+    def lire_flotte(self, fleet_id: int) -> dict:
+        """La flotte DÉCLARÉE, telle que la plateforme la sert.
+
+        C'est ce qui permet à un passage d'être piloté par sa configuration en
+        base plutôt que par un fichier posé à côté de l'exécutable — et donc
+        d'être le même objet pour l'ordonnanceur, pour le dashboard et pour un
+        agent.
+        """
+        return self._post("/api/me/runner/fleets",
+                          {"op": "get", "fleet_id": fleet_id}).get("fleet") or {}
+
     def bind_run(self, job_id: int, run_id: str) -> None:
         self._post("/api/me/runner/jobs",
                    {"op": "bind_run", "job_id": job_id, "run_id": run_id})
