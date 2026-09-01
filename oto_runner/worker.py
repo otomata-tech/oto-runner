@@ -499,9 +499,16 @@ def _domaines_etrangers(fiche) -> list:
     """
     if not isinstance(fiche, dict):
         return []
+    # ⚠️ Les mots que la moitie du secteur porte ne discriminent rien : sans
+    # eux, `editionsleduc.com` passe pour le domaine de n'importe quelle maison
+    # dont le nom contient « editions ».
+    MOTS_PARTAGES = {"editions", "edition", "librairie", "librairies", "livre",
+                     "livres", "presse", "presses", "groupe", "societe",
+                     "france", "paris", "diffusion", "publishing", "media",
+                     "medias", "editeur", "editeurs"}
     mots = {m for m in _mots_du_nom(_nu(fiche.get("raison_sociale"))
                                     or _nu(fiche.get("nom")) or "")
-            if len(m) > 3}
+            if len(m) > 3 and m not in MOTS_PARTAGES}
     if not mots:
         return []
     vus = []
@@ -832,6 +839,38 @@ def _nu(x):
     donc « pas de contact de direction », donc un rappel tiré pour rien.
     """
     return x.get("valeur") if isinstance(x, dict) and "valeur" in x else x
+
+
+def _reparer_ligne(mcp, backend, namespace, ligne, valeurs, run_id, org):
+    """Ecrire une reparation sur une ligne QUI PEUT ETRE TENUE par l'agent.
+
+    ⚠️ Au moment du controle final, la ligne est encore sous bail : c'est le cas
+    normal. La route d'annotation ne porte pas l'identite du travail et le
+    serveur refuse — chaque reparation echouait donc exactement quand elle
+    servait.
+
+    On passe par le canal qui porte `_run_id`. Repli sur l'annotation directe si
+    ce canal echoue : une ligne deja liberee s'y ecrit tres bien.
+
+    Rend le nom du chemin qui a abouti, ou None. **Le poste doit dire lequel a
+    servi** — sans quoi une reparation qui echoue ressemble a une reparation qui
+    n'avait rien a faire.
+    """
+    try:
+        rep = mcp.outil("data_write", {"namespace": namespace, "id": str(ligne),
+                                       "row": valeurs, "_run_id": run_id,
+                                       "_org": org})
+        if not (isinstance(rep, dict) and rep.get("isError")):
+            return "run"
+    except Exception as e:  # noqa: BLE001 — on essaie l'autre chemin
+        logger.info("réparation par le canal du travail refusée (%s) — on tente "
+                    "l'annotation directe", str(e)[:120])
+    try:
+        backend.patch_row(namespace, ligne, valeurs, org=org)
+        return "direct"
+    except Exception as e:  # noqa: BLE001 — une réparation qui échoue se DIT
+        logger.error("réparation impossible par les deux chemins : %s", str(e)[:160])
+        return None
 
 
 def _tous_les_dirigeants(mcp, siren: str) -> Optional[list]:
@@ -1510,10 +1549,14 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             restantes = _valeurs_cliente_detruites(
                 fiche, _tranche_registre(mcp, _nu((fiche or {}).get("siren")))) or []
             if restantes:
-                backend.patch_row(p["namespace"], ligne_rc,
-                                  {col: av for col, av, _ in restantes},
-                                  org=p.get("org_id"))
-                valeurs_reparees = [c for c, _, _ in restantes]
+                _chemin = _reparer_ligne(
+                    mcp, backend, p["namespace"], ligne_rc,
+                    {col: av for col, av, _ in restantes}, run_id,
+                    p.get("org_id"))
+                if _chemin:
+                    valeurs_reparees = [c for c, _, _ in restantes]
+                    logger.info("job %s : réparation par le chemin « %s »",
+                                job["id"], _chemin)
                 logger.warning("job %s : %d valeur(s) de la cliente restaurée(s) "
                                "après %d rappels — %s",
                                job["id"], len(restantes), RENVOIS_MAX,
@@ -1534,9 +1577,11 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             retires, restants = ([], None) if reels is None else \
                 _contacts_a_retirer(fiche, reels)
             if retires:
-                backend.patch_row(p["namespace"], ligne_rc,
-                                  {"contacts": restants}, org=p.get("org_id"))
-                contacts_retires = retires
+                _c2 = _reparer_ligne(mcp, backend, p["namespace"], ligne_rc,
+                                     {"contacts": restants}, run_id,
+                                     p.get("org_id"))
+                if _c2:
+                    contacts_retires = retires
                 logger.warning("job %s : %d contact(s) fabriqué(s) RETIRÉ(S) "
                                "après %d rappels — %s", job["id"], len(retires),
                                RENVOIS_MAX, ", ".join(retires))
