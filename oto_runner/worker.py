@@ -383,6 +383,17 @@ def _tranche_registre(mcp, siren):
 _SOCLE_CACHE = {}
 
 
+_SOCLE_TABLE: dict = {}
+
+
+def _table_du_socle() -> Optional[str]:
+    """Le nom de la table que l'instantané décrit, ou `None` s'il ne le dit pas."""
+    chemin = os.environ.get("OTO_RUNNER_SOCLE") or ""
+    if chemin not in _SOCLE_TABLE:
+        _socle_du_passage()
+    return _SOCLE_TABLE.get(chemin)
+
+
 def _socle_du_passage():
     """L'etat des lignes AVANT le passage, lu dans le socle exporte au depart.
 
@@ -407,6 +418,10 @@ def _socle_du_passage():
                      "tourner — elle REFUSE au lieu de deviner", e)
         _SOCLE_CACHE[chemin] = None
         return None
+    # ⚠️ La table que l'instantané décrit. Comparer une fiche à l'état d'une
+    # AUTRE table rendrait des verdicts faux et crédibles.
+    _SOCLE_TABLE[chemin] = (brut.get("namespace")
+                            if isinstance(brut, dict) else None)
     lignes = brut if isinstance(brut, list) else (brut.get("rows") or [])
     par = {}
     for r in lignes:
@@ -442,7 +457,7 @@ def _ordre_valeur_cliente(detruites) -> str:
     return "\n".join(lignes)
 
 
-def _valeurs_cliente_detruites(fiche, registre=None) -> list:
+def _valeurs_cliente_detruites(fiche, registre=None, namespace=None) -> list:
     """Les valeurs de la cliente videes ou remplacees par CE passage.
 
     Rend une liste de (colonne, avant, apres), ou `None` quand la comparaison
@@ -462,6 +477,13 @@ def _valeurs_cliente_detruites(fiche, registre=None) -> list:
         return None
     socle = _socle_du_passage()
     if socle is None:
+        return None
+    # ⚠️ La bonne table, ou RIEN. Un instantané d'une autre table donnerait des
+    # verdicts sur des entreprises qu'il décrit à une autre date, ou pas du tout.
+    table = _table_du_socle()
+    if namespace and table and str(table) != str(namespace):
+        logger.error("l'instantané décrit « %s » et le travail porte sur « %s » : "
+                     "la garde REFUSE de comparer", table, namespace)
         return None
     avant = socle.get(str(_nu(fiche.get("siren")) or ""))
     if avant is None:
@@ -1525,7 +1547,7 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         # ⚠️ La tranche du registre sert a CONFRONTER un arbitrage, pas a
         # croire son drapeau.
         _tr = _tranche_registre(mcp, _nu((fiche or {}).get("siren")))
-        detruites = _valeurs_cliente_detruites(fiche, _tr) or []
+        detruites = _valeurs_cliente_detruites(fiche, _tr, p["namespace"]) or []
         # ⚠️ On retient ce qui a ete vu PENDANT la boucle : si ca a disparu au
         # controle final sans que la machine n'ecrive, c'est l'agent qui a
         # corrige — et cette mesure-la parle du modele, pas de la garde.
@@ -1635,7 +1657,7 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         try:
             fiche = backend.row(p["namespace"], ligne_rc, org=p.get("org_id"))
             _tr = _tranche_registre(mcp, _nu((fiche or {}).get("siren")))
-            tardives = _valeurs_cliente_detruites(fiche, _tr)
+            tardives = _valeurs_cliente_detruites(fiche, _tr, p["namespace"])
             if tardives:
                 logger.warning("job %s : %d valeur(s) de la cliente altérée(s) "
                                "APRÈS la boucle de rappel — %s",
@@ -1924,8 +1946,11 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 # socle. Elle valait « socle » sur un travail dont la
                 # comparaison n'avait PAS eu lieu (releve 10695 du 01/09) : le
                 # poste cense dire « on a regarde » rassurait sans rien attester.
-                "reference_comparaison": ("socle" if detruites is not None
-                                          else None),
+                # ⚠️ La référence NOMME sa table : « socle » tout court a laissé
+                # croire qu'on comparait, alors qu'on lisait l'instantané d'une
+                # autre table (mesuré le 01/09).
+                "reference_comparaison": ("socle:%s" % (_table_du_socle() or "?")
+                                          if detruites is not None else None),
                 "domaines_etrangers": _domaines_etrangers(fiche)
                 if ligne_rc else None,
                 # ⚠️ Rendu MÊME À ZÉRO : un zéro lisible dit « aucun cas », un

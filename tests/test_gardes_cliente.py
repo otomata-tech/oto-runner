@@ -283,3 +283,48 @@ def test_une_ecriture_confirmee_est_bien_declaree():
     chemin = W._reparer_ligne(McpQuiAccepte(), BackendQuiPorte(), "ns", "1",
                               {"site_web": "https://voulue.fr"}, "run", 226)
     assert chemin == "run"
+
+
+# ── L'INSTANTANÉ DIT SA TABLE ───────────────────────────────────────────────
+
+def _socle_de(monkeypatch, tmp_path, table, lignes):
+    import json
+    p = tmp_path / ("socle-%s.json" % table)
+    p.write_text(json.dumps({"namespace": table, "rows": lignes}),
+                 encoding="utf-8")
+    monkeypatch.setenv("OTO_RUNNER_SOCLE", str(p))
+    monkeypatch.setattr(W, "_SOCLE_TABLE", {}, raising=False)
+    return p
+
+
+def test_un_instantane_dune_AUTRE_table_ne_fait_pas_juger(monkeypatch, tmp_path):
+    """⚠️ Mesuré le 01/09 : un essai sur une table a chargé l'instantané d'une
+    autre. Ici aucun SIREN ne coïncidait, donc le verdict était vide par
+    accident. Sur deux tables qui partagent des entreprises, la garde rendrait
+    des verdicts faux et crédibles."""
+    _socle_de(monkeypatch, tmp_path, "table-A", [{"siren": "111",
+                                                  "effectif": "50_99"}])
+    assert W._valeurs_cliente_detruites({"siren": "111", "effectif": ""},
+                                        None, "table-B") is None
+
+
+def test_le_bon_instantane_fait_juger_normalement(monkeypatch, tmp_path):
+    """L'autre bord : une garde qui refuse toujours ne garde rien."""
+    _socle_de(monkeypatch, tmp_path, "table-A", [{"siren": "111",
+                                                  "effectif": "50_99"}])
+    perdues = W._valeurs_cliente_detruites({"siren": "111", "effectif": ""},
+                                           None, "table-A")
+    assert [c for c, _, _ in perdues] == ["effectif"]
+
+
+def test_sans_table_demandee_la_garde_compare_comme_avant(monkeypatch, tmp_path):
+    """Les appelants qui ne nomment pas leur table gardent l'ancien
+    comportement — on n'ajoute pas un refus là où il n'y a pas de doute."""
+    _socle_de(monkeypatch, tmp_path, "table-A", [{"siren": "111",
+                                                  "effectif": "50_99"}])
+    assert W._valeurs_cliente_detruites({"siren": "111", "effectif": ""}) != []
+
+
+def test_la_table_de_linstantane_est_lisible(monkeypatch, tmp_path):
+    _socle_de(monkeypatch, tmp_path, "miroir-fidele-A", [{"siren": "1"}])
+    assert W._table_du_socle() == "miroir-fidele-A"
