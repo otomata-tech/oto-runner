@@ -377,10 +377,16 @@ PYCRAN
   echo "socle transmis aux agents : $(grep '^OTO_RUNNER_SOCLE=' "$_env")"
   for _u in 1 2 3; do systemctl restart "oto-runner@$_u" 2>/dev/null || true; done
   sleep 2
+  # ⚠️ On lit ce que le PROCESSUS a recu, pas ce que l'unite declare :
+  # `systemctl show -p Environment` ignore le fichier d'environnement et rend
+  # vide, ce qui se lisait « aucun agent ne voit le socle ».
   _vus=0
   for _u in 1 2 3; do
-    systemctl show "oto-runner@$_u" -p Environment 2>/dev/null \
-      | grep -q "OTO_RUNNER_SOCLE=$_socle" && _vus=$((_vus+1))
+    _pid=$(systemctl show "oto-runner@$_u" -p MainPID --value 2>/dev/null)
+    if [ -n "$_pid" ] && [ "$_pid" != "0" ] && [ -r "/proc/$_pid/environ" ]; then
+      tr '\0' '\n' < "/proc/$_pid/environ" 2>/dev/null \
+        | grep -qx "OTO_RUNNER_SOCLE=$_socle" && _vus=$((_vus+1))
+    fi
   done
   echo "agents relances avec le socle : $_vus/3"
   if [ "$_vus" -lt 3 ]; then
