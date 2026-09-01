@@ -207,3 +207,44 @@ def test_la_liste_des_contacts_na_pas_de_motif_de_colonne(monkeypatch):
     W._reparer_ligne(FauxMcp(), None, "ns", "42", {"contacts": [{"nom": "X"}]},
                      "run", 226)
     assert "contacts.comment" not in vus
+
+
+def test_le_registre_rend_des_personnes_pas_des_fragments():
+    """⚠️ L'extraction par expression régulière rendait « MELISON » et
+    « OLIVIER » comme deux dirigeants distincts."""
+    class McpStruct:
+        def outil(self, nom, args):
+            return {"result": [
+                {"nom": "MICHALSKI (HOFFMANN)", "prenoms": "VERA MARIA",
+                 "type_dirigeant": "personne physique"},
+                {"denomination": "FIPAR AUDIT", "type_dirigeant": "personne morale"}]}
+
+    gens = W._tous_les_dirigeants(McpStruct(), "1")
+    assert gens == ["MICHALSKI (HOFFMANN) VERA MARIA", "FIPAR AUDIT"]
+
+
+def test_un_prenom_commun_ne_vaut_pas_une_correspondance():
+    """⚠️ « Nathalie Bernard » passait pour « CHAUSSEGROS BERNARD JEAN
+    CESARIN » : « Bernard » est le PRÉNOM de quelqu'un d'autre."""
+    fiche = {"contacts": [{"nom": "Nathalie Bernard",
+                           "nom.comment": "registre — dirigeante"}]}
+    faux, _ = W._contacts_a_retirer(fiche, ["CHAUSSEGROS BERNARD JEAN CESARIN"])
+    assert faux == ["Nathalie Bernard"]
+
+
+def test_une_dirigeante_reelle_reste_reconnue_malgre_lordre_et_les_seconds_prenoms():
+    """L'autre bord, et c'est celui qui a failli coûter cher : la fiche écrit
+    « Vera Michalski », le registre « MICHALSKI (HOFFMANN) VERA MARIA »."""
+    fiche = {"contacts": [{"nom": "Vera Michalski",
+                           "nom.comment": "registre — présidente"}]}
+    faux, _ = W._contacts_a_retirer(
+        fiche, ["COSSON MATHIEU FRANCOIS", "MICHALSKI (HOFFMANN) VERA MARIA"])
+    assert faux == []
+
+
+def test_un_registre_de_forme_inattendue_ne_fait_rien_retirer():
+    class McpBizarre:
+        def outil(self, nom, args):
+            return "une chaîne, pas la structure attendue"
+
+    assert W._tous_les_dirigeants(McpBizarre(), "1") is None

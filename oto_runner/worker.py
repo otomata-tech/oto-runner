@@ -574,7 +574,11 @@ def _contacts_a_retirer(fiche, dirigeants_reels) -> tuple:
             garde.append(c)                     # jamais de la cliente ni sans nom
             continue
         mots = _mots_du_nom(nom)
-        au_registre = any(mots & r for r in reels)
+        # ⚠️ INCLUSION, pas intersection : un seul mot commun ne dit rien quand
+        # les prenoms circulent comme patronymes. Mesure du 01/09 : la regle
+        # d'inclusion sur des personnes entieres retire UN contact de plus sur
+        # cinq passages, et c'est la fabrication que l'intersection manquait.
+        au_registre = any(mots <= r for r in reels)
         if au_registre:
             garde.append(c)
         else:
@@ -931,11 +935,25 @@ def _tous_les_dirigeants(mcp, siren: str) -> Optional[list]:
         logger.warning("garde contacts : registre injoignable sur %s (%s)",
                        siren, e)
         return None
-    brut = json.dumps(rep, ensure_ascii=False) if not isinstance(rep, str) else rep
-    noms = re.findall(
-        r'"(?:nom|nom_complet|denomination|prenom|prenoms)"\s*:\s*"([^"]{2,80})"',
-        brut)
-    return [n for n in dict.fromkeys(noms) if n.strip()]
+    # ⚠️ On LIT LA STRUCTURE. L'extraction par expression reguliere rendait des
+    # fragments : « nom » et « prenoms » devenaient deux dirigeants distincts, et
+    # la garde ne pouvait plus exiger qu'un nom ecrit soit inclus dans une
+    # personne — elle se contentait d'un mot commun, ce qui laisse passer un
+    # prenom pris pour un patronyme.
+    lignes = (rep or {}).get("result") if isinstance(rep, dict) else None
+    if not isinstance(lignes, list):
+        logger.warning("garde contacts : le registre a repondu dans une forme "
+                       "inattendue sur %s — on ne retire rien", siren)
+        return None
+    gens = []
+    for d in lignes:
+        if not isinstance(d, dict):
+            continue
+        entier = " ".join(str(x) for x in (d.get("nom"), d.get("prenoms")) if x)
+        entier = entier or str(d.get("denomination") or "")
+        if entier.strip():
+            gens.append(entier.strip())
+    return gens
 
 
 def _dirigeant_a_contacter(mcp, siren: str) -> Optional[tuple]:
