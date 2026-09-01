@@ -834,6 +834,32 @@ def _nu(x):
     return x.get("valeur") if isinstance(x, dict) and "valeur" in x else x
 
 
+def _tous_les_dirigeants(mcp, siren: str) -> Optional[list]:
+    """TOUS les noms que le registre porte — pas seulement le premier.
+
+    ⚠️ `_dirigeant_a_contacter` en rend UN : celui qu'on propose a l'agent. La
+    garde des contacts, elle, doit savoir si un nom figure AU REGISTRE, ce qui
+    est une autre question. Sur une maison a deux dirigeants, comparer au
+    premier declare fabrique tout contact qui est le second.
+
+    Rend `None` quand on n'a pas pu demander — une absence de reponse n'est pas
+    une absence de dirigeant, et la garde ne doit rien retirer sur ce doute.
+    """
+    if not siren:
+        return None
+    try:
+        rep = mcp.outil("fr_directors", {"siren": str(siren)})
+    except Exception as e:  # noqa: BLE001 — pas de reponse n'est pas une absence
+        logger.warning("garde contacts : registre injoignable sur %s (%s)",
+                       siren, e)
+        return None
+    brut = json.dumps(rep, ensure_ascii=False) if not isinstance(rep, str) else rep
+    noms = re.findall(
+        r'"(?:nom|nom_complet|denomination|prenom|prenoms)"\s*:\s*"([^"]{2,80})"',
+        brut)
+    return [n for n in dict.fromkeys(noms) if n.strip()]
+
+
 def _dirigeant_a_contacter(mcp, siren: str) -> Optional[tuple]:
     """Le registre nomme-t-il une personne physique qu'on devrait contacter ?
 
@@ -1458,8 +1484,11 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             # ⚠️ Et le contact fabrique : meme trou, meme remede. Sa garde vivait
             # dans le bloc « deux rappels ont eu lieu », donc un contact invente
             # sur une fiche qui n'abime rien d'autre n'etait jamais retire.
-            _reels = _dirigeant_a_contacter(mcp, _nu((fiche or {}).get("siren")))
-            _faux, _ = _contacts_a_retirer(fiche, [_reels[0]] if _reels else [])
+            # ⚠️ TOUS les dirigeants, pas le premier : sur une maison qui en
+            # a deux, comparer au premier declare fabrique le second.
+            _reels = _tous_les_dirigeants(mcp, _nu((fiche or {}).get("siren")))
+            _faux, _ = ([], None) if _reels is None else _contacts_a_retirer(
+                fiche, _reels)
             if _faux:
                 logger.warning("job %s : contact fabrique detecte au controle "
                                "final — %s", job["id"], ", ".join(_faux))
@@ -1499,9 +1528,11 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                                  "TOUJOURS perdue", job["id"])
             # ⚠️ Et le contact fabriqué : on RETIRE l'entrée, on ne se contente
             # pas de marquer. Une fiche marquée reste appelée.
-            reels = _dirigeant_a_contacter(mcp, _nu((fiche or {}).get("siren")))
-            retires, restants = _contacts_a_retirer(
-                fiche, [reels[0]] if reels else [])
+            reels = _tous_les_dirigeants(mcp, _nu((fiche or {}).get("siren")))
+            # ⚠️ Registre injoignable : on ne retire RIEN. Une absence de
+            # reponse n'est pas une absence de dirigeant.
+            retires, restants = ([], None) if reels is None else \
+                _contacts_a_retirer(fiche, reels)
             if retires:
                 backend.patch_row(p["namespace"], ligne_rc,
                                   {"contacts": restants}, org=p.get("org_id"))
@@ -1510,7 +1541,7 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                                "après %d rappels — %s", job["id"], len(retires),
                                RENVOIS_MAX, ", ".join(retires))
                 verif = backend.row(p["namespace"], ligne_rc, org=p.get("org_id"))
-                if _contacts_a_retirer(verif, [reels[0]] if reels else [])[0]:
+                if _contacts_a_retirer(verif, reels or [])[0]:
                     logger.error("job %s : le retrait a échoué — le contact "
                                  "fabriqué est TOUJOURS dans la fiche", job["id"])
         except Exception as e:  # noqa: BLE001 — une réparation qui échoue se dit
