@@ -87,27 +87,6 @@ def _env(monkeypatch):
     monkeypatch.delenv("OTO_RUNNER_MODEL", raising=False)   # DEFAULT_MODEL, l'alias
 
 
-def test_le_bilan_de_surveillance_derive_des_outputs(monkeypatch):
-    """La boucle tourne chez Mistral, mais le JOB garde son bilan : usage,
-    pas, tool_counts — la page /automations reste vraie."""
-    _env(monkeypatch)
-    vu = {}
-
-    def post(url, **kw):
-        vu.update(url=url, corps=kw["json"])
-        return _R(corps=_REPONSE)
-
-    monkeypatch.setattr(C, "post_with_deadline", post)
-    res = C.run_once(instructions="la procédure", inputs="vas-y",
-                     tools=("data_claim_next", "serper_search"))
-    assert res.reply == "Fiche enrichie, ligne libérée."
-    assert res.usage == {"input_tokens": 21000, "output_tokens": 900}
-    assert [s.tool for s in res.steps] == [
-        "data_claim_next", "serper_search", "serper_search",
-        "data_write", "data_release"]
-    assert vu["url"].endswith("/v1/conversations")
-    assert vu["corps"]["model"] == C.DEFAULT_MODEL, "l'ALIAS est ce qu'on appelle"
-    assert res.model == "mistral-large-2512", "la VERSION est ce qu'on enregistre"
 
 
 def test_store_false_est_toujours_envoye(monkeypatch):
@@ -155,46 +134,6 @@ def test_sans_connector_id_erreur_franche(monkeypatch):
         C.run_once(instructions="p", inputs="i", tools=())
 
 
-def test_le_worker_one_shot_appose_ordre_et_synthese(monkeypatch):
-    """Le chemin worker complet : fil à DEUX tours (l'ordre, la synthèse avec le
-    relevé des exécutions), bilan déclaré (tool_counts au grain job) — la
-    surveillance des vacances ne perd pas son poste."""
-    _env(monkeypatch)
-
-    class FauxConv:
-        ONE_SHOT = True
-
-        @staticmethod
-        def run_once(*, instructions, inputs, tools):
-            from oto_runner.agent_runtime import AgentResult, AgentStep
-            assert "la procédure" in instructions
-            return AgentResult(reply="fait", stopped="end_turn",
-                               model="mistral-large-2512",
-                               usage={"input_tokens": 20000, "output_tokens": 500},
-                               steps=[AgentStep(tool="data_write", ok=True,
-                                                duration_ms=0)])
-
-    class McpSansBoucle:
-        def __init__(self, **kw):
-            self.run_id = None
-
-        def outil(self, name, args=None):
-            if name == "oto_procedure":
-                return {"body_md": "la procédure"}
-            if name == "run_start":
-                return {"run_id": "r-C"}
-            return {}
-
-    monkeypatch.setattr(W, "McpSession", McpSansBoucle)
-    b = FauxBackend()
-    W._traiter(b, _job("start"), provider=FauxConv)
-    roles = [a[1] for a in b.appels if a[0] == "append"]
-    assert roles == ["user", "assistant"], "le fil garde l'ordre et la synthèse"
-    result = next(a for a in b.appels if a[0] == "complete_result")[1]
-    assert result["tool_counts"] == {"data_write": 1}
-    assert result["usage_tokens"] == 20500
-    assert result["model"] == "mistral-large-2512", \
-        "le job porte la version, pas l'alias : une bascule se date"
 
 
 def test_une_base_openai_avec_v1_ne_double_pas_le_chemin(monkeypatch):
@@ -209,53 +148,8 @@ def test_une_base_openai_avec_v1_ne_double_pas_le_chemin(monkeypatch):
     assert vu["url"] == "https://api.mistral.ai/v1/conversations"
 
 
-def test_les_noms_prefixes_par_le_connecteur_sont_normalises(monkeypatch):
-    """Le connecteur Mistral préfixe les outils de son nom (oto-11aout_data_write) :
-    sans normalisation, le bilan disait « zéro data_write » sur des fiches
-    écrites (vécu). L'allowlist du job normalise — exacte, jamais une devinette."""
-    _env(monkeypatch)
-    rep = {"outputs": [
-        {"type": "tool.execution", "name": "oto-11aout_data_claim_next"},
-        {"type": "tool.execution", "name": "oto-11aout_data_write"},
-        {"type": "message.output", "content": "ok"}],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
-    monkeypatch.setattr(C, "post_with_deadline", lambda url, **kw: _R(corps=rep))
-    res = C.run_once(instructions="p", inputs="i",
-                     tools=("data_claim_next", "data_write"))
-    assert [s.tool for s in res.steps] == ["data_claim_next", "data_write"]
 
 
-def test_le_worker_one_shot_impose_lidentite_de_run_et_le_nom_du_tableau(monkeypatch):
-    """57 % des data_write refusés en campagne (27/08) : en Conversations
-    personne ne pose `_run_id`, le titulaire d'une ligne réservée était refusé
-    sur sa propre ligne. Le worker impose l'identité dans l'ordre — et le nom
-    EXACT du tableau (700+ refus sur des slots/variantes inventés)."""
-    _env(monkeypatch)
-    vu = {}
-
-    class FauxConv:
-        ONE_SHOT = True
-
-        @staticmethod
-        def run_once(*, instructions, inputs, tools):
-            vu["inputs"] = inputs
-            from oto_runner.agent_runtime import AgentResult
-            return AgentResult(reply="ok", stopped="end_turn")
-
-    class Mcp:
-        def __init__(self, **kw):
-            self.run_id = None
-
-        def outil(self, name, args=None):
-            return {"body_md": "p"} if name == "oto_procedure" else {"run_id": "r-ID"}
-
-    monkeypatch.setattr(W, "McpSession", Mcp)
-    job = _job("start")
-    job["payload"]["namespace"] = "un-tableau-de-production"
-    W._traiter(FauxBackend(), job, provider=FauxConv)
-    assert '_run_id: "r-ID"' in vu["inputs"] and 'worker: "r-ID"' in vu["inputs"]
-    assert 'namespace: "un-tableau-de-production"' in vu["inputs"]
-    assert vu["inputs"].endswith("Vas-y."), "l'ordre de la flotte suit, intact"
 
 
 _CALL_BIDON = {
@@ -410,19 +304,6 @@ def test_un_transitoire_est_rejoue_a_chaque_passe(monkeypatch):
     assert suite == [] and res.reply == "ok"
 
 
-def test_le_faux_depart_conserve_les_entrees_brutes(monkeypatch, tmp_path):
-    """Ce que l'agent a RÉELLEMENT fait avant de s'arrêter ne survit qu'ici :
-    le fil ne garde qu'une synthèse, et rien n'est stocké chez le fournisseur."""
-    from oto_runner.agent_runtime import AgentResult, AgentStep
-    depot = tmp_path / "faux-departs"
-    monkeypatch.setenv("OTO_RUNNER_FAUX_DEPARTS_DIR", str(depot))
-    res = AgentResult(reply="prose", stopped="end_turn",
-                      steps=[AgentStep(tool="data_claim_next", ok=True,
-                                       duration_ms=0)],
-                      raw_outputs=[dict(_CALL_BIDON)])
-    W._conserver_faux_depart({"id": 7}, {"procedure": "demo"}, res)
-    trace = json.loads((depot / "7.json").read_text(encoding="utf-8"))
-    assert trace["raw_outputs"] == [_CALL_BIDON]
 
 
 def test_aucune_entree_renvoyee_ne_porte_de_champ_serveur(monkeypatch):

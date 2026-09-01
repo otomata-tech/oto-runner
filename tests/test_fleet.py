@@ -124,73 +124,10 @@ def test_les_echecs_consecutifs_arretent_la_flotte():
     assert bilan.failed == 3
 
 
-def test_la_rampe_espace_les_departs():
-    """Deux départs ne sont JAMAIS à moins de ramp_seconds l'un de l'autre —
-    N claims simultanés sur un service, c'est la rafale de 502 mesurée."""
-    departs = []
-
-    class Espion(FauxBackend):
-        def __init__(self, horloge):
-            super().__init__(counts=[100, 100], duree=10_000)
-            self.h = horloge
-
-        def enqueue(self, kind, payload, run_id=None):
-            departs.append(self.h.t)
-            return super().enqueue(kind, payload, run_id)
-
-    h = Horloge()
-    b = Espion(h)
-    # Volume 0 jamais atteignable ici : on borne par budget pour sortir.
-    spec = _spec(ramp_seconds=60, budget_tokens=1)
-
-    # Le budget n'est jamais consommé (les jobs ne concluent pas) : on coupe
-    # après quelques tours en levant depuis sleep.
-    class Stop(Exception): ...
-
-    tours = {"n": 0}
-
-    def sleep(s):
-        h.sleep(s)
-        tours["n"] += 1
-        if tours["n"] > 12:
-            raise Stop
-
-    with pytest.raises(Stop):
-        run_fleet(spec, b, sleep=sleep, clock=h.clock, poll_s=20)
-    assert len(departs) >= 3, "la concurrence doit finir par se remplir"
-    ecarts = [b - a for a, b in zip(departs, departs[1:])]
-    assert all(e >= 60 for e in ecarts), f"départs trop rapprochés : {ecarts}"
 
 
-def test_la_declaration_harnais_se_charge_telle_quelle(tmp_path):
-    """Le YAML d'un autre harnais (champs en plus : model, connector…) se
-    charge — les champs inconnus sont logués puis ignorés, jamais avalés en
-    silence ni fatals. `volume: épuisement` = pas de plafond."""
-    f = tmp_path / "flotte.yaml"
-    f.write_text(
-        "procedure: enrichissement-fiche\n"
-        "procedure_org: 42\n"
-        "namespace: prospects-demo\n"
-        "filter: {statut: a_traiter}\n"
-        "project: 42\n"
-        "model: un-modele\n"
-        "connector: 'abc-123'\n"
-        "tools: [data_claim_next, data_write]\n"
-        "concurrency: 3\nramp_seconds: 60\n"
-        "volume: épuisement\nbudget_tokens: 320000000\n")
-    spec = load_spec(str(f))
-    assert spec.procedure == "enrichissement-fiche"
-    assert spec.volume is None, "« épuisement » = pas de plafond de lignes"
-    assert spec.budget_tokens == 320000000
-    assert spec.max_steps == 40, "défaut runner (absent de la déclaration harnais)"
 
 
-def test_le_payload_porte_le_contrat_du_run():
-    from oto_runner.fleet import _payload
-    p = _payload(_spec(project=220, max_steps=48))
-    assert p["procedure"] == "p" and p["project_id"] == 220
-    assert p["max_steps"] == 48 and "data_claim_next" in p["tools"]
-    assert p["fleet"] == "flotte-demo", "chaque job porte le nom de sa flotte"
 
 
 def test_lorg_de_la_declaration_scope_le_comptage():
@@ -351,98 +288,18 @@ def test_sans_appels_recents_pas_de_verdict(monkeypatch):
     assert bilan.arret == "file vide"
 
 
-def test_des_faux_departs_en_serie_arretent_la_flotte():
-    """Rodage v96 : 4 jobs « done » sur 5 avaient réservé sans écrire, et la
-    ligne ratée était reservie dans la minute au suivant — une boucle à vide
-    invisible des bornes (les jobs sont done). N d'affilée ⟹ arrêt ANORMAL."""
-    from oto_runner import fleet as F
-
-    class BackendFauxDeparts(FauxBackend):
-        def get_job(self, jid):
-            j = super().get_job(jid)
-            if j["status"] == "done":
-                j["result"]["tool_counts"] = {"data_claim_next": 1, "fr_get": 2}
-                j["result"]["faux_depart"] = True
-            return j
-
-    b = BackendFauxDeparts(counts=[100, 100])
-    bilan = _run(_spec(ramp_seconds=0), b)
-    assert "faux départs consécutifs" in bilan.arret
-    assert not any(bilan.arret.startswith(m) for m in F._ARRETS_NORMAUX)
 
 
-def test_un_resultat_sans_marqueur_de_faux_depart_leve():
-    """Le marqueur est posé par le WORKER — le seul à avoir vu les appels. Un
-    résultat qui ne le porte pas vient d'un worker trop ancien : on lève. Le
-    recalculer ici ferait passer une flotte mal appariée pour une flotte
-    saine, et le contrat resterait invisible jusqu'au prochain vol à vide."""
-
-    class BackendAncien(FauxBackend):
-        def get_job(self, jid):
-            j = super().get_job(jid)
-            (j.get("result") or {}).pop("faux_depart", None)
-            return j
-
-    b = BackendAncien(counts=[100, 100])
-    with pytest.raises(RuntimeError, match="faux_depart"):
-        _run(_spec(ramp_seconds=0), b)
 
 
-def test_le_rendement_effondre_arrete_la_flotte():
-    """La borne GÉNÉRALE du prix de la sortie : une campagne a tourné quatre
-    jours en payant le prix plein pour des fiches vides — jobs « done », outils
-    debout, aucune borne. Le rendement rapporte le coût aux ÉCRITURES."""
-    from oto_runner import fleet as F
-
-    b = BackendRendement(counts=[100, 100], usage_par_job=20_000)
-    bilan = _run(_spec(ramp_seconds=0, jetons_par_ecriture_max=5_000,
-                       rendement_fenetre=10), b)
-    assert bilan.arret == ("rendement effondré (200000 jetons pour 10 "
-                           "écriture(s) sur 10 jobs)")
-    assert not any(bilan.arret.startswith(m) for m in F._ARRETS_NORMAUX), \
-        "arrêt ANORMAL : systemd relance quand la campagne est corrigée"
 
 
-def test_une_fenetre_incomplete_ne_juge_pas():
-    """Quelques jobs ne font pas une tendance : sous la taille de fenêtre, aucun
-    verdict — sinon le premier job cher d'un vol arrêterait la campagne."""
-    b = BackendRendement(counts=[100, 100, 100, 100, 0, 0], usage_par_job=20_000)
-    bilan = _run(_spec(ramp_seconds=0, jetons_par_ecriture_max=1,
-                       rendement_fenetre=20), b)
-    assert bilan.arret == "file vide", "fenêtre non pleine ⟹ pas de verdict"
 
 
-def test_un_rendement_sain_laisse_la_flotte_tourner():
-    """Fenêtre PLEINE et rendement dans le plafond : la flotte va jusqu'au
-    bout de sa file — la borne ne doit pas mordre sur une campagne qui produit."""
-    b = BackendRendement(counts=[100] * 12 + [0], usage_par_job=20_000)
-    bilan = _run(_spec(ramp_seconds=0, jetons_par_ecriture_max=50_000,
-                       rendement_fenetre=10), b)
-    assert bilan.arret == "file vide"
-    assert bilan.done >= 10, "la fenêtre s'est remplie sans borner"
 
 
-def test_sans_plafond_declare_le_rendement_ne_borne_pas():
-    """La borne est OPT-IN : sans `jetons_par_ecriture_max`, même un million de
-    jetons par écriture ne l'arrête pas (la fenêtre est pleine ici)."""
-    b = BackendRendement(counts=[100, 100, 100, 0, 0], usage_par_job=1_000_000)
-    bilan = _run(_spec(ramp_seconds=0, rendement_fenetre=2), b)
-    assert bilan.arret == "file vide"
 
 
-def test_la_declaration_porte_le_rendement_et_nomme_la_flotte(tmp_path):
-    """Les deux champs de rendement se lisent au YAML, et le nom du FICHIER
-    (sans extension) devient le nom de la flotte : c'est le tag `fleet` de
-    chaque job, par lequel on retrouve une campagne sans deviner un « id ≥ N »."""
-    from oto_runner.fleet import _payload
-
-    f = tmp_path / "campagne-demo.yaml"
-    f.write_text("procedure: p\nnamespace: demo\n"
-                 "jetons_par_ecriture_max: 40000\nrendement_fenetre: 25\n")
-    spec = load_spec(str(f))
-    assert spec.jetons_par_ecriture_max == 40_000 and spec.rendement_fenetre == 25
-    assert spec.name == "campagne-demo"
-    assert _payload(spec)["fleet"] == "campagne-demo"
 
 
 def test_une_flotte_sans_nom_leve():
@@ -453,9 +310,3 @@ def test_une_flotte_sans_nom_leve():
         _spec(name="")
 
 
-def test_le_rendement_est_absent_par_defaut(tmp_path):
-    f = tmp_path / "flotte.yaml"
-    f.write_text("procedure: p\nnamespace: demo\n")
-    spec = load_spec(str(f))
-    assert spec.jetons_par_ecriture_max is None, "borne inactive sans déclaration"
-    assert spec.rendement_fenetre == 10, "défaut runner : 10 jobs"

@@ -18,7 +18,6 @@ from __future__ import annotations
 import logging
 import os
 import time
-from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -53,7 +52,6 @@ _MAX_FAUX_DEPARTS_CONSECUTIFS = 5
 # DÉBIT. Le 29/08, 54 échecs consécutifs sont passés inaperçus parce que le
 # relâchement journalisait et continuait — un best-effort sans destination.
 # Un échec de relâchement compte donc comme un échec d'écriture.
-_MAX_RELACHEMENTS_RATES_CONSECUTIFS = 2
 # ⚠️ Le message de lancement NOMME la file : un agent à qui on dit « la file de
 # travail » sans la nommer DEVINE des noms de tableaux (vécu : entreprises,
 # projet_220, data… tous inconnus, puis des SIREN hallucinés et une conclusion
@@ -71,7 +69,6 @@ DEFAULT_INPUT = ("Ta file de travail est le tableau `{namespace}` : réserve cha
 # écrite pour un autre harnais reste lisible ici, sans mensonge silencieux).
 _CHAMPS = {"procedure", "namespace", "filter", "project", "org", "tools", "concurrency",
            "ramp_seconds", "volume", "budget_tokens", "max_steps", "input",
-           "critical_tools", "jetons_par_ecriture_max", "rendement_fenetre",
            "bilan_periode_s"}
 
 
@@ -100,8 +97,6 @@ class FleetSpec:
     critical_tools: tuple = ()
     # Le RENDEMENT : plafond de jetons dépensés par écriture produite, jugé sur
     # une fenêtre glissante de jobs conclus. Absent ⟹ borne inactive.
-    jetons_par_ecriture_max: Optional[int] = None
-    rendement_fenetre: int = 10
     bilan_periode_s: int = _BILAN_PERIODE_S   # cadence du bilan intermédiaire
     source: str = ""              # la déclaration : le bilan JSON se pose à côté
 
@@ -139,8 +134,6 @@ def load_spec(path: str) -> FleetSpec:
         max_steps=int(raw.get("max_steps") or 40),
         input=raw.get("input") or DEFAULT_INPUT,
         critical_tools=tuple(raw.get("critical_tools") or ()),
-        jetons_par_ecriture_max=raw.get("jetons_par_ecriture_max"),
-        rendement_fenetre=int(raw.get("rendement_fenetre") or 10),
         bilan_periode_s=int(raw.get("bilan_periode_s") or _BILAN_PERIODE_S),
         source=path,
         name=os.path.splitext(os.path.basename(path))[0])
@@ -212,20 +205,6 @@ _outil_critique_en_panne.dernier = {}
 # écriture est banal, dix d'affilée sont une panne.
 
 
-def _rendement_effondre(spec: FleetSpec, fenetre) -> "str | None":
-    """Le motif de borne si la fenêtre a coûté plus de
-    `spec.jetons_par_ecriture_max` jetons par écriture, sinon None. La fenêtre
-    ne juge qu'une fois PLEINE : un début de vol n'a pas de verdict."""
-    if spec.jetons_par_ecriture_max is None or len(fenetre) < fenetre.maxlen:
-        return None
-    jetons = sum(j for j, _ in fenetre)
-    writes = sum(w for _, w in fenetre)
-    if jetons <= spec.jetons_par_ecriture_max * max(1, writes):
-        return None
-    return (f"rendement effondré ({jetons} jetons pour {writes} écriture(s) "
-            f"sur {len(fenetre)} jobs)")
-
-
 @dataclass
 class FleetBilan:
     done: int = 0
@@ -251,13 +230,9 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
     failed_consecutifs = 0
     # ⚠️ Initialise ICI : un compteur qui n'existe que sur un chemin et qu'on
     # lit sur tous leve au premier passage qui l'emprunte.
-    claims_inconnus = 0
-    faux_departs_consecutifs = 0
-    relachements_rates = 0
     pleine_charge_atteinte = False
     departs = 0
     # (jetons, écritures) des derniers jobs conclus — la matière du rendement.
-    fenetre: deque = deque(maxlen=max(1, spec.rendement_fenetre))
     # Les erreurs BACKEND consécutives du driver lui-même (count/enqueue) : un
     # 502 isolé sur l'enfilement a TUÉ un vol entier (lot C, 16/08 — la rafale
     # #352 ; 30 min de flotte figée avant détection humaine). Le driver tolère
@@ -297,59 +272,14 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                     # worker — le seul à avoir vu les appels ET leurs sorties.
                     # Un résultat qui ne les porte pas vient d'un worker trop
                     # ancien : on lève, on ne redevine pas en silence.
-                    manquants = [c for c in ("faux_depart", "claim_vide")
-                                 if c not in resultat]
-                    if manquants:
-                        raise RuntimeError(
-                            f"job {jid} : résultat sans {' ni '.join(manquants)} — "
-                            "worker trop ancien pour cette flotte (les marqueurs "
-                            "sont posés à la conclusion du job). Mets à jour les "
-                            "workers.")
-                    if resultat["claim_vide"] is None:
-                        # ⚠️ Le worker DIT qu'il n'a pas pu lire la sortie de la
-                        # reservation. On ne conclut donc ni « rien a reserver »
-                        # ni « faux depart » : les deux seraient des verdicts
-                        # tires d'une mesure absente. On compte, et le bilan le
-                        # porte — un passage entier en inconnu doit se voir.
-                        claims_inconnus += 1
-                        logger.warning(
-                            "job %s : reservation NON MESUREE (%s) — ni claim a "
-                            "vide, ni faux depart : %d inconnu(s) sur ce passage",
-                            jid, resultat.get("claim_vide_raison")
-                            or "raison non declaree", claims_inconnus)
-                    elif resultat["claim_vide"]:
-                        # Rien à réserver : le job n'avait aucune sortie à
-                        # produire. Ni faux départ, ni point de rendement — le
-                        # compter des deux côtés ferait échouer, à la fin de
-                        # chaque campagne, une flotte qui a tout traité.
-                        logger.info("job %s : claim à vide — la file n'avait "
-                                    "plus de ligne à réserver", jid)
-                    else:
-                        # ⚠️ Le connecteur MCP peut PRÉFIXER les noms d'outils
-                        # (`<connecteur>_data_write`) : l'appartenance se teste
-                        # par SUFFIXE, jamais par égalité.
-                        tc = resultat.get("tool_counts") or {}
-                        writes = sum(v for k, v in tc.items()
-                                     if k.endswith("data_write"))
-                        fenetre.append((jetons_du_job, writes))
-                        if resultat["faux_depart"]:
-                            faux_departs_consecutifs += 1
-                            logger.warning("job %s : faux départ (réservation sans "
-                                           "écriture) — %d d'affilée",
-                                           jid, faux_departs_consecutifs)
-                        else:
-                            faux_departs_consecutifs = 0
-                        # Le relâchement est un poste À PART ENTIÈRE : `False`
-                        # est un échec, `None`/absent veut dire « pas de ligne à
-                        # rendre » et ne compte pas.
-                        if resultat.get("relachee") is False:
-                            relachements_rates += 1
-                            logger.warning("job %s : LIGNE NON RELÂCHÉE — %d "
-                                           "d'affilée ; elle reste sous bail et "
-                                           "le débit du passage est faussé",
-                                           jid, relachements_rates)
-                        elif resultat.get("relachee"):
-                            relachements_rates = 0
+                    # ⚠️ L'ordonnanceur ne juge plus ce que l'agent a produit.
+                    # Il portait ici : le claim à vide, le faux départ, le
+                    # relâchement de ligne, le rendement en écritures par jeton.
+                    # Tout cela suppose de savoir ce qu'écrire veut dire — ce
+                    # n'est pas le sujet d'un exécuteur d'agents.
+                    #
+                    # Restent les bornes qui ne regardent que l'exécution :
+                    # volume, budget de jetons, file vide, échecs consécutifs.
                 else:
                     bilan.failed += 1
                     failed_consecutifs += 1
@@ -392,15 +322,12 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                          "c'est payer pour re-crasher")
             elif (panne := _outil_critique_en_panne(spec, backend, clock)):
                 borne = panne
-            elif relachements_rates >= _MAX_RELACHEMENTS_RATES_CONSECUTIFS:
-                borne = (f"{relachements_rates} relâchements ratés d'affilée — "
-                         "les lignes restent sous bail et le passage ment sur "
-                         "son débit")
-            elif faux_departs_consecutifs >= _MAX_FAUX_DEPARTS_CONSECUTIFS:
-                borne = (f"{faux_departs_consecutifs} faux départs consécutifs (réservation "
-                         "sans écriture) — la flotte tourne à vide")
-            elif (effondrement := _rendement_effondre(spec, fenetre)):
-                borne = effondrement
+            # ⚠️ Trois bornes ont été retirées ici — relâchements ratés, faux
+            # départs, rendement effondré. Les trois jugeaient ce que l'agent
+            # avait PRODUIT : avoir réservé sans écrire, ne pas avoir rendu sa
+            # ligne, écrire trop peu pour ce qu'il coûte. Un exécuteur d'agents
+            # ne sait pas ce qu'écrire veut dire, et ne rien écrire est parfois
+            # la bonne réponse.
             elif restantes == 0:
                 borne = "file vide"
 

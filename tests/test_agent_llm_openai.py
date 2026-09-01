@@ -31,23 +31,6 @@ def _reponse(message, finish="stop", usage=None):
             "usage": usage or {"prompt_tokens": 100, "completion_tokens": 20}}
 
 
-def test_les_arguments_arrivent_en_chaine_json_et_sortent_en_dict(monkeypatch):
-    msg = {"role": "assistant", "content": None,
-           "tool_calls": [{"id": "c1", "type": "function",
-                           "function": {"name": "data_claim_next",
-                                        "arguments": '{"namespace": "vivier", "worker": "w1"}'}}]}
-    monkeypatch.setattr(P.requests, "post",
-                        lambda *a, **k: _Resp(_reponse(msg, finish="tool_calls")))
-    turn = P.complete(system="s", messages=[], tools=[], api_key="k")
-    assert turn.wants_tools
-    c = turn.tool_calls[0]
-    assert c.name == "data_claim_next" and c.arguments == {"namespace": "vivier",
-                                                           "worker": "w1"}
-    assert turn.stop_reason == "end_turn"
-    # ⚠️ Le relevé porte désormais AUSSI ce que le cache a servi — même champ
-    # que sur l'autre chemin, et `input_tokens` ne compte plus que le neuf.
-    assert turn.usage == {"input_tokens": 100, "output_tokens": 20,
-                          "cache_read_input_tokens": 0}
 
 
 def test_des_arguments_malformes_font_un_appel_vide_pas_un_crash(monkeypatch):

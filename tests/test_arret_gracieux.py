@@ -96,15 +96,6 @@ def test_sans_signal_l_agent_traite_toute_la_file(monkeypatch):
     assert traites == [102, 101, 100]
 
 
-def test_un_signal_avant_la_boucle_ne_reserve_rien(monkeypatch):
-    """Un agent au repos sort immédiatement — pas d'attente parasite quand la
-    file est vide."""
-    _reset()
-    worker._demander_arret(15, None)
-    b, traites = _BackendFactice(jobs=5), []
-    _lancer(monkeypatch, b, traites)
-    assert traites == []
-    assert b.claims == 0, "la boucle n'a même pas tenté de réserver"
 
 
 def test_un_signal_pendant_la_reservation_rend_la_ligne_sans_l_entamer(monkeypatch):

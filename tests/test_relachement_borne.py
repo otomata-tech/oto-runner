@@ -13,64 +13,16 @@ import inspect
 from oto_runner import fleet, worker
 
 
-def test_le_seuil_est_bas_et_c_est_voulu():
-    """Deux, pas cinq : chaque échec laisse une ligne verrouillée derrière lui, et
-    la file paraît avancer pendant qu'elle se vide de travers."""
-    assert fleet._MAX_RELACHEMENTS_RATES_CONSECUTIFS == 2
 
 
-def test_la_borne_est_lue_dans_la_boucle_de_flotte():
-    src = inspect.getsource(fleet.run_fleet)
-    assert "relachements_rates" in src, "le compteur existe"
-    assert "_MAX_RELACHEMENTS_RATES_CONSECUTIFS" in src, "et il BORNE"
 
 
-def test_seul_False_compte_comme_un_echec():
-    """⚠️ `None` ou l'absence veut dire « pas de ligne à rendre » — un travail qui
-    n'a rien réservé ne doit pas compter comme un relâchement raté, sinon la borne
-    arrête un passage sain au deuxième claim à vide."""
-    src = inspect.getsource(fleet.run_fleet)
-    assert 'resultat.get("relachee") is False' in src
 
 
-def test_le_travail_declare_son_relachement():
-    src = inspect.getsource(worker._traiter)
-    assert '"relachee"' in src
 
 
-def test_rien_a_rendre_n_est_pas_un_echec():
-    """⚠️ LE cas qui a coupé le sixième passage à cinq lignes sur cent.
-
-    `_relacher` rendait `False` aussi bien pour un échec que pour « aucune ligne
-    à rendre ». La borne, posée une heure plus tôt, a donc arrêté un passage sain
-    au troisième travail sans ligne — fin de file, ligne inconnue, peu importe.
-
-    Le test de la borne disait déjà « seul False compte » ; la fonction ne le
-    respectait pas. Un contrôle qui ne distingue pas « rien à faire » de « ça a
-    raté » finit toujours par arrêter ce qui marche."""
-    assert worker._relacher(None, None, "un-tableau", 226, "r-1") is None
-    assert worker._relacher(None, "une-ligne", None, 226, "r-1") is None
 
 
-def test_le_relachement_passe_par_l_alias_et_non_par_l_identifiant():
-    """⚠️ Le harnais ne retrouvait la ligne qu'une fois sur cinq dans les sorties
-    du fournisseur. Il n'a pas besoin de la connaître : le serveur sait ce que le
-    travail tient, et l'alias le lui demande. Le harnais n'a qu'à tenir le jeton,
-    et il le tient toujours."""
-    vus = []
-
-    class _Mcp:
-        derniere_ligne = None
-
-        def outil(self, name, arguments=None):
-            vus.append((name, arguments or {}))
-            return {}
-
-    assert worker._relacher(_Mcp(), None, "un-tableau", 226, "r-42") is True
-    nom, args = vus[-1]
-    assert nom == "data_release"
-    assert args["namespace"] == "@claimed" and args["id"] == "@claimed"
-    assert args["worker"] == "r-42"
 
 
 def test_la_rampe_ne_bride_que_la_MONTEE_en_charge():

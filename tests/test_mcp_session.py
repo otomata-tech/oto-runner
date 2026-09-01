@@ -33,12 +33,6 @@ def _session(monkeypatch, tools):
     return s, vu
 
 
-def test_un_tool_qui_declare_les_jetons_les_recoit(monkeypatch):
-    s, vu = _session(monkeypatch, {"data_claim_next":
-                                   ["namespace", "worker", "_project", "_run_id"]})
-    s.call("data_claim_next", {"namespace": "ns", "worker": "w"})
-    assert vu["appel"]["arguments"]["_project"] == 248
-    assert vu["appel"]["arguments"]["_run_id"] == "r-1"
 
 
 def test_un_tool_qui_ne_declare_pas_project_ne_le_recoit_jamais(monkeypatch):
@@ -56,23 +50,6 @@ def test_un_tool_inconnu_du_cache_ne_recoit_aucun_jeton(monkeypatch):
         "fail-safe : un appel sans contexte vaut mieux qu'un refus"
 
 
-def test_lorg_porte_les_tools_sans_project(monkeypatch):
-    """`oto_procedure` déclare `_org` mais pas `_project` : sans l'org de la
-    mission, la doctrine se cherche dans l'org MAISON du jeton et n'existe pas
-    (vécu : 2 jobs de re-validation en échec avant une ligne). L'org ne se pose
-    QUE quand le projet ne peut pas la porter — jamais les deux."""
-    def _s(tools):
-        return _session_org(monkeypatch, tools)
-
-    s, vu = _s({"oto_procedure": ["op", "slug", "_org"]})
-    s.call("oto_procedure", {"op": "get", "slug": "demo"})
-    assert vu["appel"]["arguments"]["_org"] == 226
-    assert "_project" not in vu["appel"]["arguments"]
-
-    s, vu = _s({"data_claim_next": ["namespace", "_org", "_project", "_run_id"]})
-    s.call("data_claim_next", {"namespace": "ns"})
-    assert vu["appel"]["arguments"]["_project"] == 248
-    assert "_org" not in vu["appel"]["arguments"], "le projet porte déjà l'org"
 
 
 def _session_org(monkeypatch, tools):

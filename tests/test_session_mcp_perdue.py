@@ -162,20 +162,6 @@ def _conclure(monkeypatch, etapes):
     return b
 
 
-def test_une_ligne_reservee_sans_ecriture_apres_une_panne_de_transport_echoue(
-        monkeypatch):
-    """Le job a pris une ligne, le transport a lâché, rien n'est parti : ce
-    n'est pas un succès. `ok=False` ⟹ le backend le rejoue, au lieu de laisser
-    la ligne « à traiter » sans que personne ne le sache."""
-    b = _conclure(monkeypatch, [
-        AgentStep(tool=_CLAIM, ok=True, duration_ms=1),
-        AgentStep(tool=_WRITE, ok=False, duration_ms=1, error="Session not found",
-                  transport_ko=True)])
-    assert ("complete", False, "r-NEUF") in b.appels
-    assert "transport en panne" in b.erreur and _WRITE in b.erreur
-    resultat = next(a for a in b.appels if a[0] == "complete_result")[1]
-    assert resultat["faux_depart"] is True, "le résultat déclaré reste lisible"
-    assert resultat["stopped"] == "end_turn", "l'agent, lui, a bien conclu"
 
 
 def test_une_ecriture_reussie_conclut_le_job_malgre_une_panne(monkeypatch):
@@ -189,13 +175,3 @@ def test_une_ecriture_reussie_conclut_le_job_malgre_une_panne(monkeypatch):
     assert ("complete", True, "r-NEUF") in b.appels and b.erreur is None
 
 
-def test_un_faux_depart_sans_panne_de_transport_reste_un_job_conclu(monkeypatch):
-    """Non-régression : l'agent qui réserve puis rédige en prose conclut
-    toujours « done » — c'est la borne de flotte qui le juge, pas le job."""
-    b = _conclure(monkeypatch, [
-        AgentStep(tool=_CLAIM, ok=True, duration_ms=1),
-        AgentStep(tool="serper_search", ok=False, duration_ms=1,
-                  error="quota dépassé")])
-    assert ("complete", True, "r-NEUF") in b.appels
-    resultat = next(a for a in b.appels if a[0] == "complete_result")[1]
-    assert resultat["faux_depart"] is True

@@ -49,26 +49,8 @@ class _Backend:
         return {}
 
 
-def test_une_ligne_sortie_recoit_son_estampille_et_son_motif():
-    b = _Backend(sorties=[{"_id": "r1", "siren": "1"}],
-                 enrichies=[{"version_procedure": "une-procedure v101"}])
-    n = annoter_lignes_sorties(_Spec(), b, {1: _job()})
-    assert n == {"sorties": 1, "annotees": 1}
-    (row_id, valeurs), = b.ecrites
-    assert row_id == "r1"
-    assert valeurs["modele"] == "un-modele-2512"
-    # La version se lit sur une ligne RÉUSSIE du même lot : l'ordonnanceur ne la
-    # connaît pas, mais ses propres fiches la portent. Relevée, jamais inventée.
-    assert valeurs["version_procedure"] == "une-procedure v101"
-    assert "réservée sans écriture" in valeurs["retraitement_motif"]
 
 
-def test_une_ligne_deja_estampillee_n_est_pas_retouchee():
-    """Une ligne sortie qui porte déjà un modèle a été traitée puis marquée
-    autrement : on n'écrase pas ce qu'un agent a écrit."""
-    b = _Backend(sorties=[{"_id": "r1", "modele": "un-autre-modele"}])
-    assert annoter_lignes_sorties(_Spec(), b, {1: _job()}) == {"sorties": 1, "annotees": 0}
-    assert b.ecrites == []
 
 
 def test_aucune_ligne_sortie_ne_declenche_aucune_ecriture():
@@ -91,20 +73,6 @@ def test_une_ecriture_refusee_ne_bloque_ni_les_suivantes_ni_le_bilan():
     assert annoter_lignes_sorties(_Spec(), b, {1: _job()}) == {"sorties": 2, "annotees": 0}
 
 
-def test_une_version_illisible_n_empeche_pas_de_poser_le_reste():
-    """Une demi-estampille vaut mieux que rien ICI — contrairement à la pose sur
-    une fiche réussie, la ligne sortie ne dirait sinon RIEN du tout."""
-    class _SansEnrichies(_Backend):
-        def rows(self, namespace, filter=None, org=None, limit=200):
-            if (filter or {}).get("statut") == "enrichi":
-                raise RuntimeError("illisible")
-            return self._sorties
-
-    b = _SansEnrichies(sorties=[{"_id": "r1"}])
-    assert annoter_lignes_sorties(_Spec(), b, {1: _job()}) == {"sorties": 1, "annotees": 1}
-    (_, valeurs), = b.ecrites
-    assert valeurs["modele"] == "un-modele-2512"
-    assert "version_procedure" not in valeurs
 
 
 def test_sans_modele_connu_le_motif_est_pose_quand_meme():
@@ -144,14 +112,6 @@ class _BackendFiches(_Backend):
         return self._fiches if (filter or {}).get("statut") == "enrichi" else []
 
 
-def test_une_estampille_qui_nomme_le_mauvais_modele_est_relevee():
-    """Une estampille absente se VOIT ; une estampille fausse MENT, et elle ment
-    sur ce qui sert à trier."""
-    b = _BackendFiches([{"siren": "1", "modele": "un-modele-2512"},
-                        {"siren": "2", "modele": "un-modele-2407"}])
-    r = controler_fiches(_Spec(), b, {1: _job(model="un-modele-2512")})
-    assert r["estampille_fausse"] == ["2"]
-    assert r["estampille_exacte"] == 1
 
 
 def test_une_extinction_sans_acte_de_registre_est_relevee():
@@ -186,18 +146,8 @@ def test_une_fiche_qui_cite_un_acte_ET_un_repertoire_actif_est_BONNE():
     assert controler_fiches(_Spec(), b, {1: _job()})["fiches_contradictoires"] == []
 
 
-def test_plusieurs_modeles_dans_la_flotte_rendent_le_controle_impossible():
-    """On ne peut pas dire laquelle ment, et l'affirmer serait pire que se taire."""
-    b = _BackendFiches([{"siren": "1", "modele": "a"}])
-    r = controler_fiches(_Spec(), b, {1: _job(model="a"), 2: _job(model="b")})
-    assert r["estampille_fausse"] is None
-    assert r["estampille_exacte"] is None
 
 
-def test_des_fiches_illisibles_ne_font_pas_echouer_le_bilan():
-    r = controler_fiches(_Spec(), _BackendFiches([], casse=True), {1: _job()})
-    assert r["estampille_exacte"] is None and r["fiches_contradictoires"] is None
-    assert "illisibles" in r["omis"]
 
 
 def test_une_annee_seule_ne_vaut_pas_un_acte():

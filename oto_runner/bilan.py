@@ -12,8 +12,8 @@ Deux règles de lecture, toutes deux payées cher :
 - **l'avancement se lit au TABLEAU, jamais aux jobs.** « Aboutie » = une ligne
   qui ne correspond PLUS au filtre de réservation de la flotte. Compter les
   jobs « done » comptait les tours perdus comme des succès ;
-- **le coût se lit au résultat DÉCLARÉ des jobs** (`usage_tokens`, `claims`,
-  `writes`, `claim_vide`, `faux_depart`), et les refus d'écriture au
+- **le coût se lit au résultat DÉCLARÉ des jobs** (`usage_tokens`,
+  `tool_counts`), et les refus d'appel au
   JOURNAL des appels de l'org : une écriture refusée (RBAC, quota, schéma) ne
   fait pas échouer le job — l'agent conclut « done » sans une ligne écrite.
 
@@ -58,7 +58,6 @@ import tempfile
 from datetime import datetime, timezone
 from typing import Optional
 
-from .worker import OUTILS_DE_TENUE
 
 logger = logging.getLogger("oto_runner.bilan")
 
@@ -68,54 +67,17 @@ _REFUS_FENETRE_MAX_MIN = 24 * 60   # une campagne dure des semaines : on plafonn
 _REFUS_LIMITE = 200                # les N derniers appels lus au journal d'org
 
 
-def _par_suffixe(compte: dict, suffixe: str) -> int:
-    """La somme d'un compte d'appels par outil, testée par SUFFIXE.
-
-    ⚠️ Les noms d'outils arrivent parfois PRÉFIXÉS par le connecteur MCP
-    (`<connecteur>_data_write`) : une égalité stricte compte zéro écriture sur
-    une campagne qui en fait des milliers."""
-    return sum(int(v or 0) for k, v in compte.items() if str(k).endswith(suffixe))
-
-
-def _claims_writes(resultat: dict) -> tuple[int, int]:
-    """(lignes réservées, écritures) d'un job. Le worker les DÉCLARE quand il
-    les connaît ; sinon elles se dérivent de `tool_counts`.
-
-    ⚠️ Une RÉSERVATION n'est pas un APPEL de réservation : un `data_claim_next`
-    qui ne rend aucune ligne n'a rien réservé (fin de file — il y a toujours
-    plus d'agents que de lignes). Le worker, qui voit la sortie, le déclare ;
-    à défaut on applique SA règle de repli — la MÊME liste, importée, sous peine
-    de voir le bilan et la borne de flotte se contredire : un job dont tous les
-    appels sont des gestes de TENUE (réserver, relâcher, ouvrir et clore le
-    run) n'a fait aucun travail, donc il n'a rien réservé."""
-    claims, writes = resultat.get("claims"), resultat.get("writes")
-    compte = resultat.get("tool_counts") or {}
-    if claims is None:
-        travail = [k for k in compte
-                   if not any(str(k).endswith(t) for t in OUTILS_DE_TENUE)]
-        claims = (_par_suffixe(compte, "data_claim_next") if travail else 0)
-    if writes is None:
-        writes = _par_suffixe(compte, "data_write")
-    return int(claims), int(writes)
-
-
-def _faux_depart(resultat: dict, claims: int, writes: int) -> bool:
-    """Le faux départ — la ligne RÉSERVÉE, rien d'écrit. Le worker le DÉCLARE
-    (lui seul a vu les appels) et sa parole prime ; un résultat qui ne le porte
-    pas (un job en ÉCHEC, par exemple) se juge sur l'asymétrie — sur des
-    réservations réelles, donc, jamais sur des claims restés vides."""
-    if "faux_depart" in resultat:
-        return bool(resultat["faux_depart"])
-    return bool(claims) and not writes
-
 
 def _postes_jobs(jobs: dict) -> dict:
     """Ce que les jobs CONCLUS de la flotte disent : volumes, coût, écritures.
 
     Un job non conclu n'a pas de résultat : le compter serait compter du vide,
     on lève plutôt que de le taire."""
-    postes = {"termines": 0, "echoues": 0, "faux_departs": 0,
-              "jetons": 0, "claims": 0, "writes": 0}
+    # ⚠️ Le bilan ne compte plus les réservations ni les écritures : il
+    # devinait le métier à partir des NOMS d'outils. Un exécuteur d'agents ne
+    # sait pas ce qu'écrire veut dire — c'est à qui commande le travail de le
+    # juger, sur les comptes d'appels que chaque travail déclare.
+    postes = {"termines": 0, "echoues": 0, "jetons": 0}
     for jid, job in sorted(jobs.items()):
         statut = job.get("status")
         if statut not in ("done", "failed"):
@@ -123,11 +85,6 @@ def _postes_jobs(jobs: dict) -> dict:
                              f"{statut!r}) — le bilan ne compte que des jobs conclus")
         resultat = job.get("result") or {}
         postes["jetons"] += int(resultat.get("usage_tokens") or 0)
-        claims, writes = _claims_writes(resultat)
-        postes["claims"] += claims
-        postes["writes"] += writes
-        if _faux_depart(resultat, claims, writes):
-            postes["faux_departs"] += 1
         postes["termines" if statut == "done" else "echoues"] += 1
     return postes
 
@@ -189,7 +146,6 @@ def _ligne(bilan: dict) -> str:
     lignes, jobs, jetons = bilan["lignes"], bilan["jobs"], bilan["jetons"]
     abouties = "?" if lignes["abouties"] is None else lignes["abouties"]
     postes = [f"abouties {abouties}/{lignes['depart']}",
-              f"faux départs {jobs['faux_departs']}",
               f"{_jetons_lisibles(jetons['total'])} jetons"]
     postes.append(f"{_jetons_lisibles(jetons['par_aboutie'])}/aboutie"
                   if jetons["par_aboutie"] is not None
@@ -485,8 +441,7 @@ def ecrire_bilan(spec, backend, jobs: dict, *, lignes_initiales: int,
         "secondes": round(float(secondes), 1),
         "lignes": {"depart": lignes_initiales, "restantes": restantes,
                    "abouties": abouties},
-        "jobs": {"termines": postes["termines"], "echoues": postes["echoues"],
-                 "faux_departs": postes["faux_departs"]},
+        "jobs": {"termines": postes["termines"], "echoues": postes["echoues"],},
         # ⚠️ Compté À PART, jamais fondu dans « abouties » : un bilan qui rend
         # « 98 traitées » sans dire que 2 sont sorties muettes rend un
         # dénominateur amputé qui a l'air complet.
@@ -502,7 +457,6 @@ def ecrire_bilan(spec, backend, jobs: dict, *, lignes_initiales: int,
                    # rien produit). Aucune aboutie ⟹ null, pas une division.
                    "par_aboutie": (round(postes["jetons"] / abouties)
                                    if abouties else None)},
-        "ecritures": {"claims": postes["claims"], "writes": postes["writes"]},
         "refus_ecriture": refus,
         "refus_ecriture_omis": refus_omis,
     }
