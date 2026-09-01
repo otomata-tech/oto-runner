@@ -215,7 +215,7 @@ class _BackendLigne(_Backend):
 
     def row(self, namespace, row_id, org=None):
         self.relectures += 1
-        return {"siren": "924260243",
+        return {"siren": "000000000",
                 "modele": "mistral-large-2512" if self.estampillee else None}
 
 
