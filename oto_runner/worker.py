@@ -495,8 +495,14 @@ def _valeurs_cliente_detruites(fiche, registre=None, namespace=None) -> list:
             continue                      # case vide au depart : remplir est permis
         if not _vide(ap) and str(ap) == str(av):
             continue                      # inchangee
-        if col == "effectif" and registre and str(ap) == str(registre):
-            continue                      # arbitrage CONFRONTE, pas cru sur parole
+        # ⚠️ PLUS AUCUNE EXEMPTION. Elle laissait passer « l'agent a ecrit la
+        # valeur du registre en cochant l'arbitrage » — coherent avec la regle
+        # d'hier, devenu une PORTE DEROBEE le 01/09 quand la consigne a tranche
+        # « on ne remplace jamais, l'arbitrage est un SIGNALEMENT ».
+        #
+        # Trois etages portaient trois versions de la meme regle — la page, les
+        # donnees, cette garde — parce que la regle avait vecu dans un message.
+        # La garde s'aligne sur la PAGE SERVIE, jamais sur un message.
         perdues.append((col, av, ap))
     return perdues
 

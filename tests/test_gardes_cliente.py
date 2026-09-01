@@ -68,17 +68,23 @@ def test_un_zero_legitime_nest_pas_une_case_vide(monkeypatch, tmp_path):
         "un zéro effacé est une destruction, pas un remplissage"
 
 
-def test_un_arbitrage_est_CONFRONTE_au_registre_pas_cru_sur_parole(
-        monkeypatch, tmp_path):
-    """La valeur que le registre rend passe ; toute autre est une destruction —
-    même annoncée comme un arbitrage. L'exemption d'avant fermait la forme vue,
-    pas la classe : un agent écrivant `1_2` par-dessus `50_99` passait."""
+def test_un_arbitrage_ne_dispense_PAS_de_garder_sa_valeur(monkeypatch, tmp_path):
+    """⚠️ RENVERSÉ le 01/09. La garde exemptait « l'agent a écrit la valeur du
+    registre en cochant l'arbitrage » — cohérent avec la règle d'alors.
+
+    La consigne a tranché depuis : **on ne remplace jamais, l'arbitrage est un
+    signalement**. L'exemption est donc devenue une porte dérobée — le geste que
+    la page interdit passait la garde en silence.
+
+    Une valeur remplacée est une valeur remplacée, drapeau ou pas.
+    """
     _pose_socle(monkeypatch, tmp_path, [{"siren": "111", "effectif": "50_99"}])
     fiche = {"siren": "111", "effectif": "20_49"}
-    assert W._valeurs_cliente_detruites(fiche, registre="20_49") == [], \
-        "la valeur du registre est vérifiable, donc recevable"
+    perdues = W._valeurs_cliente_detruites(fiche, registre="20_49")
+    assert [c for c, _, _ in perdues] == ["effectif"], \
+        "la valeur du registre reste un remplacement"
     assert [c for c, _, _ in W._valeurs_cliente_detruites(fiche, registre="100_199")], \
-        "une valeur que le registre ne porte pas reste une destruction"
+        "et une valeur que le registre ne porte pas l'est aussi"
 
 
 # ── LA GARDE DES CONTACTS ───────────────────────────────────────────────────

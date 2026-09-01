@@ -371,6 +371,26 @@ PYCRAN
     exit 1
   fi
   echo "pré-vol : l'instantané est bien celui de « $NS_MIROIR » ✅"
+  # ⚠️ L'ENDPOINT SE CONSTATE, comme le socle. Le 01/09, un correctif de
+  # plateforme rendant destructrice une écriture banale a été mis en
+  # préproduction PENDANT un passage — et la préproduction PARTAGE LA BASE avec
+  # la production. Ce jour-là l'endpoint nous a sauvés par défaut ; il doit nous
+  # protéger par vérification.
+  #
+  # Et la leçon est plus large : une décision de configuration qui vit dans un
+  # fichier d'environnement peut changer sous nous sans que rien ne le signale.
+  # Le même matin, un lancement est parti sur le mauvais transport pour cette
+  # raison exacte, en annonçant « active ».
+  _url="${OTO_MCP_URL:-${OTO_BASE:-}/mcp}"
+  case "$_url" in
+    https://mcp.oto.cx/*)
+      echo "endpoint constaté : $_url (production)" ;;
+    *)
+      echo "⛔ REFUS DE LANCER — l'endpoint est « $_url », pas la production."
+      echo "   Un passage écrit dans la base de la cliente : il part par la"
+      echo "   production, ou il ne part pas. Corrige OTO_BASE / OTO_MCP_URL."
+      exit 1 ;;
+  esac
   echo "socle exporté par le lancement : $(basename "$_socle")"
 
   # ⚠️ SOCLE EXIGE — condition de DEPART, pas condition de garde.
