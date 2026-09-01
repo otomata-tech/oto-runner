@@ -350,6 +350,45 @@ PYCRAN
   fi
   echo "pré-vol : l'instantané est bien celui de « $NS_MIROIR » ✅"
   echo "socle exporté par le lancement : $(basename "$_socle")"
+
+  # ⚠️ SOCLE EXIGE — condition de DEPART, pas condition de garde.
+  #
+  # La garde des valeurs de la cliente compare au socle, et a lui seul : la
+  # couche `origine` repond a une AUTRE question (« avant la derniere
+  # ecriture », pas « avant CE passage ») et a fait tirer la condition d'arret
+  # sur un re-encodage legitime le 01/09. Sans socle, la garde refuse de
+  # conclure — donc la vague ne part pas.
+  if [ ! -s "$_socle" ]; then
+    echo "⛔ REFUS DE LANCER — le socle du passage est absent ou vide."
+    echo "   La garde des valeurs de la cliente compare a LUI, et a rien"
+    echo "   d'autre. Sans reference datee, elle ne peut pas distinguer ce que"
+    echo "   CE passage a fait de ce qui etait deja la. Rien n'a ete arme."
+    exit 1
+  fi
+
+  # ⚠️ Et il doit ATTEINDRE les agents : ils lisent leur environnement au
+  # demarrage, dans le fichier d'environnement. Ecrire la variable apres les
+  # avoir demarres ne servirait a rien — ils tourneraient sans reference et la
+  # garde rendrait « non mesure » partout, ce qui ressemble a « aucune faute ».
+  _env="$RACINE/.env"
+  grep -v "^OTO_RUNNER_SOCLE=" "$_env" > "$_env.tmp" 2>/dev/null || true
+  echo "OTO_RUNNER_SOCLE=$_socle" >> "$_env.tmp"
+  mv "$_env.tmp" "$_env"
+  echo "socle transmis aux agents : $(grep '^OTO_RUNNER_SOCLE=' "$_env")"
+  for _u in 1 2 3; do systemctl restart "oto-runner@$_u" 2>/dev/null || true; done
+  sleep 2
+  _vus=0
+  for _u in 1 2 3; do
+    systemctl show "oto-runner@$_u" -p Environment 2>/dev/null \
+      | grep -q "OTO_RUNNER_SOCLE=$_socle" && _vus=$((_vus+1))
+  done
+  echo "agents relances avec le socle : $_vus/3"
+  if [ "$_vus" -lt 3 ]; then
+    echo "⛔ REFUS DE LANCER — le socle n'a pas atteint les trois agents."
+    echo "   Une garde qui tourne sans sa reference rend « non mesure » sur"
+    echo "   chaque ligne, et « non mesure » se lit comme « aucune faute »."
+    exit 1
+  fi
   echo "   md5 : $(md5sum "$_socle" | cut -d" " -f1)"
   echo "   ⚠️ à DÉPOSER dans le dossier partagé de la mission avec son empreinte :"
   echo "      c'est là, et seulement là, qu'un instantané est un fait."

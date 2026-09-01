@@ -354,6 +354,70 @@ def _ligne_par_alias(mcp, run_id: Optional[str], org) -> Optional[str]:
 # `contacts` n'y est pas : c'est une liste, et le serveur refuse la couche
 # `origine` dessus. Sa garde est la ②, qui compare au registre et n'a pas
 # besoin de l'état d'avant.
+_INSEE_VERS_NOTRE = {
+    "00": "sans_salarie", "01": "1_2", "02": "3_5", "03": "6_9",
+    "11": "10_19", "12": "20_49", "21": "50_99", "22": "100_199",
+    "31": "200_249", "32": "250_499", "41": "500_999", "42": "1000_1999",
+    "51": "2000_4999", "52": "5000_9999", "53": "10000_plus"}
+
+
+def _tranche_registre(mcp, siren):
+    """La tranche que le registre rend, dans NOTRE echelle. `None` s'il se tait.
+
+    Sert a confronter un arbitrage : la valeur ecrite est-elle bien celle du
+    registre ? Un drapeau se coche ; une valeur du registre ne s'invente pas.
+    """
+    if not siren:
+        return None
+    try:
+        rep = mcp.outil("fr_get", {"siren": str(siren)})
+    except Exception:  # noqa: BLE001 — un registre injoignable n'atteste rien
+        return None
+    brut = json.dumps(rep, ensure_ascii=False) if not isinstance(rep, str) else rep
+    m = re.search(r'"tranche_effectif_salarie"\s*:\s*"?([^",}]{0,6})', brut)
+    if not m:
+        return None
+    return _INSEE_VERS_NOTRE.get((m.group(1) or "").strip().upper())
+
+
+_SOCLE_CACHE = {}
+
+
+def _socle_du_passage():
+    """L'etat des lignes AVANT le passage, lu dans le socle exporte au depart.
+
+    ⚠️ PAS DE REPLI sur `origine` : elle repond a une autre question — « avant
+    la derniere ecriture », pas « avant CE passage ». Le 01/09, elle a fait
+    tirer la condition d'arret sur un re-encodage legitime de la veille.
+
+    Rend `None` quand le socle manque. L'appelant doit alors REFUSER de
+    conclure, jamais deviner : un verdict qui ne sait pas sur quoi il repose ne
+    vaut rien.
+    """
+    chemin = os.environ.get("OTO_RUNNER_SOCLE") or ""
+    if not chemin:
+        return None
+    if chemin in _SOCLE_CACHE:
+        return _SOCLE_CACHE[chemin]
+    try:
+        with open(chemin, encoding="utf-8") as f:
+            brut = json.load(f)
+    except Exception as e:  # noqa: BLE001 — un socle illisible n'est pas un socle
+        logger.error("socle illisible (%s) : la garde des valeurs ne peut pas "
+                     "tourner — elle REFUSE au lieu de deviner", e)
+        _SOCLE_CACHE[chemin] = None
+        return None
+    lignes = brut if isinstance(brut, list) else (brut.get("rows") or [])
+    par = {}
+    for r in lignes:
+        s = _nu((r or {}).get("siren"))
+        if s:
+            par[str(s)] = r
+    _SOCLE_CACHE[chemin] = par
+    logger.info("socle du passage charge : %d fiches (%s)", len(par), chemin)
+    return par
+
+
 COLONNES_CLIENTE = ("effectif", "effectif_exact", "site_web",
                     "entreprise_email", "entreprise_telephone")
 
@@ -378,38 +442,77 @@ def _ordre_valeur_cliente(detruites) -> str:
     return "\n".join(lignes)
 
 
-def _valeurs_cliente_detruites(fiche) -> list:
-    """Les valeurs de la cliente vidées ou remplacées, d'après ce que le
-    SERVEUR a gardé. Rend [(colonne, valeur_avant, valeur_apres), …].
+def _valeurs_cliente_detruites(fiche, registre=None) -> list:
+    """Les valeurs de la cliente videes ou remplacees par CE passage.
 
-    ⚠️ L'exemption de l'arbitrage se lit ICI et pas ailleurs : une écriture qui
-    porte `retraitement: arbitrage` avec son motif est une décision prévue par
-    la consigne. La réparer serait défaire la règle en silence.
+    Rend une liste de (colonne, avant, apres), ou `None` quand la comparaison
+    n'a pas pu avoir lieu — **et `None` n'est pas une liste vide** : « non
+    mesure » n'est pas « aucune destruction ».
+
+    ⚠️ La reference est le SOCLE, pas la couche `origine`. Voir
+    `_socle_du_passage` : une valeur d'avant sans date ne dit pas avant quoi.
+
+    ⚠️ AUCUNE EXEMPTION D'ARBITRAGE. On CONFRONTE : un arbitrage ecrit la
+    valeur que le REGISTRE rend, et le harnais peut la verifier. Un drapeau se
+    coche ; une valeur du registre ne s'invente pas. L'exemption precedente
+    laissait passer un agent qui ecrivait `1_2` par-dessus `50_99` — elle
+    fermait la forme vue, pas la classe.
+    """
+    if not isinstance(fiche, dict):
+        return None
+    socle = _socle_du_passage()
+    if socle is None:
+        return None
+    avant = socle.get(str(_nu(fiche.get("siren")) or ""))
+    if avant is None:
+        return None
+    perdues = []
+    for col in COLONNES_CLIENTE:
+        av, ap = _nu(avant.get(col)), _nu(fiche.get(col))
+        if _vide(av):
+            continue                      # case vide au depart : remplir est permis
+        if not _vide(ap) and str(ap) == str(av):
+            continue                      # inchangee
+        if col == "effectif" and registre and str(ap) == str(registre):
+            continue                      # arbitrage CONFRONTE, pas cru sur parole
+        perdues.append((col, av, ap))
+    return perdues
+
+
+def _domaine(x) -> str:
+    """Le domaine d'une adresse ou d'une URL, en minuscules, sans www."""
+    t = str(x or "").strip().lower()
+    if "@" in t:
+        t = t.rsplit("@", 1)[-1]
+    t = re.sub(r"^[a-z]+://", "", t).split("/")[0].split("?")[0]
+    t = re.sub(r"^www\.", "", t)
+    return t.split(":")[0].strip()
+
+
+def _domaines_etrangers(fiche) -> list:
+    """DESCRIPTIF, jamais eliminatoire : un domaine sans rapport avec le nom.
+
+    ⚠️ Une maison peut legitimement porter un domaine qui ne lui ressemble pas
+    — un nom commercial, une marque, un groupe. **Ce poste ne bloque rien.**
+    Mais une substitution sur une case VIDE ne laisse aucune autre trace :
+    personne ne la voit aujourd'hui.
     """
     if not isinstance(fiche, dict):
         return []
-    # ⚠️ L'exemption couvre le GESTE d'arbitrer, pas l'ÉTAT de la ligne. Une
-    # ligne qui portait déjà un arbitrage n'est pas un blanc-seing pour l'agent
-    # suivant : les cinq arbitrages posés le 31/08 sont dans le lot de
-    # production, et sans ce resserrement une destruction y passait invisible.
-    arbitre = (str(_nu(fiche.get("retraitement")) or "") == "arbitrage"
-               and not _vide(_nu(fiche.get("retraitement_motif"))))
-    perdues = []
-    for col in COLONNES_CLIENTE:
-        if arbitre and col == "effectif":
-            # ⚠️ ABSTENTIONS — un arbitrage retient la valeur du REGISTRE, une
-            # tranche précise. « non renseigné » n'est jamais le résultat d'un
-            # arbitrage : c'est le renoncement qu'on combat. L'exemption ne le
-            # couvre donc pas, même sur une ligne arbitrée.
-            if str(_nu(fiche.get(col)) or "") != "non_renseigne":
-                continue
-        avant = fiche.get("%s.origine" % col)
-        apres = _nu(fiche.get(col))
-        if _vide(avant):
-            continue                      # rien n'a été écrasé sur cette colonne
-        if _vide(apres) or str(apres) != str(avant):
-            perdues.append((col, avant, apres))
-    return perdues
+    mots = {m for m in _mots_du_nom(_nu(fiche.get("raison_sociale"))
+                                    or _nu(fiche.get("nom")) or "")
+            if len(m) > 3}
+    if not mots:
+        return []
+    vus = []
+    for col in ("entreprise_email", "site_web"):
+        d = _domaine(_nu(fiche.get(col)))
+        if not d:
+            continue
+        plat = re.sub(r"[^a-z0-9]", "", d)
+        if not any(m in plat for m in mots):
+            vus.append((col, d))
+    return vus
 
 
 def _contacts_a_retirer(fiche, dirigeants_reels) -> tuple:
@@ -1230,7 +1333,10 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         faux_nom = bool(trouve) and not _nom_present(trouve[0], fiche)
         # ⚠️ Les trois gardes du 01/09 — le harnais ne peut pas refuser
         # l'écriture, il renvoie l'agent et répare en dernier recours.
-        detruites = _valeurs_cliente_detruites(fiche)
+        # ⚠️ La tranche du registre sert a CONFRONTER un arbitrage, pas a
+        # croire son drapeau.
+        _tr = _tranche_registre(mcp, _nu((fiche or {}).get("siren")))
+        detruites = _valeurs_cliente_detruites(fiche, _tr) or []
         inventes = _contact_invente_sur_registre_vide(fiche, trouve)
         etrangers = _sirens_etrangers_dans_notes(fiche)
         if (not manque and not faux_nom and not tranche_nn
@@ -1335,7 +1441,8 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     if rappels_contact >= RENVOIS_MAX and ligne_rc:
         try:
             fiche = backend.row(p["namespace"], ligne_rc, org=p.get("org_id"))
-            restantes = _valeurs_cliente_detruites(fiche)
+            restantes = _valeurs_cliente_detruites(
+                fiche, _tranche_registre(mcp, _nu((fiche or {}).get("siren")))) or []
             if restantes:
                 backend.patch_row(p["namespace"], ligne_rc,
                                   {col: av for col, av, _ in restantes},
@@ -1347,7 +1454,9 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                                ", ".join(valeurs_reparees))
                 # on RELIT : une réparation annoncée n'est pas une réparation faite
                 apres = backend.row(p["namespace"], ligne_rc, org=p.get("org_id"))
-                if _valeurs_cliente_detruites(apres):
+                if _valeurs_cliente_detruites(
+                        apres, _tranche_registre(
+                            mcp, _nu((apres or {}).get("siren")))):
                     logger.error("job %s : la restauration a été refusée ou "
                                  "partielle — la valeur de la cliente est "
                                  "TOUJOURS perdue", job["id"])
@@ -1513,6 +1622,12 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 "contacts_fabriques_retires": contacts_retires,
                 "valeurs_cliente_detruites": (None if detruites is None
                                               else [c for c, _, _ in detruites]),
+                # ⚠️ Un verdict qui ne sait pas sur quoi il repose ne vaut rien.
+                "reference_comparaison": ("socle"
+                                          if _socle_du_passage() is not None
+                                          else None),
+                "domaines_etrangers": _domaines_etrangers(fiche)
+                if ligne_rc else None,
                 # ⚠️ Rendu MÊME À ZÉRO : un zéro lisible dit « aucun cas », un
                 # poste absent ne dit rien. Trente-cinq fiches sur cent au
                 # neuvième passage — si ce compte reste à zéro au suivant, c'est
