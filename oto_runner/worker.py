@@ -1455,6 +1455,15 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 detruites = (detruites or []) + [t for t in tardives
                                                  if t not in (detruites or [])]
                 rappels_contact = max(rappels_contact, RENVOIS_MAX)
+            # ⚠️ Et le contact fabrique : meme trou, meme remede. Sa garde vivait
+            # dans le bloc « deux rappels ont eu lieu », donc un contact invente
+            # sur une fiche qui n'abime rien d'autre n'etait jamais retire.
+            _reels = _dirigeant_a_contacter(mcp, _nu((fiche or {}).get("siren")))
+            _faux, _ = _contacts_a_retirer(fiche, [_reels[0]] if _reels else [])
+            if _faux:
+                logger.warning("job %s : contact fabrique detecte au controle "
+                               "final — %s", job["id"], ", ".join(_faux))
+                rappels_contact = max(rappels_contact, RENVOIS_MAX)
         except Exception as e:  # noqa: BLE001 — un contrôle qui échoue se dit
             logger.error("job %s : contrôle final impossible (%s)", job["id"], e)
 
