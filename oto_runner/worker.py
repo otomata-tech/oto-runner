@@ -1368,6 +1368,10 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # ⚠️ None, pas [] : sans ligne, la boucle ne tourne pas et le poste doit
     # dire « non mesuré », jamais « aucune destruction ».
     detruites = None
+    vues_en_boucle = set()
+    # ⚠️ Declaree ICI, avec les autres : une variable qui n'existe que sur un
+    # chemin et qu'on lit sur tous a casse trois choses ce soir.
+    corrigees_agent = []
     # ⚠️ Et `fiche` n'est assignee QUE dans la boucle : sans ligne, elle
     # n'existe pas. Trois tests l'ont attrape ; en production le travail aurait
     # leve apres avoir tout fait.
@@ -1406,6 +1410,10 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         # croire son drapeau.
         _tr = _tranche_registre(mcp, _nu((fiche or {}).get("siren")))
         detruites = _valeurs_cliente_detruites(fiche, _tr) or []
+        # ⚠️ On retient ce qui a ete vu PENDANT la boucle : si ca a disparu au
+        # controle final sans que la machine n'ecrive, c'est l'agent qui a
+        # corrige — et cette mesure-la parle du modele, pas de la garde.
+        vues_en_boucle |= {c for c, _, _ in detruites}
         inventes = _contact_invente_sur_registre_vide(fiche, trouve)
         etrangers = _sirens_etrangers_dans_notes(fiche)
         if (not manque and not faux_nom and not tranche_nn
@@ -1525,6 +1533,14 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             # sur une fiche qui n'abime rien d'autre n'etait jamais retire.
             # ⚠️ TOUS les dirigeants, pas le premier : sur une maison qui en
             # a deux, comparer au premier declare fabrique le second.
+            # ⚠️ Ce que l'agent a corrige de lui-meme : vu pendant la boucle,
+            # absent au controle final, et la machine n'a encore rien ecrit.
+            _restantes = {c for c, _, _ in (tardives or [])}
+            corrigees_agent = sorted(vues_en_boucle - _restantes)
+            if corrigees_agent:
+                logger.info("job %s : %d valeur(s) corrigee(s) par l'AGENT "
+                            "apres renvoi — %s", job["id"],
+                            len(corrigees_agent), ", ".join(corrigees_agent))
             _reels = _tous_les_dirigeants(mcp, _nu((fiche or {}).get("siren")))
             _faux, _ = ([], None) if _reels is None else _contacts_a_retirer(
                 fiche, _reels)
@@ -1732,6 +1748,9 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 "rappel_contact_mesure": bool(ligne_rc),
                 "rappels_contact": rappels_contact,
                 "valeurs_cliente_reparees": valeurs_reparees,
+                # ⚠️ JAMAIS confondu avec la reparation machine : l'un protege
+                # la cliente, l'autre dit que le modele apprend dans la boucle.
+                "valeurs_corrigees_agent": corrigees_agent,
                 "contacts_fabriques_retires": contacts_retires,
                 "valeurs_cliente_detruites": (None if detruites is None
                                               else [c for c, _, _ in detruites]),
