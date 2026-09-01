@@ -334,3 +334,17 @@ def test_sans_table_demandee_la_garde_compare_comme_avant(monkeypatch, tmp_path)
 def test_la_table_de_linstantane_est_lisible(monkeypatch, tmp_path):
     _socle_de(monkeypatch, tmp_path, "miroir-fidele-A", [{"siren": "1"}])
     assert W._table_du_socle() == "miroir-fidele-A"
+
+
+def test_un_prenom_commun_ne_masque_pas_la_disparition_dun_contact():
+    """⚠️ Mesuré le 01/09 sur une fiche du lot livrable : « Jean Dupont »
+    passait pour une variante de « Jean-Baptiste Bourrat » — le jeton « Jean »
+    suffisait — et la disparition du contact fourni par la cliente n'était pas
+    vue. C'est la MÊME classe que le défaut corrigé le matin même sur la garde
+    des contacts fabriqués. Les deux comparent désormais pareil."""
+    avant = {"contacts": [{"nom": "Jean-Baptiste Bourrat"},
+                          {"nom": "Sophie de Sivry"}]}
+    apres = {"contacts": [{"nom": "Jean Dupont"}, {"nom": "Marie Martin"},
+                          {"nom": "Sophie de Sivry"}]}
+    perdus = W._contacts_perdus(apres, avant)
+    assert [c["nom"] for c in perdus] == ["Jean-Baptiste Bourrat"]

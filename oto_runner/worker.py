@@ -573,7 +573,17 @@ def _contacts_perdus(fiche, avant) -> Optional[list]:
         nom = _nu(c.get("nom"))
         if not nom:
             continue
-        if not any(_mots_du_nom(nom) & p for p in presents):
+        # ⚠️ INCLUSION, pas intersection. Un jeton commun suffisait : « Jean
+        # Dupont » passait pour une variante de « Jean-Baptiste Bourrat », et
+        # la disparition d'un interlocuteur de la cliente n'etait pas vue —
+        # mesure du 01/09 sur une fiche du lot livrable.
+        #
+        # C'est la MEME classe que le defaut corrige le matin meme sur la garde
+        # des contacts fabriques (« Nathalie Bernard » prise pour
+        # « Chaussegros Bernard »). Corrige le cas, pas la classe : troisieme
+        # fois. Les deux gardes comparent desormais pareil.
+        mots = _mots_du_nom(nom)
+        if not any(mots <= p for p in presents):
             manquants.append(c)
     return manquants
 
