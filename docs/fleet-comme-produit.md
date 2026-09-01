@@ -154,9 +154,61 @@ tourné.
 
 ---
 
+### Une garde EXPIRE, ou se reprend par un fait daté
+
+**Une garde armée qui n'est jamais rendue bloque un tableau jusqu'à on ne sait
+quand.** Le passage suivant se heurte à un refus, quelqu'un désarme les gardes à
+la main — **et à partir de là, désarmer devient le geste normal.**
+
+*C'est exactement la dette qu'on solde ailleurs : des centaines de lignes
+retenues par des traitements morts qui n'ont jamais rendu ce qu'ils tenaient.*
+
+> **Les gardes d'un passage portent une échéance.** Passé ce délai, elles ne
+> tiennent plus rien — et un passage qui reprend le tableau le dit dans son
+> journal, avec la date de ce qu'il a trouvé.
+
+### Un refus de concurrence distingue le vivant du résidu
+
+**Deux situations n'ont rien à voir et ne se disent pas pareil :**
+
+```
+un passage VIVANT tient le tableau
+   ⟹ dire QUI, DEPUIS QUAND, et QUOI FAIRE : attendre, ou prendre un
+      périmètre disjoint. Un refus qui enseigne.
+
+un passage MORT a laissé ses gardes armées
+   ⟹ ce n'est pas une concurrence, c'est un RÉSIDU — et c'est ce cas qui
+      fabrique la mauvaise habitude, parce qu'il n'a aucune raison d'attendre.
+```
+
+---
+
+## ⑥ Une garde imprécise se paie en contournements, pas en accidents
+
+**Une garde qui ne sait pas sur quoi elle porte finit contournée** — et le
+contournement est d'abord légitime, ce qui le rend durable.
+
+**Le cas qui l'a révélé, le jour même où ce document a été écrit** : le contrôle
+de publication refuse de pousser pendant qu'une production tourne, parce qu'un
+déploiement changerait le code que les agents lisent. **Il ne distingue pas un
+fichier de documentation d'un changement de code.** Ce document-ci a donc été
+refusé, et publié par la porte d'échappement prévue.
+
+> **Elle n'était pas trop stricte : elle était imprécise.** Et l'imprécision se
+> paie toujours de la même façon — pas en accidents, mais en contournements
+> légitimes qui deviennent des réflexes. *Le premier est posé en le sachant et
+> en le disant ; le troisième sera posé par quelqu'un qui ne le dira pas.*
+
+**Conséquence pour le produit** : une garde de `fleet` porte sur ce qu'elle sait
+nommer. Un refus qui ne peut pas dire *pourquoi ce cas précis est dangereux* est
+un refus qui sera contourné — et il vaut mieux ne pas le poser que le poser trop
+large.
+
+---
+
 ## Ce que ce document ne tranche pas
 
 - **Le nom des opérations** et la forme exacte de leurs arguments.
 - **Qui a le droit de lancer** — un rôle, une option d'organisation, rien.
-- **Ce qui se passe quand deux passages visent le même tableau.** Aujourd'hui
-  c'est un refus mécanique du lancement ; en produit, il faudra le dire mieux.
+- **La durée d'une échéance de garde**, et ce qu'un passage écrit dans son
+  journal quand il reprend un tableau tenu par un mort.
