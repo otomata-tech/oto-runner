@@ -183,26 +183,50 @@ un passage MORT a laissé ses gardes armées
 
 ---
 
-## ⑥ Une garde imprécise se paie en contournements, pas en accidents
+## ⑥ Ce qui doit résister, c'est le PASSAGE — pas le monde autour de lui
 
-**Une garde qui ne sait pas sur quoi elle porte finit contournée** — et le
-contournement est d'abord légitime, ce qui le rend durable.
+**Un passage ne gèle jamais rien.** Ni une publication, ni un déploiement, ni un
+tag. **La résilience est une propriété du traitement — reprise, idempotence,
+bail qui expire — pas du processus de livraison.**
 
-**Le cas qui l'a révélé, le jour même où ce document a été écrit** : le contrôle
-de publication refuse de pousser pendant qu'une production tourne, parce qu'un
-déploiement changerait le code que les agents lisent. **Il ne distingue pas un
-fichier de documentation d'un changement de code.** Ce document-ci a donc été
-refusé, et publié par la porte d'échappement prévue.
+⚠️ **C'est une correction, et elle porte sur ce document lui-même.** Une première
+version décrivait comme « imprécise » une garde qui refuse de publier pendant
+qu'un passage tourne, et proposait de l'affiner pour qu'elle distingue un
+document d'un changement de code. **La bonne critique n'était pas là :**
 
-> **Elle n'était pas trop stricte : elle était imprécise.** Et l'imprécision se
-> paie toujours de la même façon — pas en accidents, mais en contournements
-> légitimes qui deviennent des réflexes. *Le premier est posé en le sachant et
-> en le disant ; le troisième sera posé par quelqu'un qui ne le dira pas.*
+> **Une garde de ce genre ne doit pas exister.** *« On ne peut pas se contraindre
+> à ça — c'est la production qui doit résister. »*
 
-**Conséquence pour le produit** : une garde de `fleet` porte sur ce qu'elle sait
-nommer. Un refus qui ne peut pas dire *pourquoi ce cas précis est dangereux* est
-un refus qui sera contourné — et il vaut mieux ne pas le poser que le poser trop
-large.
+**Un dispositif qui protège un passage en bloquant les livraisons déplace son
+coût sur tout le monde**, et finit contourné par ceux qu'il gêne le plus. Ce
+n'est pas un principe : c'est mesuré. Un gel des livraisons a été essayé fin
+août puis levé — **deux rejeux, zéro perte sur neuf tags**. *Le coût réel d'une
+coupure était plus petit que celui du gel.*
+
+### Le même défaut, vu des deux bords
+
+**Une garde qui reste armée après la mort de son passage** et **une garde qui
+gèle les livraisons pendant sa vie** sont la même erreur de conception :
+
+> **faire porter au reste du système la fragilité qu'on n'a pas traitée chez
+> soi.**
+
+**Donc `fleet` n'embarque aucune garde de ce genre** — ni « on ne déploie pas
+pendant un passage », ni « on ne publie pas tant qu'un verdict n'est pas rendu ».
+
+**Ce qu'elle embarque à la place** : un passage qui **survit** à un déploiement.
+
+```
+reprenable    un travail interrompu se reprend là où il en était
+idempotent    le rejouer ne double rien
+bail qui EXPIRE   il libère de lui-même, il ne bloque pas jusqu'à
+                  ce que quelqu'un vienne le rendre
+```
+
+⚠️ **Et la conséquence pratique sur la mesure** : un passage coupé en deux par un
+déploiement produit des relevés hétérogènes. **Ce n'est pas une raison de geler
+— c'est une raison de DATER**, pour qu'un verdict puisse dire quelle moitié a
+tourné sous quelle version.
 
 ---
 
