@@ -967,8 +967,8 @@ def _reparer_ligne(mcp, backend, namespace, ligne, valeurs, run_id, org):
             logger.warning("reparation par le canal du travail NON confirmee a "
                            "la relecture — on tente l'annotation directe")
     except Exception as e:  # noqa: BLE001 — on essaie l'autre chemin
-        logger.info("réparation par le canal du travail refusée (%s) — on tente "
-                    "l'annotation directe", str(e)[:120])
+        logger.info("réparation par le canal du travail refusée — on tente "
+                    "l'annotation directe : %s", e)
     try:
         backend.patch_row(namespace, ligne, valeurs, org=org)
         if _ecriture_confirmee(backend, namespace, ligne, valeurs, org):
@@ -977,7 +977,12 @@ def _reparer_ligne(mcp, backend, namespace, ligne, valeurs, run_id, org):
                      "chemins : la valeur n'est pas revenue")
         return None
     except Exception as e:  # noqa: BLE001 — une réparation qui échoue se DIT
-        logger.error("réparation impossible par les deux chemins : %s", str(e)[:160])
+        # ⚠️ EN ENTIER. Une réparation qui échoue est le seul cas où la valeur
+        # de la cliente reste perdue : c'est le message le plus important que
+        # ce harnais produise, et il était tronqué à 160 caractères — le 01/09,
+        # « écriture refusée par le schéma : `ef » a coupé net sur le nom de la
+        # colonne, et la cause n'a pas pu être établie.
+        logger.error("réparation impossible par les deux chemins : %s", e)
         return None
 
 
