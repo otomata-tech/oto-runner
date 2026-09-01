@@ -138,3 +138,39 @@ def test_sans_siren_on_ne_demande_pas_au_registre():
     assert McpQuiCompte.appels == 0
 
 
+
+
+# ── LES INTERLOCUTEURS ──────────────────────────────────────────────────────
+
+def test_un_contact_present_avant_et_absent_apres_est_vu():
+    """⚠️ La garde surveillait cinq colonnes et pas celle qui porte les gens.
+    Cinq interlocuteurs perdus le 01/09, dont trois confirmés au registre."""
+    avant = {"contacts": [{"nom": "Jacqueline Richard"},
+                          {"nom": "Jean-Noël Joly"}]}
+    apres = {"contacts": [{"nom": "JEAN-NOEL JOLY"}]}
+    perdus = W._contacts_perdus(apres, avant)
+    assert [c["nom"] for c in perdus] == ["Jacqueline Richard"]
+
+
+def test_un_contact_ajoute_par_lagent_ne_compte_pas_comme_perte():
+    """L'autre bord : enrichir n'est pas détruire."""
+    avant = {"contacts": [{"nom": "Jean Dupont"}]}
+    apres = {"contacts": [{"nom": "Jean Dupont"}, {"nom": "Marie Martin"}]}
+    assert W._contacts_perdus(apres, avant) == []
+
+
+def test_sans_reference_la_perte_nest_pas_declaree_nulle():
+    """⚠️ `None`, pas `[]` : sans état d'avant, on ne sait pas."""
+    assert W._contacts_perdus({"contacts": []}, None) is None
+
+
+def test_une_fiche_sans_contact_avant_ne_peut_rien_perdre():
+    assert W._contacts_perdus({"contacts": [{"nom": "X"}]}, {"contacts": []}) == []
+
+
+def test_le_nom_se_compare_sans_casse_ni_accents():
+    """Les registres écrivent en capitales sans accents ; la fiche non. Une
+    comparaison littérale déclarerait perdue une personne présente."""
+    avant = {"contacts": [{"nom": "Christèle Meulin"}]}
+    apres = {"contacts": [{"nom": "CHRISTELE MEULIN"}]}
+    assert W._contacts_perdus(apres, avant) == []

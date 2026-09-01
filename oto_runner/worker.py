@@ -522,6 +522,34 @@ def _domaines_etrangers(fiche) -> list:
     return vus
 
 
+def _contacts_perdus(fiche, avant) -> Optional[list]:
+    """Les interlocuteurs presents AVANT le passage et absents APRES.
+
+    ⚠️ La garde des valeurs protegeait l'effectif, le site, le telephone et
+    l'e-mail — pas les personnes. Or c'est la liste des contacts qu'un agent
+    reecrit en entier, et ce qu'il ne reprend pas disparait. Cinq perdus le
+    01/09, dont trois que le registre confirme.
+
+    Rend la liste des entrees a remettre, ou `None` quand la comparaison n'a pas
+    pu avoir lieu — une absence de reference n'est pas une absence de perte.
+    """
+    if not isinstance(fiche, dict) or not isinstance(avant, dict):
+        return None
+    a_av = [c for c in (_nu(avant.get("contacts")) or []) if isinstance(c, dict)]
+    if not a_av:
+        return []
+    a_ap = [c for c in (_nu(fiche.get("contacts")) or []) if isinstance(c, dict)]
+    presents = [_mots_du_nom(_nu(c.get("nom"))) for c in a_ap]
+    manquants = []
+    for c in a_av:
+        nom = _nu(c.get("nom"))
+        if not nom:
+            continue
+        if not any(_mots_du_nom(nom) & p for p in presents):
+            manquants.append(c)
+    return manquants
+
+
 def _contacts_a_retirer(fiche, dirigeants_reels) -> tuple:
     """Les entrées à retirer, et la liste des contacts qui RESTE.
 
@@ -1389,6 +1417,8 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # ⚠️ None, pas False : « pas encore demande » n'est pas « le registre a
     # refuse de repondre ».
     contacts_verifies = None
+    # ⚠️ [] = aucun perdu ; None = on n'a pas pu comparer. Jamais confondus.
+    contacts_remis: Optional[list] = []
     # ⚠️ Declaree ICI, avec les autres : une variable qui n'existe que sur un
     # chemin et qu'on lit sur tous a casse trois choses ce soir.
     corrigees_agent = []
@@ -1566,6 +1596,25 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             # qu'il n'a pas pu regarder. Sans quoi son zero se lit « aucun
             # contact fabrique » — l'inverse de la verite.
             contacts_verifies = _reels is not None
+            # ⚠️ Les PERSONNES aussi : un agent qui reecrit la liste ecrase ce
+            # qu'il ne reprend pas, et la garde des valeurs ne regardait que des
+            # colonnes scalaires.
+            _socle = _socle_du_passage() or {}
+            _perdus = _contacts_perdus(
+                fiche, _socle.get(str(_nu((fiche or {}).get("siren")) or "")) or {})
+            if _perdus:
+                _liste = [c for c in (_nu((fiche or {}).get("contacts")) or [])
+                          if isinstance(c, dict)] + _perdus
+                if _reparer_ligne(mcp, backend, p["namespace"], ligne_rc,
+                                  {"contacts": _liste}, run_id, p.get("org_id")):
+                    contacts_remis = [str(_nu(c.get("nom"))) for c in _perdus]
+                    logger.warning("job %s : %d interlocuteur(s) REMIS — %s",
+                                   job["id"], len(contacts_remis),
+                                   ", ".join(contacts_remis))
+                else:
+                    contacts_remis = None
+                    logger.error("job %s : %d interlocuteur(s) perdus et NON "
+                                 "remis", job["id"], len(_perdus))
             _faux, _ = ([], None) if _reels is None else _contacts_a_retirer(
                 fiche, _reels)
             if _faux:
@@ -1798,6 +1847,10 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 # contacts fabriques ne distingue pas « tous legitimes » de
                 # « on n'a pas pu verifier ».
                 "contacts_verifies": contacts_verifies,
+                # ⚠️ Les interlocuteurs que le passage avait perdus et que le
+                # controle a remis. `None` = perdus et NON remis : c'est une
+                # perte seche, a lire comme telle.
+                "contacts_remis": contacts_remis,
                 "valeurs_cliente_detruites": (None if detruites is None
                                               else [c for c, _, _ in detruites]),
                 # ⚠️ Un verdict qui ne sait pas sur quoi il repose ne vaut rien.
