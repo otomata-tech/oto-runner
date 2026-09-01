@@ -29,12 +29,22 @@ class FauxBackend:
         self.org_vu = org
         return self.counts.pop(0) if len(self.counts) > 1 else self.counts[0]
 
-    def enqueue(self, kind, payload, run_id=None):
+    # ⚠️ La doublure suit la SIGNATURE SERVIE : `fleet_id` est entré avec le
+    # rattachement d'un travail à sa flotte déclarée (#791). Une doublure figée
+    # sur une ancienne signature ne protège plus rien.
+    def enqueue(self, kind, payload, run_id=None, fleet_id=None):
         self.enfiles += 1
         jid = self.enfiles
+        self.rattachements = getattr(self, "rattachements", [])
+        self.rattachements.append(fleet_id)
         self.jobs[jid] = {"status": "claimed"}
         self._age[jid] = 0
         return jid
+
+    def declarer_flotte(self, **kw):
+        self.declarations = getattr(self, "declarations", [])
+        self.declarations.append(kw)
+        return {"id": 42}
 
     def get_job(self, jid):
         self._age[jid] += 1
@@ -175,7 +185,7 @@ def test_un_502_isole_du_driver_ne_tue_pas_la_flotte():
     class BackendUn502(FauxBackend):
         rates = 0
 
-        def enqueue(self, kind, payload, run_id=None):
+        def enqueue(self, kind, payload, run_id=None, fleet_id=None):
             if self.rates < 2:
                 self.rates += 1
                 raise BackendError("/api → 502 : bad gateway", status=502)

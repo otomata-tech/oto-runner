@@ -83,6 +83,13 @@ class FleetSpec:
     # DÉCLARE. Aucun repli sur le namespace : deux flottes peuvent drainer la
     # même file, et un tag deviné est un tag faux — pire qu'un tag absent.
     name: str
+    # L'identifiant de la flotte DÉCLARÉE EN BASE. Absent ⟹ le driver la déclare
+    # au démarrage et journalise l'identifiant obtenu ; le remettre dans la
+    # déclaration fait REPRENDRE le même passage au lieu d'en ouvrir un second.
+    # ⚠️ Il remplace le tag texte `payload["fleet"]` comme rattachement de
+    # référence : un tag vit dans un JSON libre, un identifiant porte une clé
+    # étrangère, se compte, et se refuse s'il désigne la flotte d'une autre org.
+    fleet_id: Optional[int] = None
     filter: dict = field(default_factory=dict)   # ce qui est encore à traiter
     project: Optional[int] = None
     org: Optional[int] = None       # l'org de la MISSION (le namespace y vit)
@@ -222,6 +229,28 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
     """La boucle d'ordonnancement. `sleep`/`clock` injectables : les bornes se
     PROUVENT en test, elles ne s'affirment pas — c'est ce qui protège le compte
     pendant une campagne sans surveillance."""
+    # La flotte se DÉCLARE en base avant d'enfiler quoi que ce soit : sans
+    # identifiant, chaque job part orphelin et `runner.fleets op=state` répond
+    # « aucun travail rattaché » pour un passage qui tourne. ⚠️ Une déclaration
+    # qui échoue n'arrête PAS le passage — le rattachement sert à LIRE, il ne
+    # conditionne pas le travail. Perdre l'observabilité est un moindre mal
+    # devant une campagne qui refuse de partir.
+    fleet_id = spec.fleet_id
+    if fleet_id is None:
+        try:
+            f = backend.declarer_flotte(
+                label=spec.name, procedure=spec.procedure, tools=list(spec.tools),
+                namespace=spec.namespace, row_filter=spec.filter or None,
+                project_id=spec.project, input=spec.input,
+                max_steps=spec.max_steps, workers=spec.concurrency,
+                max_rows=spec.volume, max_tokens=spec.budget_tokens)
+            fleet_id = f.get("id")
+            logger.info("flotte déclarée en base : id=%s — remettre `fleet_id: %s` "
+                        "dans la déclaration pour REPRENDRE ce passage",
+                        fleet_id, fleet_id)
+        except BackendError as e:
+            logger.warning("flotte non déclarée (%s) — les jobs partiront sans "
+                           "rattachement, `op=state` restera muet sur ce passage", e)
     bilan = FleetBilan(lignes_initiales=backend.count_rows(spec.namespace,
                                                            filter=spec.filter,
                                                            org=spec.org))
@@ -378,7 +407,8 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                          or not monte
                          or clock() - dernier_depart >= spec.ramp_seconds)):
                 try:
-                    jid = backend.enqueue("start", _payload(spec))
+                    jid = backend.enqueue("start", _payload(spec),
+                                          fleet_id=fleet_id)
                     departs += 1
                 except BackendError as e:
                     erreurs_backend += 1

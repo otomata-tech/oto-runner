@@ -212,13 +212,55 @@ class Backend:
                           {"op": "claim", "lease_seconds": lease_seconds}).get("job")
 
     def enqueue(self, kind: str, payload: dict,
-                run_id: Optional[str] = None) -> int:
+                run_id: Optional[str] = None,
+                fleet_id: Optional[int] = None) -> int:
         """Enfile un job — c'est par LÀ qu'un ordonnanceur de flotte travaille :
-        un client ordinaire de la même file que tout le monde (R5)."""
-        out = self._post("/api/me/runner/jobs",
-                         {"op": "enqueue", "kind": kind, "payload": payload,
-                          "run_id": run_id})
+        un client ordinaire de la même file que tout le monde (R5).
+
+        ⚠️ `fleet_id` RATTACHE le job à sa flotte déclarée, et remplace le tag
+        texte `payload["fleet"]` : un tag vit dans un JSON libre, une colonne
+        porte une clé étrangère et se compte. C'est lui qui rend
+        `runner.fleets op=state` capable d'agréger un passage.
+        """
+        corps = {"op": "enqueue", "kind": kind, "payload": payload,
+                 "run_id": run_id}
+        if fleet_id is not None:
+            corps["fleet_id"] = fleet_id
+        out = self._post("/api/me/runner/jobs", corps)
         return int(out["id"])
+
+    def declarer_flotte(self, *, label: str, procedure: str, tools: list,
+                        namespace: Optional[str] = None,
+                        row_filter: Optional[dict] = None,
+                        project_id: Optional[int] = None,
+                        input: Optional[str] = None,
+                        max_steps: Optional[int] = None,
+                        provider: Optional[str] = None,
+                        model: Optional[str] = None,
+                        workers: Optional[int] = None,
+                        max_rows: Optional[int] = None,
+                        max_tokens: Optional[int] = None,
+                        max_consecutive_failures: Optional[int] = None,
+                        max_tokens_per_row: Optional[int] = None) -> dict:
+        """Déclare la flotte EN BASE et rend la ligne créée.
+
+        Une flotte vivait dans un fichier YAML sur la machine : rien n'en était
+        visible du dashboard ni atteignable par un agent. La déclarer donne un
+        domicile à sa cible, à son périmètre et à ses bornes — et un identifiant
+        que chaque job portera.
+        """
+        corps = {"op": "create", "label": label, "procedure": procedure,
+                 "tools": list(tools)}
+        for cle, val in (("namespace", namespace), ("row_filter", row_filter),
+                         ("project_id", project_id), ("input", input),
+                         ("max_steps", max_steps), ("provider", provider),
+                         ("model", model), ("workers", workers),
+                         ("max_rows", max_rows), ("max_tokens", max_tokens),
+                         ("max_consecutive_failures", max_consecutive_failures),
+                         ("max_tokens_per_row", max_tokens_per_row)):
+            if val is not None:
+                corps[cle] = val
+        return self._post("/api/me/runner/fleets", corps)["fleet"]
 
     def get_job(self, job_id: int) -> dict:
         return self._post("/api/me/runner/jobs",
