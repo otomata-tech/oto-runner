@@ -1434,6 +1434,30 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # dit : la fiche part en arbitrage avec son motif, comme le rappel d'écriture.
     # On n'écrit PAS le contact à sa place — ce serait décider d'une donnée que la
     # cliente recevra, sur une lecture que personne n'a faite.
+    # ⚠️ CONTROLE FINAL — inconditionnel, hors de la boucle de rappel.
+    #
+    # La boucle ne tourne que si quelque chose la declenche. Un agent qui ne
+    # declenche aucun rappel n'etait jamais controle : le 01/09, un telephone
+    # est passe d'un mobile a un fixe parisien sans qu'aucun poste ne le porte.
+    #
+    # Un controle qui depend d'un autre controle pour s'executer n'est pas un
+    # controle.
+    if ligne_rc:
+        try:
+            fiche = backend.row(p["namespace"], ligne_rc, org=p.get("org_id"))
+            _tr = _tranche_registre(mcp, _nu((fiche or {}).get("siren")))
+            tardives = _valeurs_cliente_detruites(fiche, _tr)
+            if tardives:
+                logger.warning("job %s : %d valeur(s) de la cliente altérée(s) "
+                               "APRÈS la boucle de rappel — %s",
+                               job["id"], len(tardives),
+                               ", ".join(c for c, _, _ in tardives))
+                detruites = (detruites or []) + [t for t in tardives
+                                                 if t not in (detruites or [])]
+                rappels_contact = max(rappels_contact, RENVOIS_MAX)
+        except Exception as e:  # noqa: BLE001 — un contrôle qui échoue se dit
+            logger.error("job %s : contrôle final impossible (%s)", job["id"], e)
+
     # ⚠️ RÉPARATION — dernier recours, et seulement si le renvoi n'a rien donné.
     # Le serveur garde la valeur d'avant dans `<colonne>.origine` : on la remet
     # telle quelle. On n'invente rien, on restaure ce qui était là.
