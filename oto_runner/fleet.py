@@ -99,8 +99,15 @@ class FleetSpec:
     budget_tokens: Optional[int] = None
     max_steps: int = 40
     input: str = DEFAULT_INPUT
-    # Les outils sans lesquels un job « done » est un job FAUX : leur panne
+    # Les outils sans lesquels un job « done » est un job FAUX : leur PANNE
     # arrête la flotte (arrêt ANORMAL ⟹ relance auto quand ils reviennent).
+    #
+    # ⚠️ CE N'EST PAS une liste de droits. Ce que l'agent a le DROIT d'appeler se
+    # gouverne en base, par org (activation et restriction de connecteur) — et
+    # l'allowlist d'un run est `tools`, juste au-dessus. Faire de ce champ-ci une
+    # seconde source de vérité pour « qui peut appeler quoi » créerait un doublon
+    # dont l'un des deux finirait par mentir. Ici on ne dit pas ce qui est
+    # PERMIS : on dit ce dont la panne rend le résultat FAUX.
     critical_tools: tuple = ()
     # Le RENDEMENT : plafond de jetons dépensés par écriture produite, jugé sur
     # une fenêtre glissante de jobs conclus. Absent ⟹ borne inactive.
@@ -159,6 +166,17 @@ def spec_depuis_flotte(f: dict) -> FleetSpec:
     d'EXÉCUTION locale, pas de la configuration déclarée du passage. Les inventer
     en base pour « tout avoir au même endroit » mélangerait ce qu'un opérateur
     déclare et ce qu'une machine règle.
+
+    **Le critère qui tient la frontière dans le temps : si ce réglage change,
+    quelqu'un doit-il le savoir ?** La cadence d'un bilan, non. La montée en
+    charge, non plus — *à condition que la borne de DÉPENSE soit déclarée*, sinon
+    une machine mal réglée dépasserait sans que la configuration ait bougé. Elle
+    l'est (`max_rows`, `max_tokens`, `max_tokens_per_row` vivent dans la flotte).
+
+    ⚠️ Et `critical_tools` reste local parce qu'il désigne *ce dont la panne rend
+    un résultat FAUX*, pas *ce que l'agent a le droit d'appeler* — cette
+    seconde question a déjà son domicile en base (activation de connecteur par
+    org), et deux domiciles pour une même règle finissent par diverger.
     """
     manquants = [c for c in ("id", "procedure") if not f.get(c)]
     if manquants:
