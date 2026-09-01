@@ -873,6 +873,34 @@ def _nu(x):
     return x.get("valeur") if isinstance(x, dict) and "valeur" in x else x
 
 
+def _ecriture_confirmee(backend, namespace, ligne, valeurs, org) -> bool:
+    """La donnee porte-t-elle vraiment ce qu'on vient d'ecrire ?
+
+    ⚠️ On RELIT par un appel qui n'est pas celui de l'ecriture. Une reponse
+    d'ecriture peut etre le miroir de la demande : bien formee, contenant la
+    valeur voulue, et ne decrivant que ce qu'on a dit. Aucun signe interne ne
+    l'en distingue.
+    """
+    try:
+        fiche = backend.row(namespace, ligne, org=org) if backend else None
+    except Exception as e:  # noqa: BLE001 — une relecture qui echoue ne confirme rien
+        logger.warning("relecture impossible apres reparation (%s) : le succes "
+                       "n'est pas atteste", str(e)[:120])
+        return False
+    if not isinstance(fiche, dict):
+        return False
+    for col, voulu in valeurs.items():
+        if col.endswith(".comment"):
+            continue
+        obtenu = _nu(fiche.get(col))
+        if isinstance(voulu, list):
+            if len(obtenu or []) != len(voulu):
+                return False
+        elif str(obtenu or "") != str(voulu or ""):
+            return False
+    return True
+
+
 _MOTIF_RETABLI = ("fichier-client — valeur d'origine rétablie par le contrôle : "
                   "l'écriture de ce passage l'avait remplacée")
 
@@ -904,13 +932,22 @@ def _reparer_ligne(mcp, backend, namespace, ligne, valeurs, run_id, org):
                                        "row": valeurs, "_run_id": run_id,
                                        "_org": org})
         if not (isinstance(rep, dict) and rep.get("isError")):
-            return "run"
+            # ⚠️ Pas de succes declare sans relecture : l'appel peut repondre
+            # sans rien ecrire, et le poste qui en decoule fait decider la veille.
+            if _ecriture_confirmee(backend, namespace, ligne, valeurs, org):
+                return "run"
+            logger.warning("reparation par le canal du travail NON confirmee a "
+                           "la relecture — on tente l'annotation directe")
     except Exception as e:  # noqa: BLE001 — on essaie l'autre chemin
         logger.info("réparation par le canal du travail refusée (%s) — on tente "
                     "l'annotation directe", str(e)[:120])
     try:
         backend.patch_row(namespace, ligne, valeurs, org=org)
-        return "direct"
+        if _ecriture_confirmee(backend, namespace, ligne, valeurs, org):
+            return "direct"
+        logger.error("reparation NON confirmee a la relecture par les deux "
+                     "chemins : la valeur n'est pas revenue")
+        return None
     except Exception as e:  # noqa: BLE001 — une réparation qui échoue se DIT
         logger.error("réparation impossible par les deux chemins : %s", str(e)[:160])
         return None

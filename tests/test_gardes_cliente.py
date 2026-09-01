@@ -248,3 +248,38 @@ def test_un_registre_de_forme_inattendue_ne_fait_rien_retirer():
             return "une chaîne, pas la structure attendue"
 
     assert W._tous_les_dirigeants(McpBizarre(), "1") is None
+
+
+def test_une_ecriture_qui_ne_prend_pas_nest_pas_une_reparation():
+    """⚠️ La réparation déclarait un succès dès que l'appel ne levait pas. Une
+    route peut répondre sans rien écrire — dix retraits ont échoué ainsi le
+    01/09, tous silencieux — et c'est ce poste qui fait décider la veille."""
+    class McpQuiAccepte:
+        def outil(self, nom, args):
+            return {}
+
+    class BackendQuiNaPasChange:
+        def row(self, ns, lid, org=None):
+            return {"site_web": "https://ancienne.fr"}
+
+        def patch_row(self, ns, lid, valeurs, org=None):
+            return {}
+
+    chemin = W._reparer_ligne(McpQuiAccepte(), BackendQuiNaPasChange(), "ns", "1",
+                              {"site_web": "https://voulue.fr"}, "run", 226)
+    assert chemin is None, "une valeur qui n'est pas revenue n'est pas réparée"
+
+
+def test_une_ecriture_confirmee_est_bien_declaree():
+    """L'autre bord : une garde qui ne confirme jamais ne sert à rien."""
+    class McpQuiAccepte:
+        def outil(self, nom, args):
+            return {}
+
+    class BackendQuiPorte:
+        def row(self, ns, lid, org=None):
+            return {"site_web": "https://voulue.fr"}
+
+    chemin = W._reparer_ligne(McpQuiAccepte(), BackendQuiPorte(), "ns", "1",
+                              {"site_web": "https://voulue.fr"}, "run", 226)
+    assert chemin == "run"
