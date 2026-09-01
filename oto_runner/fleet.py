@@ -249,6 +249,9 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
     en_vol: set[int] = set()
     dernier_depart: Optional[float] = None
     failed_consecutifs = 0
+    # ⚠️ Initialise ICI : un compteur qui n'existe que sur un chemin et qu'on
+    # lit sur tous leve au premier passage qui l'emprunte.
+    claims_inconnus = 0
     faux_departs_consecutifs = 0
     relachements_rates = 0
     pleine_charge_atteinte = False
@@ -302,7 +305,19 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                             "worker trop ancien pour cette flotte (les marqueurs "
                             "sont posés à la conclusion du job). Mets à jour les "
                             "workers.")
-                    if resultat["claim_vide"]:
+                    if resultat["claim_vide"] is None:
+                        # ⚠️ Le worker DIT qu'il n'a pas pu lire la sortie de la
+                        # reservation. On ne conclut donc ni « rien a reserver »
+                        # ni « faux depart » : les deux seraient des verdicts
+                        # tires d'une mesure absente. On compte, et le bilan le
+                        # porte — un passage entier en inconnu doit se voir.
+                        claims_inconnus += 1
+                        logger.warning(
+                            "job %s : reservation NON MESUREE (%s) — ni claim a "
+                            "vide, ni faux depart : %d inconnu(s) sur ce passage",
+                            jid, resultat.get("claim_vide_raison")
+                            or "raison non declaree", claims_inconnus)
+                    elif resultat["claim_vide"]:
                         # Rien à réserver : le job n'avait aucune sortie à
                         # produire. Ni faux départ, ni point de rendement — le
                         # compter des deux côtés ferait échouer, à la fin de

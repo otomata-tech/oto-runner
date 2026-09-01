@@ -136,20 +136,29 @@ def test_en_conversations_reserver_puis_relacher_na_rien_reserve(monkeypatch):
     for outils in ([_CLAIM], [_CLAIM, _RELEASE],
                    [_CLAIM, _RELEASE, _CLAIM, _RELEASE]):
         r = _conclure(monkeypatch, [], provider=ProviderOneShot(outils))
-        assert (r["claims"], r["claim_vide"], r["faux_depart"]) == (0, True, False), \
-            f"aucun appel de travail dans {outils}"
+        # Le REPLI rend toujours le bon nombre de lignes — c'est lui qui fonde
+        # les bornes de flotte, et il reste juste.
+        assert r["claims"] == 0, f"aucun appel de travail dans {outils}"
+        # ⚠️ Mais il ne l'AFFIRME plus : la sortie de la réservation n'est pas
+        # remontée, donc le poste dit qu'il ne sait pas, et dit pourquoi. Un
+        # booléen ici présenterait une déduction comme un fait (#4).
+        assert r["claim_vide"] is None, f"le repli affirme encore sur {outils}"
+        assert r["claims_mesures"] is False
+        assert r["claim_vide_raison"], "un poste qui se tait doit dire pourquoi"
 
 
 def test_en_conversations_un_seul_appel_de_travail_vaut_reservation(monkeypatch):
     """L'autre bord : dès qu'un outil MÉTIER est appelé, le job a eu une ligne
     à traiter — s'il n'écrit pas, c'est un faux départ, comme avant."""
     r = _conclure(monkeypatch, [], provider=ProviderOneShot([_CLAIM, "fr_get"]))
-    assert (r["claims"], r["claim_vide"], r["faux_depart"]) == (1, False, True)
+    assert (r["claims"], r["faux_depart"]) == (1, True)
+    assert r["claim_vide"] is None and r["claims_mesures"] is False
 
     r = _conclure(monkeypatch, [], provider=ProviderOneShot(
         [_CLAIM, _RELEASE, "serper_search"]))
-    assert (r["claims"], r["claim_vide"], r["faux_depart"]) == (1, False, True), \
+    assert (r["claims"], r["faux_depart"]) == (1, True), \
         "relâcher après avoir travaillé n'efface pas le travail"
+    assert r["claim_vide"] is None
 
     r = _conclure(monkeypatch, [], provider=ProviderOneShot(
         [_CLAIM, "fr_get", _WRITE, _RELEASE]))
@@ -223,3 +232,61 @@ def test_le_bilan_applique_la_meme_regle_que_la_borne():
                          lignes_initiales=2, secondes=60)
     assert bilan["jobs"]["faux_departs"] == 1, "le seul qui ait réservé sans écrire"
     assert bilan["ecritures"] == {"claims": 1, "writes": 0}
+
+
+class ProviderOneShotQuiRemonte(ProviderOneShot):
+    """Le fournisseur qui RETOURNE ses exécutions d'outils.
+
+    ⚠️ C'est le cas courant, et il change tout : la sortie de la réservation est
+    lisible, donc le relevé MESURE au lieu de se replier. Sans ce test, un poste
+    qui se tairait toujours passerait le premier test sans rien mesurer.
+    """
+
+    def __init__(self, outils, row):
+        super().__init__(outils)
+        self.row = row
+
+    def run_once(self, *, instructions, inputs, tools):
+        res = super().run_once(instructions=instructions, inputs=inputs, tools=tools)
+        res.raw_outputs = [{"type": "tool.execution", "name": _CLAIM,
+                            "info": {"row": self.row}}]
+        return res
+
+
+def test_en_conversations_une_sortie_lisible_redonne_un_verdict(monkeypatch):
+    """Dès que la sortie de la réservation remonte, le poste REDEVIENT un
+    booléen : se taire n'est légitime que faute de mesure (#4)."""
+    r = _conclure(monkeypatch, [], provider=ProviderOneShotQuiRemonte(
+        [_CLAIM, _RELEASE], row=None))
+    assert r["claims_mesures"] is True, "une sortie lisible est une mesure"
+    assert r["claim_vide"] is True, "row: null, donc rien n'a été réservé"
+    assert r["claim_vide_raison"] is None, "une mesure n'a pas d'excuse à donner"
+
+    r = _conclure(monkeypatch, [], provider=ProviderOneShotQuiRemonte(
+        [_CLAIM, "fr_get"], row={"_id": "019ffb3a-0000-0000-0000-000000000001"}))
+    assert r["claims_mesures"] is True
+    assert r["claim_vide"] is False, "une ligne a bien été rendue"
+
+
+def test_le_releve_dit_sur_quelle_fiche(monkeypatch):
+    """⚠️ Les gardes nomment des colonnes détruites, réparées, corrigées — et
+    le relevé ne disait pas SUR QUELLE FICHE. Mesuré le 01/09 : deux
+    corrections d'agent relevées, impossibles à confronter à la source.
+
+    Sans ligne réservée le poste vaut `None` — « pas de fiche », jamais une
+    chaîne vide qui se lirait comme un identifiant manquant.
+    """
+    r = _conclure(monkeypatch, [], provider=ProviderOneShot([_CLAIM, _RELEASE]))
+    assert "ligne" in r, "le relevé doit porter la ligne traitée"
+    assert r["ligne"] is None
+
+
+def test_la_reference_qualifie_la_MESURE_pas_la_presence_du_socle(monkeypatch):
+    """⚠️ Le poste valait « socle » dès qu'un socle existait, même quand la
+    comparaison n'avait pas eu lieu pour cette fiche — il rassurait sans rien
+    attester (relevé 10695 du 01/09). Sans mesure, il se tait.
+    """
+    r = _conclure(monkeypatch, [], provider=ProviderOneShot([_CLAIM, _RELEASE]))
+    assert r["valeurs_cliente_detruites"] is None, "aucune fiche, aucune mesure"
+    assert r["reference_comparaison"] is None, \
+        "une référence sans mesure fait passer un non-mesuré pour un contrôle"

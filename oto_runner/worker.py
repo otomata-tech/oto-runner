@@ -1088,6 +1088,23 @@ def _ligne_depuis_sorties(res) -> Optional[str]:
     return None
 
 
+def _claims_mesures(res, one_shot: bool) -> bool:
+    """La reservation a-t-elle ete LUE, ou le nombre est-il un repli ?
+
+    ⚠️ Ce poste ne se deduit pas du transport. Sur le chemin « conversations »,
+    le fournisseur retourne ses executions d'outils : quand celle de la
+    reservation est la, on la lit — c'est une mesure, et la declarer « non
+    mesuree » parce que le transport est one-shot rend faux un poste juste.
+
+    En boucle locale, le worker voit toutes les sorties : toujours mesure.
+    """
+    if not one_shot:
+        return True
+    return any(str(e.get("type") or "") == "tool.execution"
+               and str(e.get("name") or "").endswith(_CLAIM)
+               for e in (getattr(res, "raw_outputs", None) or []))
+
+
 def _lignes_reservees(res, appels_claim: int, one_shot: bool) -> int:
     """Les lignes RÉSERVÉES — jamais le nombre d'APPELS de réservation.
 
@@ -1369,6 +1386,9 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # dire « non mesuré », jamais « aucune destruction ».
     detruites = None
     vues_en_boucle = set()
+    # ⚠️ None, pas False : « pas encore demande » n'est pas « le registre a
+    # refuse de repondre ».
+    contacts_verifies = None
     # ⚠️ Declaree ICI, avec les autres : une variable qui n'existe que sur un
     # chemin et qu'on lit sur tous a casse trois choses ce soir.
     corrigees_agent = []
@@ -1542,6 +1562,10 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                             "apres renvoi — %s", job["id"],
                             len(corrigees_agent), ", ".join(corrigees_agent))
             _reels = _tous_les_dirigeants(mcp, _nu((fiche or {}).get("siren")))
+            # ⚠️ Registre muet : la garde ne retire rien, et le poste doit DIRE
+            # qu'il n'a pas pu regarder. Sans quoi son zero se lit « aucun
+            # contact fabrique » — l'inverse de la verite.
+            contacts_verifies = _reels is not None
             _faux, _ = ([], None) if _reels is None else _contacts_a_retirer(
                 fiche, _reels)
             if _faux:
@@ -1654,10 +1678,20 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     appels_claim = sum(v for k, v in compte.items() if k.endswith(_CLAIM))
     writes = sum(v for k, v in compte.items() if k.endswith(_WRITE))
     claims = _lignes_reservees(res, appels_claim, one_shot)
+    # ⚠️ Mesure ou repli : le poste doit le DIRE, sinon un nombre deduit se lit
+    # comme un nombre lu — c'est ainsi qu'une reservation rendue a vide a ete
+    # relevee comme reelle le 29/08, et qu'une garde de flotte s'est fondee
+    # dessus.
+    claims_mesures = _claims_mesures(res, one_shot)
     # Le claim À VIDE : l'agent a demandé une ligne, la file n'en avait plus à
     # lui rendre. C'est l'état NORMAL d'une fin de file, il ne dit rien de la
     # santé de la campagne — et surtout ce n'est pas un faux départ.
-    claim_vide = appels_claim > 0 and claims == 0
+    # ⚠️ TROIS etats, pas deux : vrai, faux, et « je n'ai pas pu regarder ».
+    # Un booleen affirme toujours ; sur le repli il affirmerait a tort.
+    claim_vide = ((appels_claim > 0 and claims == 0) if claims_mesures else None)
+    claim_vide_raison = None if claims_mesures else (
+        "sortie de la reservation non remontee par le transport : le nombre de "
+        "lignes reservees est un repli, pas une mesure")
     faux_depart = claims > 0 and writes == 0
     # ⚠️ « Conclu, rien écrit » n'est pas une issue légitime quand le TRANSPORT
     # a lâché : au redéploiement du service MCP la session du worker est
@@ -1721,8 +1755,11 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 # pas — et c'est le relevé qu'on lit. Un poste qui ne délimite pas
                 # sa portée sera pris pour une mesure par le premier qui le
                 # regarde, et ce sera quelqu'un qui n'a pas lu la docstring.
-                "claims_mesures": not getattr(provider, "ONE_SHOT", False),
+                "claims_mesures": claims_mesures,
                 "claim_vide": claim_vide,
+                # ⚠️ La raison accompagne le NUL : un poste qui se tait sans
+                # dire pourquoi se relit comme une panne du harnais.
+                "claim_vide_raison": claim_vide_raison,
                 "faux_depart": faux_depart, "model": res.model,
                 # Un oubli d'estampille doit SE VOIR au bilan : le geste
                 # manuel qu'on remplace ici avait été oublié sans bruit.
@@ -1746,17 +1783,29 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 # mon propre relevé — les zéros des passages précédents ne
                 # valaient donc rien sur les travaux à ligne inconnue.
                 "rappel_contact_mesure": bool(ligne_rc),
+                # ⚠️ SUR QUELLE FICHE. Sans lui, les postes qui nomment des
+                # colonnes ne se confrontent pas a la source : on ne peut que
+                # les croire, et un poste qu'on ne peut pas verifier ne vaut pas
+                # mieux que pas de poste.
+                "ligne": str(ligne_rc) if ligne_rc else None,
                 "rappels_contact": rappels_contact,
                 "valeurs_cliente_reparees": valeurs_reparees,
                 # ⚠️ JAMAIS confondu avec la reparation machine : l'un protege
                 # la cliente, l'autre dit que le modele apprend dans la boucle.
                 "valeurs_corrigees_agent": corrigees_agent,
                 "contacts_fabriques_retires": contacts_retires,
+                # ⚠️ DIT si le registre a repondu : sans lui, une liste vide de
+                # contacts fabriques ne distingue pas « tous legitimes » de
+                # « on n'a pas pu verifier ».
+                "contacts_verifies": contacts_verifies,
                 "valeurs_cliente_detruites": (None if detruites is None
                                               else [c for c, _, _ in detruites]),
                 # ⚠️ Un verdict qui ne sait pas sur quoi il repose ne vaut rien.
-                "reference_comparaison": ("socle"
-                                          if _socle_du_passage() is not None
+                # ⚠️ La reference qualifie LA MESURE, pas la disponibilite du
+                # socle. Elle valait « socle » sur un travail dont la
+                # comparaison n'avait PAS eu lieu (releve 10695 du 01/09) : le
+                # poste cense dire « on a regarde » rassurait sans rien attester.
+                "reference_comparaison": ("socle" if detruites is not None
                                           else None),
                 "domaines_etrangers": _domaines_etrangers(fiche)
                 if ligne_rc else None,

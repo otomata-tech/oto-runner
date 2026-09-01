@@ -1,0 +1,140 @@
+"""Les gardes qui protègent le fichier de la cliente — celles qui ont failli
+détruire ce qu'elles existent pour protéger.
+
+⚠️ Elles n'avaient AUCUN test. Ce sont pourtant les plus récentes et les plus
+tranchantes : l'une d'elles a signalé une présidente réelle comme fabriquée, et
+seule une erreur du serveur a empêché sa suppression. L'autre a rendu « aucune
+destruction » là où personne n'avait regardé.
+
+Ce fichier grave les trois règles apprises à ce prix :
+  · une réponse absente n'est pas une réponse négative ;
+  · un zéro légitime n'est pas une case vide ;
+  · une valeur qu'on croit sur parole n'est pas une valeur vérifiée.
+"""
+import pytest
+
+from oto_runner import worker as W  # noqa: N817
+
+
+@pytest.fixture(autouse=True)
+def _socle_neuf(monkeypatch, tmp_path):
+    """Chaque test pose son propre socle — le cache est global."""
+    monkeypatch.setattr(W, "_SOCLE_CACHE", {}, raising=False)
+    monkeypatch.delenv("OTO_RUNNER_SOCLE", raising=False)
+
+
+def _pose_socle(monkeypatch, tmp_path, lignes):
+    import json
+    p = tmp_path / "socle.json"
+    p.write_text(json.dumps({"namespace": "essai", "rows": lignes}),
+                 encoding="utf-8")
+    monkeypatch.setenv("OTO_RUNNER_SOCLE", str(p))
+    return p
+
+
+# ── LA GARDE DES VALEURS ────────────────────────────────────────────────────
+
+def test_sans_socle_la_garde_dit_NON_MESURE_et_pas_zero(monkeypatch):
+    """⚠️ LE piège de toute la série : `[]` affirme « rien détruit », `None` dit
+    « je n'ai pas pu regarder ». Sans socle, la seconde est la seule vraie."""
+    assert W._valeurs_cliente_detruites({"siren": "1", "effectif": "x"}) is None
+
+
+def test_un_siren_absent_du_socle_nest_pas_une_absence_de_destruction(
+        monkeypatch, tmp_path):
+    _pose_socle(monkeypatch, tmp_path, [{"siren": "111", "effectif": "50_99"}])
+    assert W._valeurs_cliente_detruites({"siren": "999", "effectif": ""}) is None
+
+
+def test_une_valeur_videe_est_vue(monkeypatch, tmp_path):
+    _pose_socle(monkeypatch, tmp_path, [{"siren": "111", "effectif": "50_99"}])
+    perdues = W._valeurs_cliente_detruites({"siren": "111", "effectif": ""})
+    assert [c for c, _, _ in perdues] == ["effectif"]
+
+
+def test_une_case_vide_au_depart_peut_etre_remplie(monkeypatch, tmp_path):
+    """Remplir n'est pas détruire — sinon la garde interdirait le travail."""
+    _pose_socle(monkeypatch, tmp_path, [{"siren": "111", "effectif": ""}])
+    assert W._valeurs_cliente_detruites({"siren": "111", "effectif": "50_99"}) == []
+
+
+def test_un_zero_legitime_nest_pas_une_case_vide(monkeypatch, tmp_path):
+    """⚠️ Un effectif exact de 0 est une VALEUR. Le lire comme « vide » a fait
+    annoncer une restauration ratée qui n'avait pas eu lieu."""
+    _pose_socle(monkeypatch, tmp_path,
+                [{"siren": "111", "effectif_exact": 0}])
+    perdues = W._valeurs_cliente_detruites({"siren": "111", "effectif_exact": ""})
+    assert [c for c, _, _ in perdues] == ["effectif_exact"], \
+        "un zéro effacé est une destruction, pas un remplissage"
+
+
+def test_un_arbitrage_est_CONFRONTE_au_registre_pas_cru_sur_parole(
+        monkeypatch, tmp_path):
+    """La valeur que le registre rend passe ; toute autre est une destruction —
+    même annoncée comme un arbitrage. L'exemption d'avant fermait la forme vue,
+    pas la classe : un agent écrivant `1_2` par-dessus `50_99` passait."""
+    _pose_socle(monkeypatch, tmp_path, [{"siren": "111", "effectif": "50_99"}])
+    fiche = {"siren": "111", "effectif": "20_49"}
+    assert W._valeurs_cliente_detruites(fiche, registre="20_49") == [], \
+        "la valeur du registre est vérifiable, donc recevable"
+    assert [c for c, _, _ in W._valeurs_cliente_detruites(fiche, registre="100_199")], \
+        "une valeur que le registre ne porte pas reste une destruction"
+
+
+# ── LA GARDE DES CONTACTS ───────────────────────────────────────────────────
+
+def test_le_SECOND_dirigeant_du_registre_nest_pas_un_faux_contact():
+    """⚠️ LE cas du 01/09 : une présidente réelle signalée comme fabriquée
+    parce que la garde ne comparait qu'au PREMIER nom rendu. Seule une erreur
+    du serveur a empêché sa suppression."""
+    fiche = {"contacts": [{"nom": "Vera Michalski",
+                           "nom.comment": "registre — présidente"}]}
+    retires, _ = W._contacts_a_retirer(fiche, ["Jean Dupont", "Vera Michalski"])
+    assert retires == [], "le second dirigeant est aussi un dirigeant"
+
+
+def test_un_nom_absent_du_registre_est_toujours_vu():
+    """L'autre bord : une garde qui ne signale plus rien n'est pas réparée."""
+    fiche = {"contacts": [{"nom": "Personne Inventée",
+                           "nom.comment": "registre — dirigeante unique"}]}
+    retires, _ = W._contacts_a_retirer(fiche, ["Jean Dupont"])
+    assert retires == ["Personne Inventée"]
+
+
+def test_ce_qui_vient_de_la_cliente_nest_JAMAIS_retire():
+    fiche = {"contacts": [{"nom": "Contact Historique",
+                           "nom.comment": "fichier-client — colonne contact"}]}
+    retires, garde = W._contacts_a_retirer(fiche, [])
+    assert retires == [] and len(garde) == 1
+
+
+def test_une_provenance_absente_nautorise_pas_a_supprimer():
+    """Une provenance manquante est une faute en soi — elle ne donne pas le
+    droit d'effacer une donnée qu'on n'a pas su tracer."""
+    fiche = {"contacts": [{"nom": "Sans Provenance"}]}
+    retires, garde = W._contacts_a_retirer(fiche, [])
+    assert retires == [] and len(garde) == 1
+
+
+def test_registre_muet_le_harnais_ne_retire_rien(monkeypatch):
+    """⚠️ Une absence de réponse n'est pas une absence de dirigeant. Le
+    harnais rend `None`, et l'appelant ne doit rien supprimer sur ce doute."""
+    class McpMuet:
+        def outil(self, nom, args):
+            raise RuntimeError("registre injoignable")
+
+    assert W._tous_les_dirigeants(McpMuet(), "111") is None
+
+
+def test_sans_siren_on_ne_demande_pas_au_registre():
+    class McpQuiCompte:
+        appels = 0
+
+        def outil(self, nom, args):
+            McpQuiCompte.appels += 1
+            return {}
+
+    assert W._tous_les_dirigeants(McpQuiCompte(), "") is None
+    assert McpQuiCompte.appels == 0
+
+
