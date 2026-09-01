@@ -1303,6 +1303,10 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # ⚠️ None, pas [] : sans ligne, la boucle ne tourne pas et le poste doit
     # dire « non mesuré », jamais « aucune destruction ».
     detruites = None
+    # ⚠️ Et `fiche` n'est assignee QUE dans la boucle : sans ligne, elle
+    # n'existe pas. Trois tests l'ont attrape ; en production le travail aurait
+    # leve apres avoir tout fait.
+    fiche = None
     ligne_rc = (_ligne_par_alias(mcp, run_id, p.get("org_id"))
                 or _ligne_reservee(res, mcp)
                 or _ligne_par_journal(backend, run_id)
