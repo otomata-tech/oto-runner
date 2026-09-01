@@ -174,3 +174,36 @@ def test_le_nom_se_compare_sans_casse_ni_accents():
     avant = {"contacts": [{"nom": "Christèle Meulin"}]}
     apres = {"contacts": [{"nom": "CHRISTELE MEULIN"}]}
     assert W._contacts_perdus(apres, avant) == []
+
+
+def test_une_reparation_reecrit_le_motif_avec_la_valeur(monkeypatch):
+    """⚠️ Le motif de l'agent survivait à la réparation : la fiche portait la
+    valeur d'origine et l'annonce qui disait l'avoir remplacée (mesuré le
+    01/09). Une fiche qui se contredit est pire qu'une fiche fausse."""
+    vus = {}
+
+    class FauxMcp:
+        def outil(self, nom, args):
+            vus.update(args.get("row") or {})
+            return {}
+
+    W._reparer_ligne(FauxMcp(), None, "ns", "42", {"site_web": "https://a.fr"},
+                     "run", 226)
+    assert vus["site_web"] == "https://a.fr"
+    assert "site_web.comment" in vus, "le motif doit suivre la valeur"
+    assert "rétablie" in vus["site_web.comment"]
+
+
+def test_la_liste_des_contacts_na_pas_de_motif_de_colonne(monkeypatch):
+    """Chaque contact porte sa propre provenance ; un motif de colonne n'aurait
+    aucun sens et créerait un champ que le schéma ne connaît pas."""
+    vus = {}
+
+    class FauxMcp:
+        def outil(self, nom, args):
+            vus.update(args.get("row") or {})
+            return {}
+
+    W._reparer_ligne(FauxMcp(), None, "ns", "42", {"contacts": [{"nom": "X"}]},
+                     "run", 226)
+    assert "contacts.comment" not in vus

@@ -869,6 +869,10 @@ def _nu(x):
     return x.get("valeur") if isinstance(x, dict) and "valeur" in x else x
 
 
+_MOTIF_RETABLI = ("fichier-client — valeur d'origine rétablie par le contrôle : "
+                  "l'écriture de ce passage l'avait remplacée")
+
+
 def _reparer_ligne(mcp, backend, namespace, ligne, valeurs, run_id, org):
     """Ecrire une reparation sur une ligne QUI PEUT ETRE TENUE par l'agent.
 
@@ -884,6 +888,13 @@ def _reparer_ligne(mcp, backend, namespace, ligne, valeurs, run_id, org):
     servi** — sans quoi une reparation qui echoue ressemble a une reparation qui
     n'avait rien a faire.
     """
+    # ⚠️ Le motif suit la valeur. Sans ca, la fiche porte la valeur d'origine
+    # et l'annonce de l'agent qui disait l'avoir remplacee — une fiche qui se
+    # contredit donne une raison de croire ce qui n'y est pas.
+    valeurs = dict(valeurs)
+    for _col in [c for c in valeurs
+                 if not c.endswith(".comment") and c != "contacts"]:
+        valeurs["%s.comment" % _col] = _MOTIF_RETABLI
     try:
         rep = mcp.outil("data_write", {"namespace": namespace, "id": str(ligne),
                                        "row": valeurs, "_run_id": run_id,
