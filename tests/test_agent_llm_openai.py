@@ -44,7 +44,10 @@ def test_les_arguments_arrivent_en_chaine_json_et_sortent_en_dict(monkeypatch):
     assert c.name == "data_claim_next" and c.arguments == {"namespace": "vivier",
                                                            "worker": "w1"}
     assert turn.stop_reason == "end_turn"
-    assert turn.usage == {"input_tokens": 100, "output_tokens": 20}
+    # ⚠️ Le relevé porte désormais AUSSI ce que le cache a servi — même champ
+    # que sur l'autre chemin, et `input_tokens` ne compte plus que le neuf.
+    assert turn.usage == {"input_tokens": 100, "output_tokens": 20,
+                          "cache_read_input_tokens": 0}
 
 
 def test_des_arguments_malformes_font_un_appel_vide_pas_un_crash(monkeypatch):
@@ -141,3 +144,50 @@ def test_un_contenu_en_liste_de_blocs_est_normalise(monkeypatch):
     t = A.complete(system="s", messages=[A.user_message("go")], tools=[],
                    api_key="k")
     assert t.text == "première partie\nseconde"
+
+
+# ── LE CACHE : une clé à poser, un compteur à lire ──────────────────────────
+
+def test_la_cle_de_cache_est_posee_sur_chaque_appel(monkeypatch):
+    """⚠️ Sans elle, le fournisseur ne met RIEN en cache — mesuré le 01/09 :
+    deux appels identiques, zéro jeton caché ; avec elle, 96 % dès le second.
+    Un passage de 33 fiches a coûté 0,108 $ la ligne faute de ce paramètre."""
+    vus = {}
+
+    class R:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "ok"},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 5}}
+
+    def faux_post(url, corps, entetes, **_):
+        vus.update(corps)
+        return R()
+
+    monkeypatch.setattr(P, "_post_borne", faux_post)
+    monkeypatch.setattr(P, "resolve_key", lambda: "k")
+    P.complete(system="s", messages=[], tools=None)
+    assert vus.get("prompt_cache_key"), "aucune clé de cache dans la requête"
+
+
+def test_les_jetons_servis_par_le_cache_ne_comptent_pas_comme_neufs(monkeypatch):
+    """⚠️ `prompt_tokens` INCLUT ce que le cache a servi. Les porter tels quels
+    ferait payer au plein tarif, dans nos relevés, ce qui est facturé 10 %."""
+    class R:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "ok"},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 2812, "completion_tokens": 3,
+                              "prompt_tokens_details": {"cached_tokens": 2688}}}
+
+    monkeypatch.setattr(P, "_post_borne", lambda *a, **k: R())
+    monkeypatch.setattr(P, "resolve_key", lambda: "k")
+    t = P.complete(system="s", messages=[], tools=None)
+    assert t.usage["input_tokens"] == 124, "le neuf, pas le total"
+    assert t.usage["cache_read_input_tokens"] == 2688

@@ -132,6 +132,13 @@ def complete(*, system: str, messages: list, tools: list[dict],
         "model": model(),
         "max_tokens": max_tokens(),
         "messages": [{"role": "system", "content": system}, *messages],
+        # ⚠️ SANS cette cle, le fournisseur ne met rien en cache — mesure du
+        # 01/09 : deux appels identiques, zero jeton mis en cache ; avec elle,
+        # 96 % des le second appel. Elle est STABLE par procedure : ce qui vaut
+        # d'etre garde est le prefixe partage — consigne et outils — pas le fil
+        # d'une fiche. Un identifiant par fiche ne partagerait rien.
+        "prompt_cache_key": os.environ.get("OTO_RUNNER_CACHE_KEY")
+        or "oto-runner-procedure",
     }
     if tools:
         corps["tools"] = tools
@@ -149,8 +156,13 @@ def complete(*, system: str, messages: list, tools: list[dict],
     msg = choix.get("message") or {}
     fin = choix.get("finish_reason") or "stop"
     u = d.get("usage") or {}
-    usage = {"input_tokens": int(u.get("prompt_tokens") or 0),
-             "output_tokens": int(u.get("completion_tokens") or 0)}
+    # ⚠️ `prompt_tokens` COMPTE les jetons servis par le cache. Les porter tels
+    # quels ferait payer au plein tarif, dans nos releves, ce qui est facture
+    # 10 %. On separe donc, et `input_tokens` ne garde que ce qui est neuf.
+    _caches = int(((u.get("prompt_tokens_details") or {}).get("cached_tokens")) or 0)
+    usage = {"input_tokens": max(0, int(u.get("prompt_tokens") or 0) - _caches),
+             "output_tokens": int(u.get("completion_tokens") or 0),
+             "cache_read_input_tokens": _caches}
 
     if fin == "content_filter":
         return Turn(text="", tool_calls=(), stop_reason="refusal",
