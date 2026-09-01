@@ -1679,6 +1679,9 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             # a deux, comparer au premier declare fabrique le second.
             # ⚠️ Ce que l'agent a corrige de lui-meme : vu pendant la boucle,
             # absent au controle final, et la machine n'a encore rien ecrit.
+            # ⚠️ Les tardives comptent AUSSI comme tentatives : une valeur
+            # alteree hors de la boucle de rappel a bien ete tentee.
+            vues_en_boucle |= {c for c, _, _ in (tardives or [])}
             _restantes = {c for c, _, _ in (tardives or [])}
             corrigees_agent = sorted(vues_en_boucle - _restantes)
             if corrigees_agent:
@@ -1936,6 +1939,14 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 # ⚠️ JAMAIS confondu avec la reparation machine : l'un protege
                 # la cliente, l'autre dit que le modele apprend dans la boucle.
                 "valeurs_corrigees_agent": corrigees_agent,
+                # ⚠️ TOUTES les colonnes de la cliente que ce travail a tenté
+                # d'altérer, cumulées sur toute la boucle. C'est la SEULE mesure
+                # qui parle du modèle : « vu », « réparé », « corrigé » parlent
+                # du dispositif. `None` quand la comparaison n'a pas eu lieu —
+                # un zéro de tentatives et une absence de mesure ne se
+                # ressemblent pas.
+                "valeurs_cliente_tentees": (sorted(vues_en_boucle)
+                                            if detruites is not None else None),
                 "contacts_fabriques_retires": contacts_retires,
                 # ⚠️ DIT si le registre a repondu : sans lui, une liste vide de
                 # contacts fabriques ne distingue pas « tous legitimes » de

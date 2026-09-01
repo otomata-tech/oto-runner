@@ -290,3 +290,19 @@ def test_la_reference_qualifie_la_MESURE_pas_la_presence_du_socle(monkeypatch):
     assert r["valeurs_cliente_detruites"] is None, "aucune fiche, aucune mesure"
     assert r["reference_comparaison"] is None, \
         "une référence sans mesure fait passer un non-mesuré pour un contrôle"
+
+
+def test_le_releve_dit_combien_de_fois_le_modele_a_TENTE(monkeypatch):
+    """⚠️ Tous les autres postes parlent du DISPOSITIF — ce que la garde a vu au
+    dernier tour, réparé, ou ce que l'agent a corrigé. Aucun ne disait combien
+    de fois le modèle avait tenté d'altérer une valeur de la cliente.
+
+    Le 01/09, comparer deux modèles n'a donné qu'un encadrement de 5 à 14 fois,
+    faute de ce compteur : le poste « vu » est réassigné à chaque tour, celui
+    des corrections cumule.
+
+    Sans fiche, aucune comparaison : `None`, jamais une liste vide."""
+    r = _conclure(monkeypatch, [], provider=ProviderOneShot([_CLAIM, _RELEASE]))
+    assert "valeurs_cliente_tentees" in r, "le relevé doit porter les tentatives"
+    assert r["valeurs_cliente_tentees"] is None, \
+        "aucune comparaison possible n'est pas zéro tentative"
