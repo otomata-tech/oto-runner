@@ -220,6 +220,28 @@ PYCRAN
     echo "périmètre servi : « $_servi » — conforme à la déclaration ✅"
   fi
 
+  # ⚠️ GARDES RESIDUELLES D'UN AUTRE PASSAGE
+  #
+  # Une flotte qui s'eteint seule — borne de budget, file vide — ne passe pas
+  # par `arreter` et laisse ses gardes armees. Elles gardent la borne horaire
+  # et le lot de LEUR passage : au lancement suivant, le marquage du nouveau
+  # lot leur apparait comme des ecritures hors perimetre, et elles coupent une
+  # production legitime. Vecu le 01/09, trois minutes apres un depart.
+  #
+  # On ne devine pas laquelle a raison : on refuse tant qu'il en reste.
+  _autres=$(systemctl list-timers 'garde-*' --all --no-legend 2>/dev/null \
+            | awk '{print $NF}' | sed 's/\.service$//' \
+            | grep -v -- "-$nom\$" | sort -u)
+  if [ -n "$_autres" ]; then
+    echo "⛔ REFUS DE LANCER — des gardes d'un AUTRE passage sont encore armées :"
+    echo "$_autres" | sed 's/^/     /'
+    echo "   Elles portent la borne et le lot de leur passage : le marquage de"
+    echo "   ce lot-ci leur apparaîtrait comme une écriture hors périmètre, et"
+    echo "   elles couperaient. Retire-les — « flotte.sh arreter <leur nom> » —"
+    echo "   puis relance. Rien n'a été armé."
+    exit 1
+  fi
+
   # ⚠️ LES EXÉCUTANTS, avant tout le reste. Le 29/08, le septième départ est
   # parti avec flotte, garde, ordonnanceur et code TOUS VERTS et les trois
   # agents éteints : la flotte a enfilé dans le vide pendant quarante secondes.
@@ -408,6 +430,15 @@ PYCRAN
   ;;
 
 arreter)
+  # ⚠️ On retire AUSSI les gardes orphelines : une flotte eteinte seule n'a
+  # jamais appele cet arret, et ses gardes survivent a la campagne qu'elles
+  # gardaient.
+  for _g in $(systemctl list-timers 'garde-*' --all --no-legend 2>/dev/null \
+              | awk '{print $NF}' | sed 's/\.service$//' | sort -u); do
+    systemctl stop "$_g.timer" 2>/dev/null || true
+    systemctl stop "$_g.service" 2>/dev/null || true
+    systemctl reset-failed "$_g.service" 2>/dev/null || true
+  done
   # L'ordre inverse : la flotte d'abord, sa garde ensuite. Retirer la garde en
   # premier laisserait la flotte tourner sans surveillance le temps de l'arrêt.
   systemctl stop "$FLOTTE" 2>/dev/null
