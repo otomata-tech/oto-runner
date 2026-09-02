@@ -46,6 +46,26 @@ class FauxBackend:
         self.declarations.append(kw)
         return {"id": 42}
 
+    # ⚠️ Les gestes de l'ORDONNANCEUR, entrés avec la séparation intention/fait
+    # (R4b) : prendre la flotte (`armed` → `running`), battre EN DEMANDANT s'il
+    # faut s'arrêter, accuser l'arrêt. Une doublure qui ne les porte pas fige une
+    # signature morte — et le test qui l'utilise ne protège plus rien.
+    def prendre_flotte(self, fleet_id):
+        self.prises = getattr(self, "prises", [])
+        self.prises.append(fleet_id)
+        return {"id": fleet_id, "status": "running"}
+
+    def battre_flotte(self, fleet_id):
+        """Par défaut : aucun arrêt demandé. Les tests qui veulent l'ordre le
+        posent explicitement (`self.stop_demande = True`) — le cas nominal ne
+        doit jamais dire « arrête-toi » par accident."""
+        self.battements = getattr(self, "battements", 0) + 1
+        return bool(getattr(self, "stop_demande", False))
+
+    def accuser_arret(self, fleet_id, raison=None):
+        self.accuses = getattr(self, "accuses", [])
+        self.accuses.append((fleet_id, raison))
+
     def get_job(self, jid):
         self._age[jid] += 1
         if self._age[jid] >= self.duree:

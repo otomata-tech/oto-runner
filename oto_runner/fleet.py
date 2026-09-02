@@ -306,12 +306,28 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
         except BackendError as e:
             logger.warning("flotte non déclarée (%s) — les jobs partiront sans "
                            "rattachement, `op=state` restera muet sur ce passage", e)
+    # ⚠️ PRENDRE la flotte : `armed` → `running`. C'est l'ordonnanceur qui pose ce
+    # FAIT, jamais l'opérateur — `armed` veut dire « on a demandé », `running`
+    # veut dire « quelqu'un l'a prise et donne signe ». Un refus n'est pas une
+    # erreur à retenter : un autre ordonnanceur l'a prise, ou elle n'était pas
+    # armée. Partir quand même DOUBLERAIT le passage.
+    if fleet_id is not None:
+        try:
+            backend.prendre_flotte(fleet_id)
+            logger.info("flotte #%s prise — le passage est en cours", fleet_id)
+        except BackendError as e:
+            logger.warning("flotte #%s non prise (%s) — le passage tourne quand "
+                           "même, mais son état ne dira pas « en cours »",
+                           fleet_id, e)
     bilan = FleetBilan(lignes_initiales=backend.count_rows(spec.namespace,
                                                            filter=spec.filter,
                                                            org=spec.org))
     en_vol: set[int] = set()
     dernier_depart: Optional[float] = None
     failed_consecutifs = 0
+    # L'ordre d'arrêt, LU sur la plateforme — jamais un état purement local :
+    # c'est un opérateur qui le pose, depuis un écran ou une conversation.
+    arret_demande = False
     # ⚠️ Initialise ICI : un compteur qui n'existe que sur un chemin et qu'on
     # lit sur tous leve au premier passage qui l'emprunte.
     pleine_charge_atteinte = False
@@ -334,6 +350,31 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
 
     try:
         while True:
+            # 0. « Dois-je m'arrêter ? » — la question qui rend `op=stop` RÉEL.
+            #
+            # ⚠️ Sans cette lecture, l'arrêt demandé resterait une écriture que
+            # personne ne lit : l'écran annoncerait `stopping` pour toujours, et
+            # le passage continuerait de réserver, d'appeler, de DÉPENSER.
+            # C'est exactement pour ça que l'état s'appelle `stopping` et non
+            # `stopped` — la plateforme ne ment pas sur ce qu'elle a fait.
+            #
+            # ⚠️ Et l'arrêt est GRACIEUX, comme celui des agents : on cesse
+            # d'enfiler, on laisse finir ce qui est en vol, PUIS on accuse.
+            # Couper au milieu laisserait des lignes sous bail et ferait repayer
+            # les jobs — le remède serait pire que le mal.
+            if fleet_id is not None and not arret_demande:
+                try:
+                    if backend.battre_flotte(fleet_id):
+                        arret_demande = True
+                        bilan.arret = "arrêt demandé"
+                        logger.info("arrêt DEMANDÉ pour la flotte #%s — plus aucun "
+                                    "job enfilé, les %d en vol vont à leur terme",
+                                    fleet_id, len(en_vol))
+                except BackendError as e:
+                    # Une plateforme injoignable n'est pas un ordre d'arrêt : la
+                    # confondre éteindrait la flotte à chaque bascule.
+                    logger.warning("battement flotte #%s : %s", fleet_id, e)
+
             # 1. Moissonner les jobs conclus — leur résultat DÉCLARÉ porte le coût.
             for jid in sorted(en_vol):
                 try:
@@ -396,12 +437,16 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                              lignes_initiales=bilan.lignes_initiales)
 
             # 2. Les bornes — chacune arrête l'ENFILEMENT ; les jobs en vol finissent.
-            borne = None
-            if spec.budget_tokens is not None and bilan.usage_tokens >= spec.budget_tokens:
+            # ⚠️ L'ordre d'arrêt EST une borne, et il passe par le même chemin
+            # qu'elles : cesser d'enfiler, laisser finir ce qui est en vol,
+            # conclure. Lui inventer une sortie à part ferait deux façons de
+            # s'arrêter, dont une seule serait éprouvée.
+            borne = "arrêt demandé" if arret_demande else None
+            if borne is None and spec.budget_tokens is not None and bilan.usage_tokens >= spec.budget_tokens:
                 borne = f"budget atteint ({bilan.usage_tokens} ≥ {spec.budget_tokens} jetons)"
-            elif spec.volume is not None and traitees >= spec.volume:
+            elif borne is None and spec.volume is not None and traitees >= spec.volume:
                 borne = f"volume atteint ({traitees} ≥ {spec.volume} lignes)"
-            elif failed_consecutifs >= _MAX_FAILED_CONSECUTIFS:
+            elif borne is None and failed_consecutifs >= _MAX_FAILED_CONSECUTIFS:
                 borne = (f"{failed_consecutifs} échecs consécutifs — enfiler encore, "
                          "c'est payer pour re-crasher")
             elif (panne := _outil_critique_en_panne(spec, backend, clock)):
@@ -424,6 +469,18 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                 bilan.arret = borne
                 logger.info("flotte arrêtée : %s — %d done, %d failed, %d jetons",
                             borne, bilan.done, bilan.failed, bilan.usage_tokens)
+                # ⚠️ ACCUSER l'arrêt — le seul geste qui pose le FAIT `stopped`.
+                # Sans lui, un arrêt demandé resterait `stopping` pour toujours,
+                # ce qui est précisément le symptôme d'un ordonnanceur MORT : on
+                # le fabriquerait en étant vivant, et le diagnostic ne vaudrait
+                # plus rien.
+                if fleet_id is not None and arret_demande:
+                    try:
+                        backend.accuser_arret(fleet_id)
+                    except BackendError as e:
+                        logger.warning("accusé d'arrêt flotte #%s : %s — l'état "
+                                       "restera `stopping`, à corriger à la main",
+                                       fleet_id, e)
                 return bilan
 
             # 3. Enfiler, sous la rampe — un départ au plus par tour de boucle.

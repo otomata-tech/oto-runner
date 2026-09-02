@@ -277,6 +277,39 @@ class Backend:
         return self._post("/api/me/runner/fleets",
                           {"op": "get", "fleet_id": fleet_id}).get("fleet") or {}
 
+    def prendre_flotte(self, fleet_id: int) -> dict:
+        """`armed` → `running` : je la PRENDS, et je le déclare.
+
+        ⚠️ Un refus ici n'est pas une erreur à retenter : il veut dire qu'un autre
+        ordonnanceur l'a prise, ou qu'elle n'était pas armée. Partir quand même
+        doublerait le passage.
+        """
+        return self._post("/api/me/runner/fleets",
+                          {"op": "take", "fleet_id": fleet_id}).get("fleet") or {}
+
+    def battre_flotte(self, fleet_id: int) -> bool:
+        """Bat, ET demande dans le même appel : « dois-je m'arrêter ? »
+
+        ⚠️ C'est ce qui rend `op=stop` RÉEL. Un ordonnanceur qui bat sans jamais
+        poser la question laisserait l'ordre d'arrêt sans lecteur — et l'écran
+        annoncerait un arrêt qui n'arrive jamais.
+        """
+        out = self._post("/api/me/runner/fleets",
+                         {"op": "beat", "fleet_id": fleet_id})
+        return bool(out.get("stop_requested"))
+
+    def accuser_arret(self, fleet_id: int, raison: str | None = None) -> None:
+        """`stopping` → `stopped` : j'ai obéi.
+
+        Le seul geste qui pose le FAIT. Sans lui, un arrêt demandé reste
+        `stopping` pour toujours — ce qui est précisément le symptôme d'un
+        ordonnanceur mort, et il ne faut pas le fabriquer en étant vivant.
+        """
+        corps = {"op": "ack_stop", "fleet_id": fleet_id}
+        if raison:
+            corps["reason"] = raison
+        self._post("/api/me/runner/fleets", corps)
+
     def bind_run(self, job_id: int, run_id: str) -> None:
         self._post("/api/me/runner/jobs",
                    {"op": "bind_run", "job_id": job_id, "run_id": run_id})
