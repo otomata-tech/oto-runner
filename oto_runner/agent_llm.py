@@ -251,10 +251,15 @@ def complete(*, system: str, messages: list, tools: list[dict],
     except Exception:  # noqa: BLE001 — la télémétrie n'est jamais bloquante
         pass
 
+    # La version SERVIE si l'API la rend, à défaut celle qu'on a demandée : une
+    # estampille approchée vaut infiniment mieux qu'un `null`, qui ne se distingue
+    # pas d'un job qui n'a jamais tourné.
+    servi = getattr(resp, "model", None) or model()
+
     raw = [_block_to_dict(b) for b in getattr(resp, "content", []) or []]
     if stop == "refusal":
         return Turn(text="", tool_calls=(), stop_reason="refusal",
-                    raw_content=raw, usage=usage)
+                    raw_content=raw, usage=usage, model=servi)
 
     texts: list[str] = []
     calls: list[ToolCall] = []
@@ -270,4 +275,4 @@ def complete(*, system: str, messages: list, tools: list[dict],
                 arguments=raw_args if isinstance(raw_args, dict) else {}))
     return Turn(text="\n".join(t for t in texts if t.strip()).strip(),
                 tool_calls=tuple(calls), stop_reason=stop,
-                raw_content=raw, usage=usage)
+                raw_content=raw, usage=usage, model=servi)

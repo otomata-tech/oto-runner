@@ -98,19 +98,35 @@ autre borne est une **panne** — exit 1, pour que systemd relance la campagne
 quand la panne passe : échecs consécutifs, backend indisponible, outil critique
 en échec, faux départs en série, **rendement effondré**.
 
-Le rendement est la borne GÉNÉRALE du prix de la sortie. « Outil critique » ne
-couvre qu'un outil qui répond en erreur ; une campagne peut payer le prix plein
-sans rien produire pour dix autres raisons, et rien ne le voit puisque les jobs
-concluent « done » :
+Le plafond par LIGNE borne le prix d'un passage là où il dérape vraiment — une
+ligne seule a coûté **65 571 jetons** le 01/09 :
 
 ```yaml
-jetons_par_ecriture_max: 40000   # plafond de jetons par écriture (absent ⟹ inactif)
-rendement_fenetre: 10            # fenêtre glissante de jobs conclus (défaut 10)
+max_tokens_per_row: 40000   # plafond de jetons d'UNE ligne (absent ⟹ pas de borne)
 ```
 
-Sur les `rendement_fenetre` derniers jobs conclus, si la somme des jetons
-dépasse `jetons_par_ecriture_max × max(1, écritures)`, la flotte s'arrête. La
-fenêtre ne juge qu'une fois **pleine** : un début de vol n'a pas de verdict.
+Il est **descendu dans chaque travail enfilé**, donc appliqué par l'agent
+lui-même : il vaut quel que soit le chemin qui a mis la ligne en file, y compris
+sans ordonnanceur. L'agent s'arrête sur `stopped: max_tokens`, conclut, et la
+ligne suivante repart à zéro. ⚠️ Ce qui compte dans ce total est ce qui est
+**facturé** — entrée non cachée + sortie + écriture de cache : les jetons *lus*
+en cache coûtent une fraction et gonfleraient le compteur d'un facteur trois sur
+un déroulé bien caché, coupant les passages les plus économes.
+
+Effet mesuré sur une campagne réelle (02/09) : sans borne, médiane 59 123 jetons
+et **maximum 265 658**, dispersion ×48 ; borné à 80 000, médiane 86 303 et
+maximum 107 204 — plus aucune ligne folle.
+
+> ⚠️ **Corrigé le 02/09.** Ce paragraphe a décrit du 27/08 au 02/09 une borne de
+> « rendement » — coût rapporté aux écritures produites, sur une fenêtre
+> glissante — sous les noms `jetons_par_ecriture_max` et `rendement_fenetre`.
+> **Ces deux réglages n'ont jamais existé dans le code** : le mécanisme a été
+> conçu puis remplacé par la borne par ligne, sans que ce README suive. Une
+> déclaration écrite depuis cette page repartait donc **sans aucune borne**, en
+> croyant en avoir une — et le runner avertissait par-dessus que
+> `max_tokens_per_row` était « ignoré », ce qui achevait de convaincre. Ce qui
+> attrape « ça tourne à vide », ce sont les **faux départs en série**, décrits
+> ci-dessus.
 
 Chaque job conclu déclare son coût et sa sortie (`usage_tokens`,
 `usage_cache_read`, `usage_cache_write`, `tool_counts`, `claims`, `writes`,
@@ -118,12 +134,20 @@ Chaque job conclu déclare son coût et sa sortie (`usage_tokens`,
 fil. `usage_tokens` reste **input + output** — la base des bornes de flotte
 (budget, rendement) ne bouge pas ; le cache se compte à côté.
 
-`model` porte la **version concrète** derrière l'alias configuré
-(`mistral-large-latest` → `mistral-large-2512`), relevée au moment de l'appel :
-un alias flotte quand le fournisseur le décide, et sans ce champ une anomalie de
+`model` porte ce que le fournisseur **dit avoir servi**, relevé sur le tour
+lui-même (le dernier tour fait foi si un alias bascule en cours de déroulé) : un
+alias flotte quand le fournisseur le décide, et sans ce champ une anomalie de
 campagne ne se date pas — on ignore quels jobs ont tourné avant la bascule et
-lesquels après. `null` quand le provider ne sait pas la résoudre, ou quand le
-catalogue est injoignable (le relevé ne fait jamais échouer un job).
+lesquels après. À défaut de réponse du fournisseur, le worker estampille ce
+qu'il a **demandé** : une estampille approchée vaut mieux qu'un `null`, qui ne se
+distingue pas d'un job qui n'a jamais tourné.
+
+> ⚠️ **Corrigé le 02/09.** Ce champ était déclaré, lu par le worker et compté par
+> le bilan — mais **aucun transport ne le posait** : trois consommateurs, zéro
+> producteur, `null` sur 100 % des jobs. Le défaut s'est vu quand la question
+> « quelles lignes viennent de quel modèle ? » a été posée à froid sur une
+> campagne réelle, et qu'il a fallu passer par l'horodatage du journal des
+> écritures pour y répondre.
 
 Le verdict de faux départ (réserver une ligne sans rien écrire) appartient au
 worker, qui a vu les appels — un résultat qui ne le porte pas vient d'un worker

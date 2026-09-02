@@ -217,6 +217,7 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
     usage = dict.fromkeys(USAGE_KEYS, 0)
     stopped = "end_turn"
     reply = ""
+    servi: Optional[str] = None
     plafond = max(1, min(spec.max_steps, HARD_MAX_STEPS))
 
     for _ in range(plafond + 1):
@@ -224,6 +225,9 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
                                  tools=schemas, api_key=api_key)
         for k in USAGE_KEYS:
             usage[k] = usage.get(k, 0) + int(turn.usage.get(k) or 0)
+        # Le DERNIER tour fait foi : un fournisseur qui bascule d'alias en cours
+        # de déroulé a servi les deux, et c'est le second qu'on retrouvera.
+        servi = turn.model or servi
 
         # ⚠️ La borne se vérifie APRÈS le tour, jamais avant : on ne connaît le
         # coût d'un tour qu'une fois qu'il a eu lieu. Elle empêche donc le tour
@@ -282,8 +286,14 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
 
     if not reply and stopped == "end_turn":
         stopped = "no_reply"
+    # ⚠️ L'estampille remonte du tour, pas de la configuration : c'est ce que le
+    # fournisseur a SERVI. Elle était déclarée sur `AgentResult` depuis l'origine,
+    # lue par le worker et comptée par le bilan — mais AUCUN transport ne la
+    # posait. Trois consommateurs, zéro producteur : le champ valait `None` sur
+    # 100 % des jobs, et « quelles lignes viennent de quel modèle » n'avait plus
+    # de réponse (constaté au vol le 02/09, sur des passages réels).
     return AgentResult(reply=reply, steps=steps, stopped=stopped, usage=usage,
-                       messages=messages)
+                       messages=messages, model=servi)
 
 
 def serialize(payload) -> str:

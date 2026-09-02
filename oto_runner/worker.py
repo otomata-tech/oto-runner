@@ -124,6 +124,18 @@ _SOCLE_TABLE: dict = {}
 
 
 
+def _modele_courant(provider) -> str:
+    """Le nom du modèle configuré pour ce provider, sans jamais faire échouer.
+
+    ⚠️ Un relevé d'observabilité ne casse pas un job que la campagne a déjà payé :
+    un provider sans `model()` rend une chaîne parlante plutôt qu'une exception.
+    """
+    try:
+        return provider.model() or "inconnu"
+    except Exception:  # noqa: BLE001 — cf. docstring
+        return "inconnu"
+
+
 def _vide(x) -> bool:
     return x in (None, "", [], {}) or str(x).strip() == ""
 
@@ -308,7 +320,12 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         "stopped": res.stopped,
         "steps": len(res.steps),
         "tool_counts": compte,
-        "model": res.model,
+        # ⚠️ Repli SUR LE WORKER, pas seulement dans les transports : c'est ce qui
+        # ferme la classe. Un transport qui oublierait de poser l'estampille
+        # rendrait à nouveau `null` partout — et un `null` ne se distingue pas
+        # d'un job qui n'a pas tourné. Ici, au pire, on estampille ce qu'on a
+        # DEMANDÉ ; le transport, lui, sait ce qui a été SERVI et gagne.
+        "model": res.model or _modele_courant(provider),
     }
     try:
         mcp.outil("run_finish", {"run_id": run_id, "outcome": outcome,
@@ -370,7 +387,7 @@ def main() -> None:
     lease_s = 960 if getattr(provider, "ONE_SHOT", False) else _LEASE_S
     # L'alias configuré ET ce qu'il résout : deux workers lancés de part et
     # d'autre d'une bascule le disent au journal, sans qu'on ait à le deviner.
-    nom_modele = provider.model()
+    nom_modele, resolu = _modele_courant(provider), None
     resolu = getattr(provider, "modele_resolu", lambda _n: None)(nom_modele)
     logger.info("worker armé — file de %s · provider %s · modèle %s%s",
                 backend.base, provider.__name__.rsplit('_', 1)[-1], nom_modele,

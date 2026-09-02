@@ -417,7 +417,8 @@ def _cumuler(cumul: Optional[AgentResult], passe: AgentResult) -> AgentResult:
         stopped=passe.stopped,
         usage={c: int(cumul.usage.get(c) or 0) + int(passe.usage.get(c) or 0)
                for c in ("input_tokens", "output_tokens")},
-        raw_outputs=passe.raw_outputs)
+        raw_outputs=passe.raw_outputs,
+        model=passe.model or cumul.model)
 
 
 def _nom_outil(name: str, tools) -> str:
@@ -461,6 +462,11 @@ def _parse(d: dict, tools=()) -> AgentResult:
     u = d.get("usage") or {}
     usage = {"input_tokens": int(u.get("prompt_tokens") or 0),
              "output_tokens": int(u.get("completion_tokens") or 0)}
+    # La docstring de ce module PROMETTAIT déjà cette estampille — « le bilan
+    # porte la version CONCRÈTE que l'alias résolvait au moment de l'appel » —
+    # sans que personne ne la pose. Une promesse tenue par un commentaire est
+    # exactement ce qui empêche de chercher le défaut.
     return AgentResult(reply="\n".join(textes).strip(), steps=steps,
                        stopped="end_turn", usage=usage,
-                       raw_outputs=d.get("outputs"))
+                       raw_outputs=d.get("outputs"),
+                       model=d.get("model") or model())

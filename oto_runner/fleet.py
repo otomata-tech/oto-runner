@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Callable, Optional
 
 import yaml
@@ -65,13 +65,6 @@ DEFAULT_INPUT = ("Ta file de travail est le tableau `{namespace}` : réserve cha
                  "un identifiant : seule la file fait foi — si la réservation ne rend "
                  "rien, la file est vide, arrête-toi.")
 
-# Champs de déclaration reconnus ; le reste est logué puis ignoré (une flotte
-# écrite pour un autre harnais reste lisible ici, sans mensonge silencieux).
-_CHAMPS = {"procedure", "namespace", "filter", "project", "org", "tools", "concurrency",
-           "ramp_seconds", "volume", "budget_tokens", "max_steps", "input",
-           "bilan_periode_s"}
-
-
 @dataclass(frozen=True)
 class FleetSpec:
     procedure: str
@@ -109,10 +102,19 @@ class FleetSpec:
     # dont l'un des deux finirait par mentir. Ici on ne dit pas ce qui est
     # PERMIS : on dit ce dont la panne rend le résultat FAUX.
     critical_tools: tuple = ()
-    # Le plafond de jetons D'UNE LIGNE, descendu dans chaque travail enfilé.
+    # Le plafond de jetons D'UNE LIGNE, descendu dans CHAQUE travail enfilé —
+    # donc appliqué par l'agent lui-même, quel que soit le chemin qui l'a mis en
+    # file. Absent ⟹ aucune borne par ligne : 65 571 jetons sur une seule ligne,
+    # mesurés le 01/09.
+    #
+    # ⚠️ Ce n'est PAS le « rendement » (jetons par écriture produite, jugé sur une
+    # fenêtre glissante) que le README a décrit du 27/08 au 02/09 : ce
+    # mécanisme-là a été conçu, documenté sous les noms `jetons_par_ecriture_max`
+    # et `rendement_fenetre`, puis remplacé par cette borne simple — sans que la
+    # doc suive. Aucun des deux noms n'a jamais existé dans le code. Qui écrivait
+    # sa déclaration depuis le README repartait donc SANS borne, en croyant en
+    # avoir une.
     max_tokens_per_row: Optional[int] = None
-    # Le RENDEMENT : plafond de jetons dépensés par écriture produite, jugé sur
-    # une fenêtre glissante de jobs conclus. Absent ⟹ borne inactive.
     bilan_periode_s: int = _BILAN_PERIODE_S   # cadence du bilan intermédiaire
     source: str = ""              # la déclaration : le bilan JSON se pose à côté
 
@@ -125,14 +127,32 @@ class FleetSpec:
                 "explicitement — il ne se devine pas.")
 
 
+# Ce qu'une déclaration ne peut PAS porter : `name` vient du nom du fichier,
+# `source` de son chemin, `fleet_id` est attribué par la base.
+_NON_DECLARABLES = frozenset({"name", "source", "fleet_id"})
+
+# ⚠️ DÉRIVÉ du dataclass, jamais réécrit à la main. La liste manuelle avait pris
+# deux champs de retard — `critical_tools` et `max_tokens_per_row` — et
+# l'avertissement criait donc sur des réglages qui MARCHENT. Un opérateur a failli
+# retirer la ligne qui bornait sa dépense parce que le runner lui disait qu'elle
+# était ignorée (02/09). **Un avertissement faux est pire que pas d'avertissement :
+# il pousse au geste inverse du bon.** Un champ ajouté demain à `FleetSpec` est
+# reconnu ici sans que personne y pense.
+_CHAMPS = frozenset(f.name for f in fields(FleetSpec)) - _NON_DECLARABLES
+
+
 def load_spec(path: str) -> FleetSpec:
     with open(path) as f:
         raw = yaml.safe_load(f) or {}
     inconnus = sorted(set(raw) - _CHAMPS)
     if inconnus:
-        logger.warning("déclaration : champs ignorés par le runner : %s "
-                       "(le modèle vient de l'env du WORKER, OTO_RUNNER_MODEL)",
-                       ", ".join(inconnus))
+        # ⚠️ Dire ce qui EST reconnu à côté de ce qui ne l'est pas : sans le
+        # voisinage, une faute de frappe (`max_token_per_row`) se lit comme une
+        # fonctionnalité absente, et on cherche dans le code plutôt que dans le
+        # fichier.
+        logger.warning("déclaration : champs inconnus, ignorés : %s — les champs "
+                       "reconnus sont : %s", ", ".join(inconnus),
+                       ", ".join(sorted(_CHAMPS)))
     volume = raw.get("volume")
     if not isinstance(volume, int):
         volume = None                            # « épuisement » ou absent
@@ -267,13 +287,14 @@ def _outil_critique_en_panne(spec, backend, clock) -> "str | None":
 _outil_critique_en_panne.dernier = {}
 
 
-# La borne de RENDEMENT (27/08). « Outil critique » ne couvre qu'un cas : un
-# outil qui répond en erreur. Une campagne peut payer le prix plein sans rien
-# produire pour dix autres raisons — file qui ne rend que des lignes
-# intraitables, procédure qui analyse et conclut en prose, modèle qui tourne en
-# rond — et rien ne le voit : les jobs sont « done ». Le rendement rapporte donc
-# le coût à la SORTIE réelle (les écritures), sur une FENÊTRE : un job cher sans
-# écriture est banal, dix d'affilée sont une panne.
+# ⚠️ Ce qui protège une campagne d'un prix payé sans sortie, ce sont DEUX bornes
+# distinctes, et aucune n'est un « rendement » : les FAUX DÉPARTS EN SÉRIE
+# (ci-dessus) attrapent « ça tourne à vide », et `max_tokens_per_row` borne la
+# ligne elle-même. La borne de rendement — coût rapporté aux écritures sur une
+# fenêtre glissante — a été conçue le 27/08 et n'a jamais été écrite ; le
+# commentaire qui l'annonçait ici a survécu à sa propre annulation jusqu'au
+# 02/09. **Un commentaire qui décrit un mécanisme absent le rend introuvable :
+# on cherche le bug dans le code au lieu de constater qu'il n'y a pas de code.**
 
 
 @dataclass

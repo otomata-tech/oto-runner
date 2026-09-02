@@ -164,9 +164,12 @@ def complete(*, system: str, messages: list, tools: list[dict],
              "output_tokens": int(u.get("completion_tokens") or 0),
              "cache_read_input_tokens": _caches}
 
+    # Ce que le fournisseur DIT avoir servi, à défaut ce qu'on a demandé.
+    servi = d.get("model") or model()
+
     if fin == "content_filter":
         return Turn(text="", tool_calls=(), stop_reason="refusal",
-                    raw_content=msg, usage=usage)
+                    raw_content=msg, usage=usage, model=servi)
 
     calls = []
     for tc in (msg.get("tool_calls") or []):
@@ -187,4 +190,4 @@ def complete(*, system: str, messages: list, tools: list[dict],
     return Turn(text=contenu.strip(),
                 tool_calls=tuple(calls),
                 stop_reason="end_turn" if fin in ("stop", "tool_calls") else fin,
-                raw_content=msg, usage=usage)
+                raw_content=msg, usage=usage, model=servi)

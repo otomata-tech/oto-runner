@@ -9,6 +9,7 @@ qui l'a commencé** (les formes ne se traduisent pas entre elles).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,11 @@ class Turn:
     stop_reason: str = "end_turn"       # end_turn | refusal | …
     raw_content: object = None
     usage: dict = field(default_factory=dict)
+    # ⚠️ Ce que le FOURNISSEUR dit avoir servi, pas ce qu'on a demandé : un alias
+    # flottant (`mistral-large-latest`) ne se date pas après coup. Sans cette
+    # estampille, « quelles lignes viennent de quel modèle » n'a plus de réponse
+    # dès que la question se pose à froid — et elle s'est posée le 02/09.
+    model: Optional[str] = None
 
     @property
     def wants_tools(self) -> bool:
