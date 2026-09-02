@@ -235,3 +235,100 @@ def test_un_provider_sans_poste_de_cache_ne_casse_pas_le_cumul():
     res = agent_runtime.run(SPEC, FauxTransport(), p, prompt="go")
     assert res.usage["cache_read_input_tokens"] == 0
     assert res.usage["cache_creation_input_tokens"] == 0
+
+
+# ── LA BORNE DE JETONS, appliquée par l'agent lui-même ───────────────────────
+#
+# ⚠️ Elle vivait sur la flotte, et seul un ordonnanceur savait la lire — donc
+# personne dès qu'un passage tourne sans lui. L'agent ne connaissait qu'un
+# plafond d'ÉTAPES, **qui ne dit rien de ce qu'une étape coûte** : une ligne
+# mesurée à 65 571 jetons le 01/09 tenait largement sous ses 40 pas.
+#
+# Sans cette borne, un passage non observé peut dépenser le triple pendant vingt
+# minutes sans que personne ne le sache avant de lire le relevé.
+
+def _tour(text="", **usage):
+    """Un tour qui APPELLE un outil — donc la boucle continue.
+
+    ⚠️ Un tour sans appel d'outil conclut le déroulé : la borne ne serait jamais
+    atteinte et le test passerait au vert sans rien éprouver. C'est le défaut
+    qu'avait la première version de ces tests."""
+    return Turn(text=text, tool_calls=(ToolCall(id="t0", name="data_rows",
+                                                arguments={}),),
+                stop_reason="tool_use", raw_content=[], usage=usage)
+
+
+def _fin(text="fini", **usage):
+    return Turn(text=text, tool_calls=(), stop_reason="end_turn",
+                raw_content=[{"type": "text", "text": text}], usage=usage)
+
+
+def test_la_borne_de_jetons_arrete_le_deroule():
+    spec = AgentSpec(system="s", tools=frozenset(), max_steps=10, max_tokens=1000)
+    p = FauxProvider([
+        _tour(input_tokens=600, output_tokens=100),          # 700 — sous la borne
+        _tour(input_tokens=400, output_tokens=100),          # 1200 — dépasse
+        _fin(text="ce tour ne doit JAMAIS avoir lieu", input_tokens=99_999),
+    ])
+    res = agent_runtime.run(spec, FauxTransport(), p, prompt="go")
+    assert res.stopped == "max_tokens"
+    assert len(p.file) == 1, "le tour suivant n'a pas été joué"
+
+
+def test_la_borne_se_verifie_APRES_le_tour_donc_elle_borne_la_derive():
+    """⚠️ On ne connaît le coût d'un tour qu'une fois qu'il a eu lieu.
+
+    La borne empêche donc le tour SUIVANT — c'est le plus tôt qu'on puisse
+    s'arrêter. Elle borne la dérive à UN tour de dépassement, au lieu d'un
+    déroulé entier. Prétendre l'appliquer avant serait mentir sur ce qu'elle
+    peut."""
+    spec = AgentSpec(system="s", tools=frozenset(), max_steps=10, max_tokens=100)
+    p = FauxProvider([_tour(input_tokens=5000, output_tokens=1000),
+                      _fin(text="jamais")])
+    res = agent_runtime.run(spec, FauxTransport(), p, prompt="go")
+    assert res.stopped == "max_tokens"
+    assert res.usage["input_tokens"] == 5000, (
+        "le premier tour a bien été payé — la borne ne l'annule pas, elle "
+        "empêche le suivant")
+
+
+def test_les_jetons_LUS_EN_CACHE_ne_comptent_PAS_dans_la_borne():
+    """⚠️ LE piège, et il couperait exactement les passages qu'on veut protéger.
+
+    Les jetons lus en cache coûtent une fraction du tarif d'entrée. Les compter
+    ferait dépasser la borne à un déroulé BIEN caché — c'est-à-dire le plus
+    économe. Une borne qui punit l'économie est pire qu'aucune borne : elle
+    pousse à la désactiver."""
+    spec = AgentSpec(system="s", tools=frozenset(), max_steps=10, max_tokens=5000)
+    p = FauxProvider([
+        # 130 000 lus en cache — largement au-dessus de la borne s'ils comptaient
+        _tour(input_tokens=1000, output_tokens=200, cache_read_input_tokens=130_000),
+        _fin(input_tokens=500, output_tokens=100,
+             cache_read_input_tokens=130_000),
+    ])
+    res = agent_runtime.run(spec, FauxTransport(), p, prompt="go")
+    assert res.stopped == "end_turn", (
+        f"coupé à tort : {res.stopped} — un déroulé bien caché a été puni pour "
+        "son cache")
+    assert res.usage["cache_read_input_tokens"] == 260_000
+
+
+def test_l_ecriture_de_cache_COMPTE_elle():
+    """Elle se paie plus cher que l'entrée : l'exclure laisserait un déroulé
+    dépenser sans borne en (re)construisant son cache."""
+    spec = AgentSpec(system="s", tools=frozenset(), max_steps=10, max_tokens=1000)
+    p = FauxProvider([_tour(cache_creation_input_tokens=1500),
+                      _fin(text="jamais")])
+    res = agent_runtime.run(spec, FauxTransport(), p, prompt="go")
+    assert res.stopped == "max_tokens"
+
+
+def test_sans_borne_le_comportement_est_INCHANGÉ():
+    """La borne est facultative : un travail isolé peut légitimement ne pas en
+    porter. Ce qui ne doit jamais arriver, c'est qu'un passage sur des données
+    clientes parte sans."""
+    spec = AgentSpec(system="s", tools=frozenset(), max_steps=2)
+    p = FauxProvider([_tour(input_tokens=10_000_000),
+                      _fin(input_tokens=10_000_000)])
+    res = agent_runtime.run(spec, FauxTransport(), p, prompt="go")
+    assert res.stopped == "end_turn"

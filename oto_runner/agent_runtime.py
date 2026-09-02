@@ -53,6 +53,18 @@ USAGE_KEYS = ("input_tokens", "output_tokens",
               "cache_creation_input_tokens", "cache_read_input_tokens")
 
 
+def _factures(usage: dict) -> int:
+    """Les jetons FACTURÉS d'un déroulé — ce qu'une borne de coût doit compter.
+
+    Exclut `cache_read_input_tokens` : lus en cache, ils coûtent une fraction du
+    tarif d'entrée. Les inclure ferait dépasser la borne à un passage BIEN caché,
+    c'est-à-dire précisément celui qu'on ne veut pas couper.
+    """
+    return (int(usage.get("input_tokens") or 0)
+            + int(usage.get("output_tokens") or 0)
+            + int(usage.get("cache_creation_input_tokens") or 0))
+
+
 class ToolTransport(Protocol):
     """Ce que la boucle attend d'un transport d'outils : la face MCP du backend.
 
@@ -69,6 +81,18 @@ class AgentSpec:
     system: str
     tools: frozenset
     max_steps: int = DEFAULT_MAX_STEPS
+    # ⚠️ Le plafond de JETONS d'un déroulé, appliqué PAR L'AGENT. `None` = pas de
+    # borne (le comportement d'avant).
+    #
+    # Il existait jusqu'ici sur la flotte, et seul un ordonnanceur savait le lire
+    # — donc personne, dès qu'un passage tourne sans lui. L'agent ne connaissait
+    # qu'un plafond d'ÉTAPES, **qui ne dit rien de ce qu'une étape coûte** : une
+    # ligne mesurée à 65 571 jetons le 01/09 tenait largement sous ses 40 pas.
+    #
+    # ⚠️ La borne est ici et pas ailleurs parce que c'est le SEUL endroit qui voit
+    # le cumul en temps réel. Posée sur l'ordonnanceur, elle arrive après coup :
+    # elle empêche le PROCHAIN travail, jamais celui qui dérive.
+    max_tokens: Optional[int] = None
     label: str = "run"
 
 
@@ -103,7 +127,7 @@ class AgentStep:
 class AgentResult:
     reply: str
     steps: list = field(default_factory=list)
-    stopped: str = "end_turn"           # end_turn | max_steps | refusal | no_reply
+    stopped: str = "end_turn"   # end_turn | max_steps | max_tokens | refusal | no_reply
     usage: dict = field(default_factory=dict)
     messages: list = field(default_factory=list)
     raw_outputs: Optional[list] = None   # les entrées BRUTES du fournisseur,
@@ -200,6 +224,20 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
                                  tools=schemas, api_key=api_key)
         for k in USAGE_KEYS:
             usage[k] = usage.get(k, 0) + int(turn.usage.get(k) or 0)
+
+        # ⚠️ La borne se vérifie APRÈS le tour, jamais avant : on ne connaît le
+        # coût d'un tour qu'une fois qu'il a eu lieu. Elle empêche donc le tour
+        # SUIVANT — c'est le plus tôt qu'on puisse s'arrêter, et ça borne la
+        # dérive à un tour de dépassement au lieu d'un déroulé entier.
+        #
+        # ⚠️ Ce qui compte dans le total, c'est ce qui est FACTURÉ : l'entrée
+        # non cachée, la sortie, et l'écriture de cache. Les jetons LUS en cache
+        # coûtent une fraction et gonfleraient le compteur d'un facteur trois sur
+        # un déroulé bien caché — une borne qui les compterait couperait des
+        # passages économes en croyant les protéger.
+        if spec.max_tokens is not None and _factures(usage) >= spec.max_tokens:
+            stopped = "max_tokens"
+            break
 
         if turn.stop_reason == "refusal":
             stopped, reply = "refusal", ""

@@ -109,6 +109,8 @@ class FleetSpec:
     # dont l'un des deux finirait par mentir. Ici on ne dit pas ce qui est
     # PERMIS : on dit ce dont la panne rend le résultat FAUX.
     critical_tools: tuple = ()
+    # Le plafond de jetons D'UNE LIGNE, descendu dans chaque travail enfilé.
+    max_tokens_per_row: Optional[int] = None
     # Le RENDEMENT : plafond de jetons dépensés par écriture produite, jugé sur
     # une fenêtre glissante de jobs conclus. Absent ⟹ borne inactive.
     bilan_periode_s: int = _BILAN_PERIODE_S   # cadence du bilan intermédiaire
@@ -146,6 +148,7 @@ def load_spec(path: str) -> FleetSpec:
         volume=volume,
         budget_tokens=raw.get("budget_tokens"),
         max_steps=int(raw.get("max_steps") or 40),
+        max_tokens_per_row=raw.get("max_tokens_per_row"),
         input=raw.get("input") or DEFAULT_INPUT,
         critical_tools=tuple(raw.get("critical_tools") or ()),
         bilan_periode_s=int(raw.get("bilan_periode_s") or _BILAN_PERIODE_S),
@@ -194,6 +197,7 @@ def spec_depuis_flotte(f: dict) -> FleetSpec:
         volume=f.get("max_rows"),
         budget_tokens=f.get("max_tokens"),
         max_steps=int(f.get("max_steps") or 40),
+        max_tokens_per_row=f.get("max_tokens_per_row"),
         input=f.get("input") or DEFAULT_INPUT,
         # La flotte EXISTE déjà : on la reprend, on n'en déclare pas une seconde.
         fleet_id=int(f["id"]),
@@ -213,6 +217,11 @@ def _payload(spec: FleetSpec) -> dict:
             "namespace": spec.namespace,
             "fleet": spec.name,
             "max_steps": spec.max_steps,
+            # ⚠️ La borne DESCEND avec le travail. Elle vivait sur la flotte, où
+            # seul un ordonnanceur savait la lire — donc personne dès qu'un
+            # passage tourne sans lui. Portée par le travail, elle s'applique
+            # quel que soit le chemin qui l'a enfilé.
+            "max_tokens": spec.max_tokens_per_row,
             "input": message,
             "label": f"flotte {spec.namespace} — {spec.procedure}"}
 
@@ -298,7 +307,8 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                 namespace=spec.namespace, row_filter=spec.filter or None,
                 project_id=spec.project, input=spec.input,
                 max_steps=spec.max_steps, workers=spec.concurrency,
-                max_rows=spec.volume, max_tokens=spec.budget_tokens)
+                max_rows=spec.volume, max_tokens=spec.budget_tokens,
+                max_tokens_per_row=spec.max_tokens_per_row)
             fleet_id = f.get("id")
             logger.info("flotte déclarée en base : id=%s — remettre `fleet_id: %s` "
                         "dans la déclaration pour REPRENDRE ce passage",

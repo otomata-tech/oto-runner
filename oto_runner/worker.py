@@ -155,6 +155,13 @@ def _spec_du_job(job: dict, procedure_md: str) -> AgentSpec:
         system=_SYSTEM_FRAME + "\n\n## Procédure\n\n" + procedure_md,
         tools=outils,
         max_steps=int(p.get("max_steps") or agent_runtime.DEFAULT_MAX_STEPS),
+        # ⚠️ Le plafond de JETONS du déroulé, posé par qui enfile. Absent = pas de
+        # borne — c'est le comportement d'avant, et il reste possible pour un
+        # travail isolé. Mais un passage sur des données clientes ne devrait
+        # jamais partir sans : un plafond d'ÉTAPES ne dit rien de ce qu'une étape
+        # coûte, et une ligne mesurée à 65 571 jetons le 01/09 tenait largement
+        # sous ses 40 pas.
+        max_tokens=(int(p["max_tokens"]) if p.get("max_tokens") else None),
         label=f"job:{job.get('id')}")
 
 
