@@ -50,6 +50,14 @@ class FauxBackend:
     # (R4b) : prendre la flotte (`armed` → `running`), battre EN DEMANDANT s'il
     # faut s'arrêter, accuser l'arrêt. Une doublure qui ne les porte pas fige une
     # signature morte — et le test qui l'utilise ne protège plus rien.
+    def armer_flotte(self, fleet_id):
+        # La séquence réelle est déclarer → ARMER → prendre.
+        # Une doublure qui saute l'armement décrit un chemin
+        # que le runner n'emprunte pas.
+        self.armees = getattr(self, 'armees', [])
+        self.armees.append(fleet_id)
+        return {'id': fleet_id, 'status': 'armed'}
+
     def prendre_flotte(self, fleet_id):
         self.prises = getattr(self, "prises", [])
         self.prises.append(fleet_id)

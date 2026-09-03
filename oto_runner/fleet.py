@@ -305,6 +305,19 @@ class FleetBilan:
     lignes_initiales: int = 0
     lignes_restantes: int = 0
     arret: str = ""
+    # Combien de fois le passage n'a PAS pu dire où il en était — déclaration,
+    # armement, prise, battement, accusé d'arrêt.
+    #
+    # ⚠️ **C'est le vrai défaut du 03/09**, pas l'armement manquant. Chacun de ces
+    # gestes échouait, était journalisé en `warning`, et le passage continuait :
+    # « le passage tourne quand même, mais son état ne dira pas en cours ». Le
+    # journal disait la vérité à chaque battement. **Personne ne l'a lue pendant
+    # huit vagues.**
+    #
+    # Un compte porté par le BILAN se lit là où on regarde le résultat, et il se
+    # conclut : *ce passage a tourné en aveugle N fois*. Une ligne de journal de
+    # plus n'aurait rien changé — c'est exactement ce qui a échoué.
+    etat_muet: int = 0
 
 
 def run_fleet(spec: FleetSpec, backend: Backend, *,
@@ -320,6 +333,10 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
     # qui échoue n'arrête PAS le passage — le rattachement sert à LIRE, il ne
     # conditionne pas le travail. Perdre l'observabilité est un moindre mal
     # devant une campagne qui refuse de partir.
+    # ⚠️ Compté AVANT que le bilan existe (il naît d'un appel réseau, plus bas) :
+    # un aveuglement qui survient pendant le démarrage doit être compté aussi,
+    # c'est même là qu'il est le plus probable.
+    muet = 0
     fleet_id = spec.fleet_id
     if fleet_id is None:
         try:
@@ -335,6 +352,7 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                         "dans la déclaration pour REPRENDRE ce passage",
                         fleet_id, fleet_id)
         except BackendError as e:
+            muet += 1
             logger.warning("flotte non déclarée (%s) — les jobs partiront sans "
                            "rattachement, `op=state` restera muet sur ce passage", e)
     # ⚠️ PRENDRE la flotte : `armed` → `running`. C'est l'ordonnanceur qui pose ce
@@ -343,16 +361,28 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
     # erreur à retenter : un autre ordonnanceur l'a prise, ou elle n'était pas
     # armée. Partir quand même DOUBLERAIT le passage.
     if fleet_id is not None:
+        # ⚠️ ARMER AVANT DE PRENDRE. Une flotte naît `draft` ; `prendre` n'accepte
+        # qu'`armed`. Sans ce geste le refus est systématique — et il l'a été sur
+        # les 14 campagnes déclarées jusqu'au 03/09, aucune n'ayant jamais atteint
+        # `running` alors que huit vagues tournaient.
+        try:
+            backend.armer_flotte(fleet_id)
+        except BackendError as e:
+            muet += 1
+            logger.warning("flotte #%s non armée (%s) — la prise va donc échouer, "
+                           "et l'état restera muet sur ce passage", fleet_id, e)
         try:
             backend.prendre_flotte(fleet_id)
             logger.info("flotte #%s prise — le passage est en cours", fleet_id)
         except BackendError as e:
+            muet += 1
             logger.warning("flotte #%s non prise (%s) — le passage tourne quand "
                            "même, mais son état ne dira pas « en cours »",
                            fleet_id, e)
     bilan = FleetBilan(lignes_initiales=backend.count_rows(spec.namespace,
                                                            filter=spec.filter,
                                                            org=spec.org))
+    bilan.etat_muet = muet
     en_vol: set[int] = set()
     dernier_depart: Optional[float] = None
     failed_consecutifs = 0
@@ -404,6 +434,7 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                 except BackendError as e:
                     # Une plateforme injoignable n'est pas un ordre d'arrêt : la
                     # confondre éteindrait la flotte à chaque bascule.
+                    bilan.etat_muet += 1
                     logger.warning("battement flotte #%s : %s", fleet_id, e)
 
             # 1. Moissonner les jobs conclus — leur résultat DÉCLARÉ porte le coût.
@@ -509,9 +540,21 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                     try:
                         backend.accuser_arret(fleet_id)
                     except BackendError as e:
+                        bilan.etat_muet += 1
                         logger.warning("accusé d'arrêt flotte #%s : %s — l'état "
                                        "restera `stopping`, à corriger à la main",
                                        fleet_id, e)
+                # ⚠️ CONCLURE sur l'aveuglement, pas seulement le journaliser.
+                # Chacun de ces ratés était déjà écrit au journal, un par un, et
+                # personne ne les a lus pendant huit vagues. Une ligne DE PLUS
+                # n'aurait rien changé : ce qui change, c'est qu'un compte
+                # remonte dans le BILAN — là où on lit le résultat.
+                if bilan.etat_muet:
+                    logger.error("⚠️ ce passage a tourné EN AVEUGLE : %d geste(s) "
+                                 "d'état n'ont pas pu être posés. Son avancement "
+                                 "et son coût ne sont donc pas lisibles depuis la "
+                                 "plateforme — ni maintenant, ni après coup.",
+                                 bilan.etat_muet)
                 return bilan
 
             # 3. Enfiler, sous la rampe — un départ au plus par tour de boucle.

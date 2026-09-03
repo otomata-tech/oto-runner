@@ -134,6 +134,31 @@ Chaque job conclu déclare son coût et sa sortie (`usage_tokens`,
 fil. `usage_tokens` reste **input + output** — la base des bornes de flotte
 (budget, rendement) ne bouge pas ; le cache se compte à côté.
 
+## L'état d'un passage, et ce qu'on n'a pas pu dire
+
+La séquence est **déclarer → armer → prendre**. Une flotte naît `draft` ; la
+prendre exige `armed`. ⚠️ **L'armement manquait jusqu'au 03/09** : le runner
+déclarait puis tentait de prendre, le refus était systématique, rattrapé et
+poursuivi. Mesure du jour : **14 campagnes en base, toutes `draft`, aucune jamais
+`running`** — alors que huit vagues avaient réellement tourné.
+
+⚠️ **Le défaut n'était pas l'armement manquant, c'était l'échec avalé.** Le
+journal disait la vérité à chaque battement — *« le passage tourne quand même,
+mais son état ne dira pas en cours »* — et personne ne l'a lue pendant huit
+vagues. Une ligne de journal de plus n'y aurait rien changé.
+
+D'où `etat_muet` dans le bilan : **combien de fois le passage n'a pas pu dire où
+il en était** (déclaration, armement, prise, battement, accusé d'arrêt). Le
+passage continue — perdre l'observabilité vaut mieux qu'une campagne qui refuse
+de partir — mais il **conclut** dessus, en erreur, là où on lit le résultat :
+
+```
+⚠️ ce passage a tourné EN AVEUGLE : N geste(s) d'état n'ont pas pu être posés.
+```
+
+Un passage sain ne dit rien : *une alerte qui se déclenche toujours ne se
+distingue pas d'un décor.*
+
 `model` porte ce que le fournisseur **dit avoir servi**, relevé sur le tour
 lui-même (le dernier tour fait foi si un alias bascule en cours de déroulé) : un
 alias flotte quand le fournisseur le décide, et sans ce champ une anomalie de

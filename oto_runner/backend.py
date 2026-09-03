@@ -277,6 +277,18 @@ class Backend:
         return self._post("/api/me/runner/fleets",
                           {"op": "get", "fleet_id": fleet_id}).get("fleet") or {}
 
+    def armer_flotte(self, fleet_id: int) -> dict:
+        """`draft` → `armed` : la campagne est DEMANDÉE. Sans ce geste, `prendre`
+        refuse — il n'accepte qu'une flotte armée.
+
+        ⚠️ Il manquait. Le runner déclarait (la campagne naît `draft`) puis
+        tentait de prendre : refus systématique, rattrapé et poursuivi. Résultat
+        mesuré le 03/09 : **14 campagnes en base, toutes `draft`, aucune jamais
+        `running`** — alors que huit vagues avaient réellement tourné.
+        """
+        return self._post("/api/me/runner/fleets",
+                          {"op": "launch", "fleet_id": fleet_id}).get("fleet") or {}
+
     def prendre_flotte(self, fleet_id: int) -> dict:
         """`armed` → `running` : je la PRENDS, et je le déclare.
 
