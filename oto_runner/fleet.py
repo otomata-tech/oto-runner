@@ -115,6 +115,20 @@ class FleetSpec:
     # sa déclaration depuis le README repartait donc SANS borne, en croyant en
     # avoir une.
     max_tokens_per_row: Optional[int] = None
+    # Combien d'échecs d'affilée arrêtent le passage. Absent ⟹ le défaut du
+    # runner (`_MAX_FAILED_CONSECUTIFS`).
+    #
+    # ⚠️ Le serveur porte ce champ depuis l'origine, le VALIDE à la déclaration
+    # (il doit valoir au moins 1) — et le runner l'IGNORAIT, appliquant sa
+    # constante quoi qu'on déclare. **Une borne déclarée mais pas appliquée ne se
+    # découvre que le jour où on comptait dessus** : elle ne fausse pas un relevé,
+    # elle laisse tourner une campagne qu'on croyait bornée. Et la validation
+    # côté serveur achevait de convaincre qu'elle était prise en compte.
+    #
+    # Mesuré le 03/09 avant de corriger : les 14 campagnes déclarées la laissaient
+    # à `null`. **Personne ne s'était cru protégé** — c'est ce qui distingue ce
+    # cas d'un incident.
+    max_consecutive_failures: Optional[int] = None
     bilan_periode_s: int = _BILAN_PERIODE_S   # cadence du bilan intermédiaire
     source: str = ""              # la déclaration : le bilan JSON se pose à côté
 
@@ -218,6 +232,7 @@ def spec_depuis_flotte(f: dict) -> FleetSpec:
         budget_tokens=f.get("max_tokens"),
         max_steps=int(f.get("max_steps") or 40),
         max_tokens_per_row=f.get("max_tokens_per_row"),
+        max_consecutive_failures=f.get("max_consecutive_failures"),
         input=f.get("input") or DEFAULT_INPUT,
         # La flotte EXISTE déjà : on la reprend, on n'en déclare pas une seconde.
         fleet_id=int(f["id"]),
@@ -337,6 +352,11 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
     # un aveuglement qui survient pendant le démarrage doit être compté aussi,
     # c'est même là qu'il est le plus probable.
     muet = 0
+    # ⚠️ La borne DÉCLARÉE gagne sur le défaut du runner. Résolue ici, une fois,
+    # pour qu'elle soit lisible au démarrage plutôt que devinée à la lecture du
+    # code : une garde dont on ne sait pas quelle valeur elle applique n'est pas
+    # une garde, c'est une intention.
+    plafond_echecs = spec.max_consecutive_failures or _MAX_FAILED_CONSECUTIFS
     fleet_id = spec.fleet_id
     if fleet_id is None:
         try:
@@ -508,7 +528,7 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                 borne = f"budget atteint ({bilan.usage_tokens} ≥ {spec.budget_tokens} jetons)"
             elif borne is None and spec.volume is not None and traitees >= spec.volume:
                 borne = f"volume atteint ({traitees} ≥ {spec.volume} lignes)"
-            elif borne is None and failed_consecutifs >= _MAX_FAILED_CONSECUTIFS:
+            elif borne is None and failed_consecutifs >= plafond_echecs:
                 borne = (f"{failed_consecutifs} échecs consécutifs — enfiler encore, "
                          "c'est payer pour re-crasher")
             elif (panne := _outil_critique_en_panne(spec, backend, clock)):

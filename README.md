@@ -134,6 +134,35 @@ Chaque job conclu déclare son coût et sa sortie (`usage_tokens`,
 fil. `usage_tokens` reste **input + output** — la base des bornes de flotte
 (budget, rendement) ne bouge pas ; le cache se compte à côté.
 
+## Ce qu'une campagne déclare est LU, ou son absence est justifiée
+
+Trois champs servis par le serveur étaient **ignorés** par le runner sans que
+rien ne le dise : `provider`, `model`, `max_consecutive_failures`.
+
+⚠️ **Les deux premiers sont des étiquettes ; le troisième était une garde.**
+Quelqu'un déclare « arrête après N échecs d'affilée », le serveur *valide* la
+valeur — et le runner appliquait sa constante. *Une borne déclarée qui n'est pas
+appliquée ne se découvre que le jour où on comptait dessus* : elle ne fausse pas
+un relevé, elle laisse tourner une campagne qu'on croyait bornée. Et la
+validation côté serveur achevait de convaincre qu'elle était prise en compte.
+
+**La borne est désormais lue et appliquée** (`_MAX_FAILED_CONSECUTIFS` n'est plus
+qu'un défaut). Les deux étiquettes restent non lues, **avec leur raison écrite** :
+le worker est un pool homogène, son fournisseur et son modèle viennent de son
+environnement, et un fil commencé chez un fournisseur ne se continue pas chez un
+autre.
+
+⚠️ **Et un contrôle tient la classe** (`tests/test_champs_servis_et_lus.py`) :
+tout champ servi doit être lu **ou** inscrit comme non lu **avec sa raison**. Un
+champ ajouté demain côté serveur et oublié ici fait rougir le contrôle — au lieu
+d'attendre qu'un utilisateur s'aperçoive que sa déclaration n'a aucun effet. Avec
+le contrôle symétrique : *un champ qu'on finit par lire doit sortir de la liste
+des exclus*, sinon elle devient un cimetière qu'on ne relit plus.
+
+*Mesuré avant de corriger : les 14 campagnes déclarées laissaient la borne à
+`null`. Personne ne s'était cru protégé — c'est ce qui distingue ce cas d'un
+incident.*
+
 ## L'état d'un passage, et ce qu'on n'a pas pu dire
 
 La séquence est **déclarer → armer → prendre**. Une flotte naît `draft` ; la
