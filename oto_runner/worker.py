@@ -177,10 +177,25 @@ def _spec_du_job(job: dict, procedure_md: str) -> AgentSpec:
         label=f"job:{job.get('id')}")
 
 
+class IdentiteInvalide(RuntimeError):
+    """Le porteur du travail ne peut plus agir — le serveur l'a dit et a arrêté
+    le travail. ⚠️ **Ne pas retenter** : réessayer rejouerait le même verdict."""
+
+
 def _traiter(backend: Backend, job: dict, provider) -> None:
     p = job.get("payload") or {}
     projet = p.get("project_id")
-    mcp = McpSession(project=projet, org=p.get("org_id"))
+    # ⚠️ **L'agent travaille SOUS L'IDENTITÉ DU DEMANDEUR**, pas sous celle du
+    # worker. Le serveur remet ce jeton à la réservation, borné à la durée du
+    # bail. Un worker qui l'ignorerait écrirait tout au nom de son propre compte
+    # — et rien ne le signalerait, puisque les écritures aboutiraient.
+    refus = job.get("delegation_refusee")
+    if refus:
+        # Le serveur a DÉJÀ marqué le travail en échec avec sa raison. On la
+        # remonte au journal et on passe : la retenter serait rejouer le refus.
+        raise IdentiteInvalide(refus)
+    mcp = McpSession(project=projet, org=p.get("org_id"),
+                     token=job.get("delegated_token") or None)
 
     # ⚠️ Le discriminant de la reprise est le RUN LIÉ, pas le kind : un `start`
     # re-claimé après une mort en plein tour porte déjà son run_id (bind_run a
@@ -413,6 +428,17 @@ def main() -> None:
             break
         try:
             _traiter(backend, job, provider)
+        except IdentiteInvalide as e:
+            # ⚠️ On ne conclut PAS : le serveur a déjà marqué ce travail en échec
+            # avec sa raison, à la réservation. Appeler `complete` ici rendrait
+            # une erreur de bail — un bruit qui accuserait la mauvaise pièce et
+            # ferait chercher un problème de file là où il y a un problème de
+            # DROIT. **L'agent s'arrête en le disant**, et c'est cette ligne-là
+            # qui le dit.
+            logger.error("job %s NON exécuté — %s. Ce travail ne repartira pas : "
+                         "il faut soit rendre son droit au demandeur, soit le "
+                         "reprogrammer sous une autre identité.", job.get("id"), e)
+            continue
         except Exception as e:  # noqa: BLE001 — l'échec d'un job n'arrête pas la batterie
             logger.exception("job %s en échec", job.get("id"))
             try:
