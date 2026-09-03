@@ -83,20 +83,6 @@ class McpSession:
         # `_org` mais pas `_project` (oto_procedure : une doctrine d'org se
         # charge dans SON org, pas dans l'org maison du jeton)
         self.run_id = run_id
-        # L'ESTAMPILLE (modèle + version de procédure) : ce que le harnais pose
-        # sur chaque fiche écrite, et qu'on ne demande JAMAIS à l'agent — il ne
-        # sait pas de façon fiable quel modèle le fait tourner. Vide tant que le
-        # worker ne l'a pas renseignée, et vide aussi quand le tableau ne
-        # déclare pas les deux champs : injecter une colonne non déclarée dans
-        # un tableau strict ferait refuser TOUTE l'écriture, donc perdre la
-        # fiche pour un champ d'observabilité. Une fiche sans estampille vaut
-        # mieux qu'une fiche perdue.
-        self.estampille: dict = {}
-        # La DERNIÈRE ligne réservée par l'agent, mémorisée au vol. Le harnais ne
-        # la connaît pas autrement — c'est l'agent qui réserve — et il en a besoin
-        # pour lui rendre la main quand il conclut sans avoir écrit : « ta ligne est
-        # celle-ci, écris-la ». Sans identifiant, le renvoi ne serait qu'un reproche.
-        self.derniere_ligne: Optional[str] = None
         self.session: Optional[str] = None
         self._n = 0
         self._props: Optional[dict] = None   # tool → propriétés d'entrée déclarées
@@ -197,7 +183,6 @@ class McpSession:
             args.setdefault("_org", self.org)
         if self.run_id is not None and "_run_id" in declares:
             args.setdefault("_run_id", self.run_id)
-        self._appliquer_estampille(name, args)
         self._n += 1
         corps = {"jsonrpc": "2.0", "id": self._n, "method": "tools/call",
                  "params": {"name": name, "arguments": args}}
@@ -224,54 +209,14 @@ class McpSession:
                               if isinstance(b, dict)) or serialize(res)
             return texte, True
         if res.get("structuredContent") is not None:
-            self._noter_ligne(name, res["structuredContent"])
             return serialize(res["structuredContent"]), False
         for bloc in res.get("content") or []:
             if isinstance(bloc, dict) and bloc.get("type") == "text":
-                self._noter_ligne(name, bloc.get("text", ""))
                 return bloc.get("text", ""), False
         err = d.get("error")
         if err:
             return serialize(err), True
         return serialize(d), False
-
-    def _noter_ligne(self, name: str, sortie) -> None:
-        """Retient l'identifiant qu'une RÉSERVATION vient de rendre.
-
-        ⚠️ Par SUFFIXE : le connecteur MCP préfixe les noms d'outils. Et
-        silencieusement : ne pas retenir un identifiant n'empêche rien de
-        fonctionner, ça prive seulement le renvoi de sa précision."""
-        if not name.endswith("data_claim_next"):
-            return
-        try:
-            d = sortie if isinstance(sortie, dict) else json.loads(str(sortie))
-            ligne = (d or {}).get("row")
-            if isinstance(ligne, dict) and ligne.get("_id"):
-                self.derniere_ligne = str(ligne["_id"])
-        except Exception:  # noqa: BLE001 — cf. docstring
-            pass
-
-    def _appliquer_estampille(self, name: str, args: dict) -> None:
-        """Pose l'estampille sur les fiches d'un `data_write`, sans écraser
-        l'agent s'il a renseigné le champ lui-même.
-
-        ⚠️ Le connecteur MCP peut PRÉFIXER les noms d'outils : l'appartenance se
-        teste par SUFFIXE, comme partout ailleurs dans ce dépôt.
-        Les deux formes d'écriture sont couvertes — une fiche (`row`) et un lot
-        (`rows`) : n'en traiter qu'une laisserait la moitié des campagnes sans
-        estampille, ce qui est précisément le défaut qu'on corrige."""
-        if not self.estampille or not name.endswith("data_write"):
-            return
-        fiches = []
-        if isinstance(args.get("row"), dict):
-            fiches.append(args["row"])
-        for f in args.get("rows") or ():
-            if isinstance(f, dict):
-                fiches.append(f)
-        for fiche in fiches:
-            for cle, valeur in self.estampille.items():
-                if valeur:
-                    fiche.setdefault(cle, valeur)
 
     def outil(self, name: str, arguments: Optional[dict] = None) -> dict:
         """Appel direct hors boucle (run_start, run_finish…) — rend le payload."""
