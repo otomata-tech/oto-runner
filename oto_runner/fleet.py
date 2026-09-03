@@ -57,13 +57,34 @@ _MAX_FAUX_DEPARTS_CONSECUTIFS = 5
 # projet_220, data… tous inconnus, puis des SIREN hallucinés et une conclusion
 # vide). Le harnais historique nommait le tableau dans sa conversation — le
 # driver fait pareil, depuis la déclaration.
-DEFAULT_INPUT = ("Ta file de travail est le tableau `{namespace}` : réserve chaque "
-                 "ligne par data_claim_next avec namespace=\"{namespace}\" et "
-                 "filter={filter}. Traite les lignes une par une selon la procédure, "
-                 "autant que ton budget de tours le permet, puis conclus par un bilan "
-                 "bref (lignes traitées, difficultés). N'invente JAMAIS une ligne ni "
-                 "un identifiant : seule la file fait foi — si la réservation ne rend "
-                 "rien, la file est vide, arrête-toi.")
+# ⚠️ **Il n'y a PAS d'instruction par défaut, et c'est délibéré.**
+#
+# Le worker est un client MCP : il exécute une instruction, il ne la compose pas.
+# Il ne sait pas ce que l'instruction contient, ni ce que l'agent va faire — donc
+# il ne peut pas en écrire une qui vaille.
+#
+# Il en existait une, en dur, sept lignes : « ta file est ce tableau, réserve
+# chaque ligne, traite-les selon la procédure, puis conclus ». Deux défauts, et
+# le second a coûté cher :
+#
+#   ① elle mettait du MÉTIER dans le worker — un tableau, des lignes, une
+#     réservation — alors qu'il ne sait rien de tout ça ;
+#   ② sa FORME enseignait un court-circuit. Réserve → traite → conclus est une
+#     partition en trois temps où « chercher » n'apparaît nulle part, sinon caché
+#     dans « selon la procédure ». Mesuré dans la nuit du 03 au 04/09 sur des
+#     vagues réelles : **7 jobs sur 11 n'appelaient AUCUN outil** et écrivaient
+#     quand même une fiche complète — le modèle RACONTAIT les appels au lieu de
+#     les émettre, avec des dates et des dirigeants inventés, dans un compte rendu
+#     parfaitement structuré. Avec une instruction qui dit d'où viennent les
+#     données : 1 sur 9, puis 1 sur 20.
+#
+# ⚠️ Et la garde d'alors visait à côté : « n'invente jamais une ligne ni un
+# identifiant » protège l'EXISTENCE d'une ligne, pas le CONTENU d'une fiche.
+# Inventer un dirigeant ne violait aucune consigne.
+#
+# L'instruction vient donc de qui déclare le passage, et elle est dérivée de
+# l'objet côté SERVEUR — là où l'on sait de quoi on parle. Ce que ce module fait
+# d'elle : l'interpoler et la transmettre. Rien d'autre.
 
 @dataclass(frozen=True)
 class FleetSpec:
@@ -91,7 +112,10 @@ class FleetSpec:
     volume: Optional[int] = None                 # None = épuisement de la file
     budget_tokens: Optional[int] = None
     max_steps: int = 40
-    input: str = DEFAULT_INPUT
+    # L'instruction de départ, telle que le déclarant l'a écrite. OBLIGATOIRE :
+    # un passage sans instruction est un défaut de ce qui l'a déclaré, pas
+    # quelque chose que le worker complète de lui-même.
+    input: str = ""
     # Les outils sans lesquels un job « done » est un job FAUX : leur PANNE
     # arrête la flotte (arrêt ANORMAL ⟹ relance auto quand ils reviennent).
     #
@@ -133,6 +157,15 @@ class FleetSpec:
     source: str = ""              # la déclaration : le bilan JSON se pose à côté
 
     def __post_init__(self):
+        if not (self.input or "").strip():
+            # ⚠️ Le refus dit ce qui manque, PAS ce qu'il faudrait écrire : le
+            # worker ne sait pas ce qu'une instruction doit contenir. Lister ici
+            # « dis d'où viennent les données, nomme les outils comme source… »
+            # remettrait du métier dans le transport — et ce métier-là est celui
+            # d'UNE famille de passages (enrichir des fiches), pas de tous.
+            raise ValueError(
+                "instruction de départ absente : un passage ne démarre pas sans "
+                "elle. Le worker exécute une instruction, il n'en compose pas.")
         if not self.name:
             raise ValueError(
                 "nom de flotte vide : c'est le tag `fleet` de chaque job, ce "
@@ -183,7 +216,7 @@ def load_spec(path: str) -> FleetSpec:
         budget_tokens=raw.get("budget_tokens"),
         max_steps=int(raw.get("max_steps") or 40),
         max_tokens_per_row=raw.get("max_tokens_per_row"),
-        input=raw.get("input") or DEFAULT_INPUT,
+        input=raw.get("input") or "",
         critical_tools=tuple(raw.get("critical_tools") or ()),
         bilan_periode_s=int(raw.get("bilan_periode_s") or _BILAN_PERIODE_S),
         source=path,
@@ -233,7 +266,7 @@ def spec_depuis_flotte(f: dict) -> FleetSpec:
         max_steps=int(f.get("max_steps") or 40),
         max_tokens_per_row=f.get("max_tokens_per_row"),
         max_consecutive_failures=f.get("max_consecutive_failures"),
-        input=f.get("input") or DEFAULT_INPUT,
+        input=f.get("input") or "",
         # La flotte EXISTE déjà : on la reprend, on n'en déclare pas une seconde.
         fleet_id=int(f["id"]),
         source=f"flotte #{f['id']}",
