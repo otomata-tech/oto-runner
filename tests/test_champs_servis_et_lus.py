@@ -95,7 +95,7 @@ def test_la_borne_declaree_gagne_sur_le_defaut():
     """Et elle agit : ce n'est pas qu'une lecture, c'est la valeur appliquée."""
     spec = fleet.spec_depuis_flotte(
         {"id": 1, "procedure": "p", "namespace": "n", "tools": ["data_write"],
-         "max_consecutive_failures": 7})
+         "input": "fais ceci", "max_consecutive_failures": 7})
     assert spec.max_consecutive_failures == 7
     corps = open(fleet.__file__).read()
     assert "plafond_echecs = spec.max_consecutive_failures or _MAX_FAILED_CONSECUTIFS" in corps

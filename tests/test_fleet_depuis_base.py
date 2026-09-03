@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import pytest
 
-from oto_runner.fleet import DEFAULT_INPUT, FleetSpec, spec_depuis_flotte
+from oto_runner.fleet import FleetSpec, spec_depuis_flotte
 
 
 def _flotte(**over) -> dict:
@@ -72,18 +72,35 @@ def test_les_reglages_d_execution_locale_restent_aux_defauts_du_runner():
     qu'un opérateur les a déclarés — alors qu'ils changent avec l'infrastructure,
     sans que la configuration du passage n'ait bougé."""
     s = spec_depuis_flotte(_flotte())
-    vierge = FleetSpec(procedure="p", namespace="n", tools=(), name="x")
+    vierge = FleetSpec(procedure="p", namespace="n", tools=(), name="x",
+                       input="fais ceci")
     assert s.ramp_seconds == vierge.ramp_seconds
     assert s.critical_tools == vierge.critical_tools
     assert s.bilan_periode_s == vierge.bilan_periode_s
 
 
 def test_un_champ_absent_retombe_sur_le_defaut_sans_inventer():
-    s = spec_depuis_flotte({"id": 3, "procedure": "p"})
+    """⚠️ Les défauts d'EXÉCUTION se supposent (combien d'agents, combien de
+    tours) ; l'INSTRUCTION ne se suppose pas — elle dit ce que l'agent doit
+    faire, et le worker ne le sait pas."""
+    s = spec_depuis_flotte({"id": 3, "procedure": "p", "input": "fais ceci"})
     assert s.namespace == "" and s.tools == () and s.filter == {}
     assert s.concurrency == 3 and s.max_steps == 40
-    assert s.input == DEFAULT_INPUT
     assert s.volume is None and s.budget_tokens is None
+
+
+def test_une_flotte_SANS_instruction_est_refusee():
+    """Le lot du 04/09 : il n'y a plus d'instruction par défaut. Une campagne
+    sans instruction partait avec un texte que personne n'avait écrit ni relu —
+    et dont la FORME enseignait à sauter la recherche (7 jobs sur 11 sans aucun
+    appel d'outil, mesuré dans la nuit du 03 au 04/09)."""
+    import pytest
+    with pytest.raises(ValueError) as e:
+        spec_depuis_flotte({"id": 4, "procedure": "p"})
+    assert "instruction" in str(e.value)
+    # ⚠️ Le refus dit ce qui MANQUE, pas ce qu'il faudrait écrire : le worker ne
+    # sait pas ce qu'une instruction doit contenir.
+    assert "source" not in str(e.value).lower()
 
 
 # ── une flotte illisible se REFUSE, elle ne se devine pas ────────────────────
