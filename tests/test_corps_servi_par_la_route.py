@@ -40,13 +40,36 @@ def _corps_de(client, appel, monkeypatch):
     return vu
 
 
-def test_le_claim_n_envoie_que_ce_que_la_route_sert(_client, monkeypatch):
-    """`provider` ne repartira dans ce corps QUE le jour où la production le
-    sert (oto-backend#874 tagué). Le paramètre `depot` reste accepté par la
-    méthode : c'est l'ENVOI qui attend, pas l'appelant."""
+# Les champs que la route POST /api/me/runner/jobs DÉCLARE, relevés sur l'OpenAPI
+# servi par la production (`GET /api/openapi.json`, v1.195.0+984f8f68, 04/09/2026).
+# L'adaptateur REST du backend construit sa garde sur la MÊME collection
+# (`cap.Input.model_fields`, `capabilities/_rest_adapter.py`) : ce que l'OpenAPI
+# déclare est exactement ce que la garde accepte.
+#
+# ⚠️ Ajouter un champ au corps sans l'ajouter ici fait échouer ce banc — et c'est
+# le but : la question à se poser n'est pas « pydantic l'ignorera-t-il ? » mais
+# « la route servie le DÉCLARE-t-elle ? ». La réponse se lit sur la prod.
+_DECLARES_PAR_LA_ROUTE = {
+    "cursor", "error", "fleet_id", "job_id", "kind", "lease_seconds", "limit",
+    "max_attempts", "ok", "op", "payload", "provider", "result", "run_id", "status",
+}
+
+
+def test_le_claim_n_envoie_que_des_champs_que_la_route_declare(_client, monkeypatch):
     vu = _corps_de(_client, lambda: _client.claim(lease_seconds=600, depot="anthropic"),
                    monkeypatch)
     assert vu["chemin"] == "/api/me/runner/jobs"
-    assert set(vu["corps"]) == {"op", "lease_seconds"}, (
-        "un champ de plus dans ce corps = `400 : unknown_fields` sur toute la "
-        "flotte, tant que la route ne le déclare pas")
+    inconnus = set(vu["corps"]) - _DECLARES_PAR_LA_ROUTE
+    assert not inconnus, (
+        f"{inconnus} n'est pas déclaré par la route servie : la réservation "
+        "partira en `400 : unknown_fields`, sur toute la flotte, en boucle")
+    assert vu["corps"]["provider"] == "anthropic"
+
+
+def test_sans_depot_le_champ_ne_part_pas(_client, monkeypatch):
+    """Un worker dont l'hôte n'a pas de dépôt connu n'envoie pas un `provider`
+    vide : le serveur n'aurait rien à en faire, et un champ vide se lit comme un
+    dépôt nommé qui n'existe pas."""
+    vu = _corps_de(_client, lambda: _client.claim(lease_seconds=600, depot=""),
+                   monkeypatch)
+    assert set(vu["corps"]) == {"op", "lease_seconds"}
