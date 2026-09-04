@@ -215,10 +215,22 @@ class Backend:
         coffre, il reçoit avec le travail ce qu'il faut pour l'exécuter, et rien
         de plus.
         """
-        corps = {"op": "claim", "lease_seconds": lease_seconds}
-        if depot:
-            corps["provider"] = depot
-        return self._post("/api/me/runner/jobs", corps).get("job")
+        # ⚠️ INCIDENT DU 04/09 — `provider` N'EST PAS ENVOYÉ tant que la
+        # production ne le SERT pas. La route REST refuse tout champ qu'elle ne
+        # déclare pas (`400 : unknown_fields`) : le champ ajouté ici a mis les
+        # trois workers de prod hors service pendant 15 minutes, chaque
+        # réservation partant en 400 en boucle. La mesure qui m'avait rassuré
+        # portait sur le modèle pydantic de la capacité (`extra` ignoré par
+        # défaut) — la mauvaise couche : c'est le PONT REST qui tranche, et lui
+        # refuse.
+        #
+        # Le champ se remet quand la prod l'accepte (oto-backend#874 tagué), et
+        # pas avant : `tests/test_cle_de_modele_du_travail.py` tient la règle.
+        # Le reste du chemin reste en place et INERTE : sans `provider`, le
+        # serveur ne renvoie pas `model_key`, `cle` vaut None, et le provider
+        # tourne sur la clé de la plateforme — exactement comme avant.
+        return self._post("/api/me/runner/jobs",
+                          {"op": "claim", "lease_seconds": lease_seconds}).get("job")
 
     def enqueue(self, kind: str, payload: dict,
                 run_id: Optional[str] = None,
