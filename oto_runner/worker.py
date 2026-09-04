@@ -177,9 +177,65 @@ def _spec_du_job(job: dict, procedure_md: str) -> AgentSpec:
         label=f"job:{job.get('id')}")
 
 
+class SansInstruction(RuntimeError):
+    """Ce travail est arrivé sans instruction de départ.
+
+    ⚠️ Le worker n'en compose pas une. Il est un client MCP : il exécute une
+    instruction et ne sait pas ce qu'elle contient. Les trois textes de repli
+    qui vivaient ici (« Exécute la procédure. ») inventaient le travail à la
+    place de qui l'avait déclaré, depuis le seul étage qui ne connaît pas le
+    métier — et une instruction inventée ne se relit ni ne se corrige depuis le
+    produit : elle se découvre dans le résultat.
+
+    C'est la plateforme qui compose, à la déclaration (oto-backend, capacité
+    `_instruction`). Un travail qui arrive muet est donc une anomalie du chemin
+    qui l'a enfilé, et il le DIT au lieu de tourner sur un ordre fabriqué.
+    """
+
+
+class ProcedureVide(RuntimeError):
+    """L'objet que l'instruction désigne n'a rien à appliquer.
+
+    ⚠️ Le pire cas de tout ce chemin, parce qu'il ne ressemble pas à une panne :
+    l'agent reçoit « lis la procédure `X` et applique-la » avec une section
+    Procédure VIDE, et il improvise. Rien n'échoue, des lignes s'écrivent, et
+    ce qu'elles valent ne se découvre qu'en les relisant une par une.
+
+    Le worker ne juge pas ce qu'une procédure contient — il ne sait pas ce que
+    ce travail veut dire. Il constate seulement qu'un objet a été NOMMÉ et qu'il
+    est vide, ce qui est mesurable sans rien comprendre au métier.
+    """
+
+
 class IdentiteInvalide(RuntimeError):
     """Le porteur du travail ne peut plus agir — le serveur l'a dit et a arrêté
     le travail. ⚠️ **Ne pas retenter** : réessayer rejouerait le même verdict."""
+
+
+def _corps_applicable(procedure: dict, slug: str) -> str:
+    """Le corps de la procédure nommée — ou un refus franc si elle est vide.
+
+    Sans slug, il n'y a pas d'objet à appliquer et l'instruction fait foi seule :
+    c'est un usage légitime, on ne le refuse pas.
+    """
+    corps = ((procedure or {}).get("body_md") or "").strip()
+    if slug and not corps:
+        raise ProcedureVide(
+            f"la procédure `{slug}` est vide ou introuvable : le travail dit de "
+            "l'appliquer, et il n'y a rien à appliquer. L'agent ne part pas — il "
+            "improviserait, et ça ne se verrait que dans ce qu'il aurait écrit.")
+    return corps
+
+
+def _instruction_du(job: dict) -> str:
+    """L'instruction du travail, ou un refus franc — jamais un texte de repli."""
+    ordre = ((job.get("payload") or {}).get("input") or "").strip()
+    if not ordre:
+        raise SansInstruction(
+            f"le travail {job.get('id')} est arrivé sans instruction de départ. "
+            "Le worker en exécute une, il n'en compose pas : ce travail a été "
+            "enfilé sans, et c'est là qu'il faut regarder.")
+    return ordre
 
 
 def _traiter(backend: Backend, job: dict, provider) -> None:
@@ -218,7 +274,7 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             raise RuntimeError(f"run_start sans run_id : réponse dégradée {str(d)[:200]}")
         backend.bind_run(job["id"], run_id)
         historique: list = []
-        prompt = p.get("input") or "Exécute la procédure."
+        prompt = _instruction_du(job)
     else:  # continue — OU start re-claimé : reprise du fil existant
         run_id = job["run_id"]
         tours = backend.thread_read(run_id, include_raw=True)
@@ -233,7 +289,7 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         prompt = p.get("input") if job["kind"] == "continue" else None
 
     mcp.run_id = run_id
-    spec = _spec_du_job(job, procedure.get("body_md") or "")
+    spec = _spec_du_job(job, _corps_applicable(procedure, p.get("procedure")))
 
     def apposer(role: str, neutre: dict, brut: dict) -> None:
         # L'appose du fil EST la persistance : elle mérite des rejeux avant de
@@ -267,7 +323,7 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         # ⚠️ L'ordre est celui du travail, tel quel. Le worker n'y ajoute
         # aucune prescription métier — ni où écrire, ni sous quelle forme :
         # c'est la procédure qui le dit à l'agent, pas l'exécuteur.
-        ordre = prompt or p.get("input") or "Exécute la procédure."
+        ordre = prompt or _instruction_du(job)
         res = provider.run_once(instructions=spec.system, inputs=ordre,
                                 tools=p.get("tools") or (), api_key=cle)
         # Le fil garde l'ORDRE et la SYNTHÈSE (l'observabilité au grain run) — le

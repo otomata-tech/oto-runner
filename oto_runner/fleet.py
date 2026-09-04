@@ -57,13 +57,34 @@ _MAX_FAUX_DEPARTS_CONSECUTIFS = 5
 # projet_220, data… tous inconnus, puis des SIREN hallucinés et une conclusion
 # vide). Le harnais historique nommait le tableau dans sa conversation — le
 # driver fait pareil, depuis la déclaration.
-DEFAULT_INPUT = ("Ta file de travail est le tableau `{namespace}` : réserve chaque "
-                 "ligne par data_claim_next avec namespace=\"{namespace}\" et "
-                 "filter={filter}. Traite les lignes une par une selon la procédure, "
-                 "autant que ton budget de tours le permet, puis conclus par un bilan "
-                 "bref (lignes traitées, difficultés). N'invente JAMAIS une ligne ni "
-                 "un identifiant : seule la file fait foi — si la réservation ne rend "
-                 "rien, la file est vide, arrête-toi.")
+# ⚠️ **Il n'y a PAS d'instruction par défaut, et c'est délibéré.**
+#
+# Le worker est un client MCP : il exécute une instruction, il ne la compose pas.
+# Il ne sait pas ce que l'instruction contient, ni ce que l'agent va faire — donc
+# il ne peut pas en écrire une qui vaille.
+#
+# Il en existait une, en dur, sept lignes : « ta file est ce tableau, réserve
+# chaque ligne, traite-les selon la procédure, puis conclus ». Deux défauts, et
+# le second a coûté cher :
+#
+#   ① elle mettait du MÉTIER dans le worker — un tableau, des lignes, une
+#     réservation — alors qu'il ne sait rien de tout ça ;
+#   ② sa FORME enseignait un court-circuit. Réserve → traite → conclus est une
+#     partition en trois temps où « chercher » n'apparaît nulle part, sinon caché
+#     dans « selon la procédure ». Mesuré dans la nuit du 03 au 04/09 sur des
+#     vagues réelles : **7 jobs sur 11 n'appelaient AUCUN outil** et écrivaient
+#     quand même une fiche complète — le modèle RACONTAIT les appels au lieu de
+#     les émettre, avec des dates et des dirigeants inventés, dans un compte rendu
+#     parfaitement structuré. Avec une instruction qui dit d'où viennent les
+#     données : 1 sur 9, puis 1 sur 20.
+#
+# ⚠️ Et la garde d'alors visait à côté : « n'invente jamais une ligne ni un
+# identifiant » protège l'EXISTENCE d'une ligne, pas le CONTENU d'une fiche.
+# Inventer un dirigeant ne violait aucune consigne.
+#
+# L'instruction vient donc de qui déclare le passage, et elle est dérivée de
+# l'objet côté SERVEUR — là où l'on sait de quoi on parle. Ce que ce module fait
+# d'elle : l'interpoler et la transmettre. Rien d'autre.
 
 @dataclass(frozen=True)
 class FleetSpec:
@@ -91,7 +112,10 @@ class FleetSpec:
     volume: Optional[int] = None                 # None = épuisement de la file
     budget_tokens: Optional[int] = None
     max_steps: int = 40
-    input: str = DEFAULT_INPUT
+    # L'instruction de départ, telle que le déclarant l'a écrite. OBLIGATOIRE :
+    # un passage sans instruction est un défaut de ce qui l'a déclaré, pas
+    # quelque chose que le worker complète de lui-même.
+    input: str = ""
     # Les outils sans lesquels un job « done » est un job FAUX : leur PANNE
     # arrête la flotte (arrêt ANORMAL ⟹ relance auto quand ils reviennent).
     #
@@ -133,6 +157,15 @@ class FleetSpec:
     source: str = ""              # la déclaration : le bilan JSON se pose à côté
 
     def __post_init__(self):
+        if not (self.input or "").strip():
+            # ⚠️ Le refus dit ce qui manque, PAS ce qu'il faudrait écrire : le
+            # worker ne sait pas ce qu'une instruction doit contenir. Lister ici
+            # « dis d'où viennent les données, nomme les outils comme source… »
+            # remettrait du métier dans le transport — et ce métier-là est celui
+            # d'UNE famille de passages (enrichir des fiches), pas de tous.
+            raise ValueError(
+                "instruction de départ absente : un passage ne démarre pas sans "
+                "elle. Le worker exécute une instruction, il n'en compose pas.")
         if not self.name:
             raise ValueError(
                 "nom de flotte vide : c'est le tag `fleet` de chaque job, ce "
@@ -183,7 +216,7 @@ def load_spec(path: str) -> FleetSpec:
         budget_tokens=raw.get("budget_tokens"),
         max_steps=int(raw.get("max_steps") or 40),
         max_tokens_per_row=raw.get("max_tokens_per_row"),
-        input=raw.get("input") or DEFAULT_INPUT,
+        input=raw.get("input") or "",
         critical_tools=tuple(raw.get("critical_tools") or ()),
         bilan_periode_s=int(raw.get("bilan_periode_s") or _BILAN_PERIODE_S),
         source=path,
@@ -233,7 +266,7 @@ def spec_depuis_flotte(f: dict) -> FleetSpec:
         max_steps=int(f.get("max_steps") or 40),
         max_tokens_per_row=f.get("max_tokens_per_row"),
         max_consecutive_failures=f.get("max_consecutive_failures"),
-        input=f.get("input") or DEFAULT_INPUT,
+        input=f.get("input") or "",
         # La flotte EXISTE déjà : on la reprend, on n'en déclare pas une seconde.
         fleet_id=int(f["id"]),
         source=f"flotte #{f['id']}",
@@ -333,6 +366,19 @@ class FleetBilan:
     # conclut : *ce passage a tourné en aveugle N fois*. Une ligne de journal de
     # plus n'aurait rien changé — c'est exactement ce qui a échoué.
     etat_muet: int = 0
+    # Pourquoi chaque travail s'est arrêté, compté par motif (`end_turn`,
+    # `max_steps`, `max_tokens`, `no_reply`…), tel que le worker l'a DÉCLARÉ.
+    #
+    # ⚠️ Un travail arrêté sur `max_steps` ou `max_tokens` compte aujourd'hui
+    # comme `done` : il a rendu la main sans erreur. Mais il a été COUPÉ, pas
+    # conclu — sa ligne porte ce qu'il avait fait au moment où on l'a arrêté, et
+    # rien ne le distingue, dans le bilan, d'un travail qui a fini. C'est un
+    # succès apparent posé sur un travail tronqué : le compte des lignes traitées
+    # reste juste, ce qu'elles valent ne l'est plus.
+    #
+    # Le motif vient du worker, seul à voir le déroulé. L'ordonnanceur ne le
+    # recalcule pas : il ne sait pas ce qu'une étape veut dire.
+    arrets: dict = field(default_factory=dict)
 
 
 def run_fleet(spec: FleetSpec, backend: Backend, *,
@@ -472,6 +518,8 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                 conclus[jid] = {"status": st, "result": resultat}
                 jetons_du_job = int(resultat.get("usage_tokens") or 0)
                 bilan.usage_tokens += jetons_du_job
+                motif = resultat.get("stopped") or "inconnu"
+                bilan.arrets[motif] = bilan.arrets.get(motif, 0) + 1
                 if st == "done":
                     bilan.done += 1
                     failed_consecutifs = 0
@@ -569,6 +617,21 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                 # personne ne les a lus pendant huit vagues. Une ligne DE PLUS
                 # n'aurait rien changé : ce qui change, c'est qu'un compte
                 # remonte dans le BILAN — là où on lit le résultat.
+                # ⚠️ Un travail coupé au plafond a rendu la main SANS ERREUR :
+                # il est compté `done`, et rien d'autre ne le distingue d'un
+                # travail conclu. Le dire ici, à l'endroit où on lit le
+                # résultat, est la seule façon de ne pas prendre un passage
+                # tronqué pour un passage fini.
+                coupes = sum(n for m, n in bilan.arrets.items()
+                             if m in ("max_steps", "max_tokens"))
+                if coupes:
+                    logger.error("⚠️ %d travail/travaux sur %d ont été COUPÉS à "
+                                 "leur plafond (%s) : ils comptent comme réussis "
+                                 "et ne le sont pas — leur ligne porte ce qui "
+                                 "avait été fait au moment de l'arrêt.",
+                                 coupes, bilan.done + bilan.failed,
+                                 ", ".join(f"{m}×{n}" for m, n in
+                                           sorted(bilan.arrets.items())))
                 if bilan.etat_muet:
                     logger.error("⚠️ ce passage a tourné EN AVEUGLE : %d geste(s) "
                                  "d'état n'ont pas pu être posés. Son avancement "

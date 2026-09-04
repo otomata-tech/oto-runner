@@ -134,6 +134,63 @@ Chaque job conclu déclare son coût et sa sortie (`usage_tokens`,
 fil. `usage_tokens` reste **input + output** — la base des bornes de flotte
 (budget, rendement) ne bouge pas ; le cache se compte à côté.
 
+## Il n'y a PAS d'instruction par défaut
+
+Le worker **exécute** une instruction, il n'en **compose** pas. Il ne sait pas ce
+que l'instruction contient ni ce que l'agent va faire — donc il ne peut pas en
+écrire une qui vaille. Une campagne sans instruction est **refusée** au chargement.
+
+⚠️ Il en existait une, en dur, sept lignes : *« ta file est ce tableau, réserve
+chaque ligne, traite-les selon la procédure, puis conclus »*. Deux défauts, et le
+second a coûté cher :
+
+**① Du métier dans le transport** — un tableau, des lignes, une réservation,
+alors que le worker ne sait rien de tout ça. Même faute que les crochets retirés
+le 03/09.
+
+**② Sa FORME enseignait un court-circuit.** *Réserve → traite → conclus* est une
+partition en trois temps où « chercher » n'apparaît nulle part, sinon caché dans
+« selon la procédure ». Mesuré dans la nuit du 03 au 04/09 sur des vagues
+réelles : **7 jobs sur 11 n'appelaient AUCUN outil** et écrivaient quand même une
+fiche complète — le modèle *racontait* les appels au lieu de les émettre, avec
+dirigeants et dates inventés, dans un compte rendu parfaitement structuré. Avec
+une instruction qui dit d'où viennent les données : **1 sur 9, puis 1 sur 20**, à
+consigne et modèle identiques.
+
+⚠️ **Et la garde d'alors visait à côté** : « n'invente jamais une ligne ni un
+identifiant » protège l'EXISTENCE d'une ligne, pas le CONTENU d'une fiche.
+Inventer un dirigeant ne violait aucune consigne.
+
+### Ce qu'une instruction d'enrichissement doit faire — quatre gestes
+
+⚠️ **Ceci est un savoir de MÉTIER, pas une règle du worker** : il vaut pour les
+passages qui enrichissent des fiches depuis des sources ouvertes, pas pour tous.
+Il vit ici et dans ce que le serveur DÉRIVE, jamais dans le code du runner — et
+le refus de démarrage ne le récite pas, il dit seulement ce qui manque.
+
+**1. Nommer ce que la ligne porte DÉJÀ.** Sans ça l'agent ne distingue pas ce
+qu'il a reçu de ce qu'il a trouvé — et les fabrications mesurées sont toutes des
+embellissements de données reçues.
+
+**2. Dire que RECOPIER ne compte pas.** Sinon c'est la sortie de moindre effort,
+et elle a l'air d'un travail fini.
+
+**3. Nommer les outils comme la SOURCE, pas comme une étape** : « ce que tu
+ajoutes vient d'une source ouverte pendant ce run ». C'est le cœur — l'ancienne
+version faisait de la recherche une étape d'une partition ; celle-ci en fait la
+condition d'existence de la donnée.
+
+**4. Viser la PLAUSIBILITÉ**, qui est le vrai piège : « une fiche écrite sans
+avoir appelé ces outils est inventée, même quand elle est plausible, et surtout
+quand elle est plausible. » Le court-circuit ne produit pas du délire, il produit
+du **crédible**.
+
+⚠️ **Une consigne plus DÉTAILLÉE aggrave le défaut** : à écrire des règles de
+vérification de plus en plus fines, on obtient des simulations de plus en plus
+convaincantes — la règle récitée mot pour mot pour justifier deux noms inventés.
+Ce qui corrige n'est pas une règle de plus, c'est de retirer l'ambiguïté sur *d'où
+viennent les données*.
+
 ## Ce qu'une campagne déclare est LU, ou son absence est justifiée
 
 Trois champs servis par le serveur étaient **ignorés** par le runner sans que

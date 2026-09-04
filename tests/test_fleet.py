@@ -115,7 +115,10 @@ class Horloge:
 
 
 def _spec(**kw):
-    base = dict(procedure="p", namespace="ns", name="flotte-demo",
+    base = dict(# ⚠️ L'instruction est OBLIGATOIRE depuis le 04/09 : il n'y a plus de
+                # défaut dans le worker, qui ne sait pas ce qu'elle doit dire.
+                input="Traite ce que la file te donne selon la procédure.",
+                procedure="p", namespace="ns", name="flotte-demo",
                 tools=("data_claim_next",),
                 filter={"statut": "a_traiter"}, concurrency=3, ramp_seconds=60)
     base.update(kw)
