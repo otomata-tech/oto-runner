@@ -177,9 +177,36 @@ def _spec_du_job(job: dict, procedure_md: str) -> AgentSpec:
         label=f"job:{job.get('id')}")
 
 
+class SansInstruction(RuntimeError):
+    """Ce travail est arrivé sans instruction de départ.
+
+    ⚠️ Le worker n'en compose pas une. Il est un client MCP : il exécute une
+    instruction et ne sait pas ce qu'elle contient. Les trois textes de repli
+    qui vivaient ici (« Exécute la procédure. ») inventaient le travail à la
+    place de qui l'avait déclaré, depuis le seul étage qui ne connaît pas le
+    métier — et une instruction inventée ne se relit ni ne se corrige depuis le
+    produit : elle se découvre dans le résultat.
+
+    C'est la plateforme qui compose, à la déclaration (oto-backend, capacité
+    `_instruction`). Un travail qui arrive muet est donc une anomalie du chemin
+    qui l'a enfilé, et il le DIT au lieu de tourner sur un ordre fabriqué.
+    """
+
+
 class IdentiteInvalide(RuntimeError):
     """Le porteur du travail ne peut plus agir — le serveur l'a dit et a arrêté
     le travail. ⚠️ **Ne pas retenter** : réessayer rejouerait le même verdict."""
+
+
+def _instruction_du(job: dict) -> str:
+    """L'instruction du travail, ou un refus franc — jamais un texte de repli."""
+    ordre = ((job.get("payload") or {}).get("input") or "").strip()
+    if not ordre:
+        raise SansInstruction(
+            f"le travail {job.get('id')} est arrivé sans instruction de départ. "
+            "Le worker en exécute une, il n'en compose pas : ce travail a été "
+            "enfilé sans, et c'est là qu'il faut regarder.")
+    return ordre
 
 
 def _traiter(backend: Backend, job: dict, provider) -> None:
@@ -218,7 +245,7 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
             raise RuntimeError(f"run_start sans run_id : réponse dégradée {str(d)[:200]}")
         backend.bind_run(job["id"], run_id)
         historique: list = []
-        prompt = p.get("input") or "Exécute la procédure."
+        prompt = _instruction_du(job)
     else:  # continue — OU start re-claimé : reprise du fil existant
         run_id = job["run_id"]
         tours = backend.thread_read(run_id, include_raw=True)
@@ -267,7 +294,7 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         # ⚠️ L'ordre est celui du travail, tel quel. Le worker n'y ajoute
         # aucune prescription métier — ni où écrire, ni sous quelle forme :
         # c'est la procédure qui le dit à l'agent, pas l'exécuteur.
-        ordre = prompt or p.get("input") or "Exécute la procédure."
+        ordre = prompt or _instruction_du(job)
         res = provider.run_once(instructions=spec.system, inputs=ordre,
                                 tools=p.get("tools") or (), api_key=cle)
         # Le fil garde l'ORDRE et la SYNTHÈSE (l'observabilité au grain run) — le
