@@ -196,6 +196,11 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         raise IdentiteInvalide(refus)
     mcp = McpSession(project=projet, org=p.get("org_id"),
                      token=job.get("delegated_token") or None)
+    # ⚠️ La clé de modèle de l'org, remise avec CE travail. Elle ne vit pas plus
+    # longtemps que lui : la garder d'un travail à l'autre ferait payer une org
+    # pour le travail d'une autre — et le seul endroit où ça se verrait serait
+    # sa facture. Absente : le provider retombe sur la clé de la plateforme.
+    cle = job.get("model_key") or None
 
     # ⚠️ Le discriminant de la reprise est le RUN LIÉ, pas le kind : un `start`
     # re-claimé après une mort en plein tour porte déjà son run_id (bind_run a
@@ -264,7 +269,7 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         # c'est la procédure qui le dit à l'agent, pas l'exécuteur.
         ordre = prompt or p.get("input") or "Exécute la procédure."
         res = provider.run_once(instructions=spec.system, inputs=ordre,
-                                tools=p.get("tools") or ())
+                                tools=p.get("tools") or (), api_key=cle)
         # Le fil garde l'ORDRE et la SYNTHÈSE (l'observabilité au grain run) — le
         # verbatim des tours vit et meurt chez Mistral (store=False, conformité).
         releve = ", ".join(f"{s.tool}{'' if s.ok else ' (non exécuté)'}"
@@ -275,7 +280,7 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 {"role": "assistant", "content": res.reply})
     else:
         res = agent_runtime.run(spec, mcp, provider, prompt=prompt,
-                                history=historique, on_turn=apposer)
+                                history=historique, on_turn=apposer, api_key=cle)
 
     # ⚠️ Le worker ne juge PAS ce que l'agent a produit. Il ne sait pas ce
     # qu'écrire veut dire, ni où l'agent devait écrire, ni si ne rien écrire
@@ -399,19 +404,26 @@ def main() -> None:
     # modèle, mesuré en campagne), et chaque ligne ainsi réservée reste bloquée
     # tout le bail avant de revenir au pot. 1800 s doublait cette latence pour
     # rien.
+    # Le dépôt de clé que ce provider sait consommer : le backend y répond, à la
+    # réservation, par la clé que l'org du travail a déposée. Vide = aucun dépôt
+    # ne correspond à l'hôte configuré, et la plateforme paie — ce qui se dit au
+    # journal plutôt que de se déduire d'une facture.
+    depot = getattr(provider, "depot", lambda: "")()
     lease_s = 960 if getattr(provider, "ONE_SHOT", False) else _LEASE_S
     # L'alias configuré ET ce qu'il résout : deux workers lancés de part et
     # d'autre d'une bascule le disent au journal, sans qu'on ait à le deviner.
     nom_modele, resolu = _modele_courant(provider), None
     resolu = getattr(provider, "modele_resolu", lambda _n: None)(nom_modele)
-    logger.info("worker armé — file de %s · provider %s · modèle %s%s",
+    logger.info("worker armé — file de %s · provider %s · modèle %s%s · clé %s",
                 backend.base, provider.__name__.rsplit('_', 1)[-1], nom_modele,
-                f" (= {resolu})" if resolu and resolu != nom_modele else "")
+                f" (= {resolu})" if resolu and resolu != nom_modele else "",
+                f"de l'org quand elle en dépose une ({depot})" if depot
+                else "de la plateforme (aucun dépôt pour cet hôte)")
     signal.signal(signal.SIGTERM, _demander_arret)
     signal.signal(signal.SIGINT, _demander_arret)
     while not _arret_demande:
         try:
-            job = backend.claim(lease_seconds=lease_s)
+            job = backend.claim(lease_seconds=lease_s, depot=depot)
         except BackendError as e:
             logger.warning("claim : %s", e)
             time.sleep(_POLL_S)

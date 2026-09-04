@@ -51,6 +51,16 @@ def max_tokens() -> int:
         return DEFAULT_MAX_TOKENS
 
 
+def depot() -> str:
+    """Le nom du dépôt de clé que ce provider sait consommer (voir `worker`).
+
+    L'org qui a déposé sa clé Anthropic la voit servie avec chaque travail que
+    ses agents réservent ; sans dépôt, le worker tourne sur la clé de la
+    plateforme, prise dans son environnement.
+    """
+    return "anthropic"
+
+
 def resolve_key() -> str:
     """La clé, de l'env, ou une erreur ACTIONNABLE — jamais un repli muet."""
     key = os.environ.get(_ENV_KEY, "").strip()
