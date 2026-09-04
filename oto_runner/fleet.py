@@ -366,6 +366,19 @@ class FleetBilan:
     # conclut : *ce passage a tourné en aveugle N fois*. Une ligne de journal de
     # plus n'aurait rien changé — c'est exactement ce qui a échoué.
     etat_muet: int = 0
+    # Pourquoi chaque travail s'est arrêté, compté par motif (`end_turn`,
+    # `max_steps`, `max_tokens`, `no_reply`…), tel que le worker l'a DÉCLARÉ.
+    #
+    # ⚠️ Un travail arrêté sur `max_steps` ou `max_tokens` compte aujourd'hui
+    # comme `done` : il a rendu la main sans erreur. Mais il a été COUPÉ, pas
+    # conclu — sa ligne porte ce qu'il avait fait au moment où on l'a arrêté, et
+    # rien ne le distingue, dans le bilan, d'un travail qui a fini. C'est un
+    # succès apparent posé sur un travail tronqué : le compte des lignes traitées
+    # reste juste, ce qu'elles valent ne l'est plus.
+    #
+    # Le motif vient du worker, seul à voir le déroulé. L'ordonnanceur ne le
+    # recalcule pas : il ne sait pas ce qu'une étape veut dire.
+    arrets: dict = field(default_factory=dict)
 
 
 def run_fleet(spec: FleetSpec, backend: Backend, *,
@@ -505,6 +518,8 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                 conclus[jid] = {"status": st, "result": resultat}
                 jetons_du_job = int(resultat.get("usage_tokens") or 0)
                 bilan.usage_tokens += jetons_du_job
+                motif = resultat.get("stopped") or "inconnu"
+                bilan.arrets[motif] = bilan.arrets.get(motif, 0) + 1
                 if st == "done":
                     bilan.done += 1
                     failed_consecutifs = 0
@@ -602,6 +617,21 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                 # personne ne les a lus pendant huit vagues. Une ligne DE PLUS
                 # n'aurait rien changé : ce qui change, c'est qu'un compte
                 # remonte dans le BILAN — là où on lit le résultat.
+                # ⚠️ Un travail coupé au plafond a rendu la main SANS ERREUR :
+                # il est compté `done`, et rien d'autre ne le distingue d'un
+                # travail conclu. Le dire ici, à l'endroit où on lit le
+                # résultat, est la seule façon de ne pas prendre un passage
+                # tronqué pour un passage fini.
+                coupes = sum(n for m, n in bilan.arrets.items()
+                             if m in ("max_steps", "max_tokens"))
+                if coupes:
+                    logger.error("⚠️ %d travail/travaux sur %d ont été COUPÉS à "
+                                 "leur plafond (%s) : ils comptent comme réussis "
+                                 "et ne le sont pas — leur ligne porte ce qui "
+                                 "avait été fait au moment de l'arrêt.",
+                                 coupes, bilan.done + bilan.failed,
+                                 ", ".join(f"{m}×{n}" for m, n in
+                                           sorted(bilan.arrets.items())))
                 if bilan.etat_muet:
                     logger.error("⚠️ ce passage a tourné EN AVEUGLE : %d geste(s) "
                                  "d'état n'ont pas pu être posés. Son avancement "
