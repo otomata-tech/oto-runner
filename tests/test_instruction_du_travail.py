@@ -50,3 +50,40 @@ def test_aucun_texte_de_repli_ne_subsiste_dans_le_worker():
               if isinstance(n, ast.Constant) and isinstance(n.value, str)
               and id(n) not in docs and "Exécute la procédure" in n.value]
     assert not replis, f"le worker compose encore : {replis}"
+
+
+# ── et l'objet nommé doit avoir quelque chose à appliquer ─────────────────────
+
+def test_une_procedure_nommee_mais_vide_arrete_l_agent(monkeypatch):
+    """Le pire cas de ce chemin : rien n'échoue. L'agent reçoit « lis la
+    procédure X et applique-la » avec une section Procédure vide, improvise, et
+    ce que valent les lignes écrites ne se découvre qu'en les relisant."""
+    import pytest
+
+    class _McpVide(_McpMuet):
+        def outil(self, nom, args=None):
+            return {"run_id": "run-1", "body_md": "   "}
+
+    monkeypatch.setattr(worker, "McpSession", _McpVide)
+    job = {"id": 31, "kind": "start",
+           "payload": {"project_id": 3, "org_id": 42, "procedure": "veille",
+                       "input": "Lis la procédure `veille` et applique-la."}}
+
+    class _P:
+        __name__ = "agent_llm"
+        ONE_SHOT = False
+
+        @staticmethod
+        def model():
+            return "m"
+
+    with pytest.raises(worker.ProcedureVide) as e:
+        worker._traiter(_BackendMuet(), job, _P)
+    assert "`veille`" in str(e.value)
+
+
+def test_un_travail_sans_procedure_nommee_reste_possible():
+    """L'instruction fait foi seule : c'est un usage légitime, pas une anomalie.
+    Refuser ici fermerait un chemin qui marche pour attraper un cas voisin."""
+    assert worker._corps_applicable({"body_md": ""}, None) == ""
+    assert worker._corps_applicable({}, "") == ""

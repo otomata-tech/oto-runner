@@ -193,9 +193,38 @@ class SansInstruction(RuntimeError):
     """
 
 
+class ProcedureVide(RuntimeError):
+    """L'objet que l'instruction désigne n'a rien à appliquer.
+
+    ⚠️ Le pire cas de tout ce chemin, parce qu'il ne ressemble pas à une panne :
+    l'agent reçoit « lis la procédure `X` et applique-la » avec une section
+    Procédure VIDE, et il improvise. Rien n'échoue, des lignes s'écrivent, et
+    ce qu'elles valent ne se découvre qu'en les relisant une par une.
+
+    Le worker ne juge pas ce qu'une procédure contient — il ne sait pas ce que
+    ce travail veut dire. Il constate seulement qu'un objet a été NOMMÉ et qu'il
+    est vide, ce qui est mesurable sans rien comprendre au métier.
+    """
+
+
 class IdentiteInvalide(RuntimeError):
     """Le porteur du travail ne peut plus agir — le serveur l'a dit et a arrêté
     le travail. ⚠️ **Ne pas retenter** : réessayer rejouerait le même verdict."""
+
+
+def _corps_applicable(procedure: dict, slug: str) -> str:
+    """Le corps de la procédure nommée — ou un refus franc si elle est vide.
+
+    Sans slug, il n'y a pas d'objet à appliquer et l'instruction fait foi seule :
+    c'est un usage légitime, on ne le refuse pas.
+    """
+    corps = ((procedure or {}).get("body_md") or "").strip()
+    if slug and not corps:
+        raise ProcedureVide(
+            f"la procédure `{slug}` est vide ou introuvable : le travail dit de "
+            "l'appliquer, et il n'y a rien à appliquer. L'agent ne part pas — il "
+            "improviserait, et ça ne se verrait que dans ce qu'il aurait écrit.")
+    return corps
 
 
 def _instruction_du(job: dict) -> str:
@@ -260,7 +289,7 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         prompt = p.get("input") if job["kind"] == "continue" else None
 
     mcp.run_id = run_id
-    spec = _spec_du_job(job, procedure.get("body_md") or "")
+    spec = _spec_du_job(job, _corps_applicable(procedure, p.get("procedure")))
 
     def apposer(role: str, neutre: dict, brut: dict) -> None:
         # L'appose du fil EST la persistance : elle mérite des rejeux avant de
