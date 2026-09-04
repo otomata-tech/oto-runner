@@ -135,6 +135,15 @@ def model() -> str:
     return os.environ.get("OTO_RUNNER_MODEL") or DEFAULT_MODEL
 
 
+_DEPOTS_PAR_HOTE = {"api.mistral.ai": "mistral"}
+
+
+def depot() -> str:
+    """Cf. `agent_llm_openai.depot` : l'hôte configuré décide, pas le module."""
+    from urllib.parse import urlparse
+    return _DEPOTS_PAR_HOTE.get(urlparse(base_api()).netloc, "")
+
+
 def resolve_key() -> str:
     key = os.environ.get(_ENV_KEY, "").strip()
     if not key:

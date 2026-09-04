@@ -81,6 +81,20 @@ def max_tokens() -> int:
         return DEFAULT_MAX_TOKENS
 
 
+# ⚠️ Ce provider parle à un hôte CONFIGURABLE (Scaleway par défaut, mais aussi
+# La Plateforme). Le dépôt de clé se lit donc de la base URL, jamais du nom du
+# module ni de la variable d'environnement : `OTO_RUNNER_OPENAI_API_KEY` sert
+# les deux, et croire qu'une clé « openai » appartient à Mistral demanderait à
+# une org la clé d'un fournisseur chez qui elle ne tourne pas. Un hôte absent de
+# cette table n'a PAS de dépôt : la plateforme paie, et ça se dit ainsi.
+_DEPOTS_PAR_HOTE = {"api.mistral.ai": "mistral"}
+
+
+def depot() -> str:
+    from urllib.parse import urlparse
+    return _DEPOTS_PAR_HOTE.get(urlparse(base_url()).netloc, "")
+
+
 def resolve_key() -> str:
     key = os.environ.get(_ENV_KEY, "").strip()
     if not key:

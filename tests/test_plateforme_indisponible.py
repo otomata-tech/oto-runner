@@ -46,7 +46,7 @@ class _PlateformeQuiBascule:
         self.completes: list[tuple] = []
         self.base = "https://exemple.invalide"
 
-    def claim(self, lease_seconds=600):
+    def claim(self, lease_seconds=600, **_):
         self.claims += 1
         if self.echecs < self.coupures:
             self.echecs += 1

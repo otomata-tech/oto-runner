@@ -26,7 +26,7 @@ class _BackendFactice:
         self.claims = 0
         self.base = "https://exemple.invalide"
 
-    def claim(self, lease_seconds=600):
+    def claim(self, lease_seconds=600, **_):
         self.claims += 1
         if self.restants <= 0:
             # File vide : en vrai l'agent attendrait indéfiniment, ce qui est le
@@ -105,7 +105,7 @@ def test_un_signal_pendant_la_reservation_rend_la_ligne_sans_l_entamer(monkeypat
     _reset()
 
     class _BackendQuiSignale(_BackendFactice):
-        def claim(self, lease_seconds=600):
+        def claim(self, lease_seconds=600, **_):
             job = super().claim(lease_seconds)
             worker._demander_arret(15, None)   # le signal arrive PENDANT le claim
             return job

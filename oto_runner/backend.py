@@ -207,9 +207,18 @@ class Backend:
         return dict(motifs)
 
     # ── la file de jobs (runner.jobs, R2) ────────────────────────────────────
-    def claim(self, lease_seconds: int = 600) -> Optional[dict]:
-        return self._post("/api/me/runner/jobs",
-                          {"op": "claim", "lease_seconds": lease_seconds}).get("job")
+    def claim(self, lease_seconds: int = 600, depot: str = "") -> Optional[dict]:
+        """Réserve un travail — et NOMME le dépôt de clé qu'on sait consommer.
+
+        Le backend y répond par `model_key` quand l'org du travail a déposé cette
+        clé-là. Le worker ne va jamais la chercher lui-même : il ne parle pas au
+        coffre, il reçoit avec le travail ce qu'il faut pour l'exécuter, et rien
+        de plus.
+        """
+        corps = {"op": "claim", "lease_seconds": lease_seconds}
+        if depot:
+            corps["provider"] = depot
+        return self._post("/api/me/runner/jobs", corps).get("job")
 
     def enqueue(self, kind: str, payload: dict,
                 run_id: Optional[str] = None,
