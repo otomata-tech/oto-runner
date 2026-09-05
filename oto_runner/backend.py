@@ -436,20 +436,6 @@ class Backend:
                     "s'appuie sur le schéma", namespace, row_id, fantomes)
         return rep
 
-    def appels_du_run(self, run_id: str, limit: int = 60) -> list:
-        """Les appels d'outils d'un run, avec leurs ARGUMENTS.
-
-        ⚠️ C'est le seul canal qui porte l'identifiant de la ligne travaillée sur
-        le chemin Conversations : le harnais n'y reçoit pas les résultats
-        d'outils, et toute lecture par les sorties rend None. Sans cette route,
-        le rappel de contact et la garde du `NN` ne s'exécutent jamais.
-        """
-        out = self._get("/api/orgs/226/monitoring/calls",
-                        {"tool": "data_write", "limit": limit})
-        appels = (out or {}).get("calls") or []
-        return [c for c in appels if str(c.get("run_id") or "") == str(run_id)]
-
-    # ── le fil d'un run (runs.thread, R1) ────────────────────────────────────
     def thread_append(self, run_id: str, role: str, content: dict,
                       provider_raw: Optional[dict] = None) -> int:
         out = self._post("/api/me/runs/thread",

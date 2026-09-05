@@ -56,3 +56,22 @@ def test_l_instruction_du_travail_est_le_SEUL_apport_de_l_appelant():
     """Ce qui reste, et c'est tout ce qui doit rester : le texte fourni. Le worker
     l'injecte tel quel — il ne le complète pas, ne le préfixe pas, ne le juge pas."""
     assert worker._instruction_du(_job(input="Trie ma boîte.")) == "Trie ma boîte."
+
+
+def test_aucun_identifiant_de_CLIENT_n_est_ecrit_dans_le_transport():
+    """⚠️ Le client HTTP portait `/api/orgs/226/monitoring/calls` — le numéro
+    d'organisation d'un client, en dur dans un hôte d'exécution générique. La
+    méthode était morte (aucun appelant), mais elle décrivait un worker qui ne
+    fonctionnerait correctement que pour UNE organisation.
+
+    Le contrôle porte sur la CLASSE : un identifiant d'org écrit en dur, pas ce
+    numéro-là. Les org légitimes arrivent en paramètre (`f"/api/orgs/{org}/…"`),
+    ce que ce contrôle laisse passer."""
+    import pathlib
+    import re
+
+    from oto_runner import backend as B
+    corps = "\n".join(l for l in pathlib.Path(B.__file__).read_text().splitlines()
+                      if not l.lstrip().startswith("#"))
+    en_dur = re.findall(r"/api/orgs/(\d+)/", corps)
+    assert not en_dur, f"organisation(s) codée(s) en dur dans le transport : {en_dur}"
