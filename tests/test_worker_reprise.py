@@ -56,7 +56,11 @@ class FauxMcp:
 
 
 def _job(kind, run_id=None):
+    # Le jeton délégué est la forme SERVIE depuis le 02/09 : chaque boucle
+    # impersonne son user. Une doublure qui l'omet décrit un travail que le
+    # serveur refuse désormais de traiter.
     return {"id": 7, "kind": kind, "run_id": run_id,
+            "delegated_token": "oto_delegue",
             "payload": {"procedure": "demo", "tools": ["data_rows"],
                         "input": "Vas-y.", "max_steps": 3}}
 

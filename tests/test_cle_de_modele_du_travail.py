@@ -159,7 +159,7 @@ def _cle_passee_a_la_boucle(monkeypatch, job):
 
 def test_la_cle_du_travail_est_celle_qui_paie_le_modele(monkeypatch):
     cle = _cle_passee_a_la_boucle(monkeypatch, {
-        "id": 21, "kind": "start", "model_key": "sk-de-l-org",
+        "id": 21, "kind": "start", "delegated_token": "oto_delegue", "model_key": "sk-de-l-org",
         "payload": {"project_id": 3, "org_id": 42, "procedure": "veille",
                     "input": "Lis la procédure `veille` et applique-la."}})
     assert cle == "sk-de-l-org"
@@ -169,7 +169,7 @@ def test_sans_cle_deposee_le_worker_tourne_sur_celle_de_la_plateforme(monkeypatc
     """`None`, pas chaîne vide : le provider doit RETOMBER sur son environnement,
     pas présenter une clé vide au fournisseur."""
     cle = _cle_passee_a_la_boucle(monkeypatch, {
-        "id": 22, "kind": "start",
+        "id": 22, "kind": "start", "delegated_token": "oto_delegue",
         "payload": {"project_id": 3, "org_id": 42, "procedure": "veille",
                     "input": "Lis la procédure `veille` et applique-la."}})
     assert cle is None
@@ -180,11 +180,11 @@ def test_la_cle_ne_survit_pas_au_travail(monkeypatch):
     Une clé qui traîne fait payer une org pour le travail d'une autre — et le
     seul endroit où ça se verrait est sa facture."""
     _cle_passee_a_la_boucle(monkeypatch, {
-        "id": 23, "kind": "start", "model_key": "sk-de-l-org",
+        "id": 23, "kind": "start", "delegated_token": "oto_delegue", "model_key": "sk-de-l-org",
         "payload": {"project_id": 3, "org_id": 42, "procedure": "veille",
                     "input": "Lis la procédure `veille` et applique-la."}})
     suivante = _cle_passee_a_la_boucle(monkeypatch, {
-        "id": 24, "kind": "start",
+        "id": 24, "kind": "start", "delegated_token": "oto_delegue",
         "payload": {"project_id": 3, "org_id": 99, "procedure": "veille",
                     "input": "Lis la procédure `veille` et applique-la."}})
     assert suivante is None

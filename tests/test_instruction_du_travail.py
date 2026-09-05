@@ -20,7 +20,7 @@ def test_un_travail_sans_instruction_est_refuse_au_lieu_d_etre_invente(monkeypat
     qu'il a remplacé le vrai."""
     import pytest
     monkeypatch.setattr(worker, "McpSession", _McpMuet)
-    job = {"id": 30, "kind": "start",
+    job = {"id": 30, "kind": "start", "delegated_token": "oto_delegue",
            "payload": {"project_id": 3, "org_id": 42, "procedure": "veille"}}
 
     class _P:
@@ -65,7 +65,7 @@ def test_une_procedure_nommee_mais_vide_arrete_l_agent(monkeypatch):
             return {"run_id": "run-1", "body_md": "   "}
 
     monkeypatch.setattr(worker, "McpSession", _McpVide)
-    job = {"id": 31, "kind": "start",
+    job = {"id": 31, "kind": "start", "delegated_token": "oto_delegue",
            "payload": {"project_id": 3, "org_id": 42, "procedure": "veille",
                        "input": "Lis la procédure `veille` et applique-la."}}
 

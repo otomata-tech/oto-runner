@@ -40,17 +40,27 @@ def test_la_session_porte_le_jeton_du_demandeur(monkeypatch):
     assert _FauxMcp.dernier["token"] == "oto_le-jeton-du-demandeur"
 
 
-def test_sans_jeton_delegue_le_worker_retombe_sur_le_sien(monkeypatch):
-    """Travaux d'avant la délégation : pas de porteur connu, donc pas de jeton.
-    On ne casse pas — on repasse par le comportement d'avant."""
-    monkeypatch.setattr(W, "McpSession", _FauxMcp)
+def test_sans_jeton_delegue_le_worker_REFUSE(monkeypatch):
+    """⚠️ Renversement assumé du 05/09/2026. Ce banc disait : « travaux d'avant la
+    délégation : pas de porteur connu, donc pas de jeton. On ne casse pas — on
+    repasse par le comportement d'avant. »
+
+    Ce qui a changé n'est pas le cas, c'est le MODÈLE. Le worker est un serveur
+    de boucles agentiques qui impersonnent chacune leur user ; il n'a aucune
+    identité métier à prêter. « Repasser par le comportement d'avant », c'était
+    faire agir un agent au nom du compte qui héberge le runner — et rien ne le
+    signalait, puisque les écritures aboutissaient.
+    """
+    def _interdit(**kw):
+        pytest.fail("une session a été ouverte sans personne à impersonner")
+
+    monkeypatch.setattr(W, "McpSession", _interdit)
     job = {"id": 8, "kind": "start",
            "payload": {"project_id": 3, "org_id": 42, "procedure": "veille"}}
-    with pytest.raises(_Stop):
+    with pytest.raises(W.SansPorteur) as e:
         W._traiter(object(), job, object())
-    assert _FauxMcp.dernier["token"] is None, (
-        "un jeton vide doit valoir ABSENCE, pas chaîne vide — sinon la session "
-        "présente un jeton invalide au lieu de retomber sur celui du worker")
+    assert "personne à impersonner" in str(e.value)
+    assert "reprogramme" in str(e.value), "un refus nomme la sortie, pas que le manque"
 
 
 def test_un_refus_d_identite_arrete_le_travail_sans_le_toucher(monkeypatch):
