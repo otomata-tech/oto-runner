@@ -264,8 +264,13 @@ def modele_resolu(nom: str) -> Optional[str]:
 
 
 def run_once(*, instructions: str, inputs: str, tools,
-             api_key: Optional[str] = None) -> AgentResult:
+             api_key: Optional[str] = None, on_event=None) -> AgentResult:
     """UNE conversation complète (outils compris, côté Mistral) → AgentResult.
+
+    `on_event(type, champs)` : le journal du travail — `conversation` (la requête
+    ENTIÈRE moins la clé), `reponse` (les `outputs` bruts, entiers, avec usage et
+    modèle), `relance` (l'appel renvoyé et le fil rejoué). Sur ce chemin c'est la
+    seule trace des tours : `store=False`, rien ne reste chez le fournisseur.
 
     Rejeux : 2, espacés, sur les seuls TRANSITOIRES HTTP — un DeadlineExceeded
     (>15 min murales) remonte tel quel : le retry de JOB décide, re-payer
@@ -294,9 +299,18 @@ def run_once(*, instructions: str, inputs: str, tools,
     # Relevé AVANT le premier POST : c'est la version en vigueur au moment de
     # l'appel qu'on enregistre, pas celle d'après un run d'un quart d'heure.
     resolu = modele_resolu(nom)
+
+    def note(ev: str, **champs) -> None:
+        if on_event:
+            on_event(ev, champs)
+
     cumul: Optional[AgentResult] = None
     for relance in range(maxi + 1):
+        note("conversation", url=url, corps=corps, relance=relance,
+             modele_resolu=resolu)
         d = _poster(url, corps, entetes)
+        note("reponse", outputs=d.get("outputs"), usage=d.get("usage"),
+             modele=d.get("model"), relance=relance)
         cumul = _cumuler(cumul, _parse(d, tools))
         renvoyes = _appels_renvoyes(d)
         if not renvoyes or relance == maxi:
@@ -304,6 +318,7 @@ def run_once(*, instructions: str, inputs: str, tools,
         logger.info("conversation relancée (%s/%s) : function.call renvoyé « %s »",
                     relance + 1, maxi, str(renvoyes[0].get("name") or "?")[:60])
         corps = dict(corps, inputs=_entrees_de_relance(inputs, d, renvoyes))
+        note("relance", numero=relance + 1, renvoyes=renvoyes)
     cumul.model = resolu
     return cumul
 

@@ -143,6 +143,13 @@ class AgentResult:
 # le worker jetable entre deux tours (un kill se répare par re-claim + rechargement).
 # None = pas de persistance (tests, dry-run).
 OnTurn = Callable[[str, dict, dict], None]
+# `on_event(type, champs)` : le JOURNAL du travail — tout ce que la boucle voit,
+# ENTIER : le prompt système, chaque tour du modèle (texte, appels avec leurs
+# arguments complets, usage), chaque sortie d'outil telle que le transport l'a
+# rendue (avant le plafond `_cap` que le modèle, lui, subit), et la fin. C'est ce
+# qui manquait pour relire un passage après coup : le fil ne garde que la sortie
+# tronquée, le résultat déclaré ne garde que des comptes. None = pas de journal.
+OnEvent = Callable[[str, dict], None]
 
 
 def _cap(text: str) -> str:
@@ -165,6 +172,11 @@ def execute_tool(spec: AgentSpec, transport: ToolTransport,
     une erreur d'outil est un résultat que le modèle lit pour se corriger.
     Fail-closed sur l'allowlist AVANT tout transport.
 
+    ⚠️ Le texte rendu est ENTIER, tel que le transport l'a rendu : c'est la boucle
+    qui le plafonne pour le modèle (`_cap`), APRÈS l'avoir journalisé. Plafonner
+    ici faisait disparaître la partie coupée pour tout le monde — le refus d'un
+    schéma nomme la colonne et la raison, c'est exactement ce qu'on perdait.
+
     Le troisième terme sépare l'erreur MÉTIER (une réponse : not_found, 400) de
     la PANNE DE TRANSPORT — le transport a levé, l'appel n'a pas eu lieu. Le
     modèle lit les deux de la même façon (il n'y a rien d'autre à lui dire),
@@ -181,7 +193,7 @@ def execute_tool(spec: AgentSpec, transport: ToolTransport,
             text, is_error = transport.call(call.name, call.arguments or {})
     except Exception as e:  # noqa: BLE001 — l'erreur de la cible EST un résultat
         return (f"Erreur de l'outil `{call.name}` : {e}", True, True)
-    return (_cap(text), is_error, False)
+    return (text, is_error, False)
 
 
 def _est_transitoire(texte: str) -> bool:
@@ -195,7 +207,8 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
         prompt: Optional[str] = None,
         history: Optional[list] = None, on_turn: Optional[OnTurn] = None,
         api_key: Optional[str] = None,
-        a_vide: Optional[Callable[[str, str], bool]] = None) -> AgentResult:
+        a_vide: Optional[Callable[[str, str], bool]] = None,
+        on_event: Optional[OnEvent] = None) -> AgentResult:
     """La boucle : tours de modèle et d'outils jusqu'à conclusion, plafond, ou refus.
 
     `history` = les `provider_raw` du fil, rejoués dans l'ordre (continuation d'un
@@ -204,11 +217,27 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
 
     `a_vide(nom, sortie)` → « cet appel a abouti SANS RIEN RENDRE » : la boucle
     voit les sorties d'outils, mais leur SENS appartient au domaine (le worker).
-    Elle lui pose la question et marque le pas ; absent, aucun pas n'est vide."""
+    Elle lui pose la question et marque le pas ; absent, aucun pas n'est vide.
+
+    `on_event(type, champs)` reçoit le journal ENTIER du déroulé : `systeme`,
+    `historique` (le fil rechargé, tel que transporté), `utilisateur`, `modele`
+    (un par tour, arguments d'appel complets), `outil` (un par appel, sortie
+    complète), `fin`. Rien n'y est tronqué."""
+    def note(ev: str, **champs) -> None:
+        if on_event:
+            on_event(ev, champs)
+
     messages = _trim(history or [])
+    plafond = max(1, min(spec.max_steps, HARD_MAX_STEPS))
+    note("systeme", texte=spec.system, outils=sorted(spec.tools),
+         max_steps=plafond, max_tokens=spec.max_tokens, label=spec.label)
+    if history:
+        note("historique", messages=list(messages), total=len(history),
+             transportes=len(messages))
     if prompt is not None:
         um = provider.user_message(prompt)
         messages.append(um)
+        note("utilisateur", texte=prompt)
         if on_turn:
             on_turn("user", {"text": prompt}, um)
 
@@ -218,7 +247,6 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
     stopped = "end_turn"
     reply = ""
     servi: Optional[str] = None
-    plafond = max(1, min(spec.max_steps, HARD_MAX_STEPS))
 
     for _ in range(plafond + 1):
         turn = provider.complete(system=spec.system, messages=messages,
@@ -228,6 +256,10 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
         # Le DERNIER tour fait foi : un fournisseur qui bascule d'alias en cours
         # de déroulé a servi les deux, et c'est le second qu'on retrouvera.
         servi = turn.model or servi
+        note("modele", texte=turn.text, stop_reason=turn.stop_reason,
+             appels=[{"id": c.id, "nom": c.name, "arguments": c.arguments}
+                     for c in turn.tool_calls],
+             usage=dict(turn.usage or {}), modele=turn.model, brut=turn.raw_content)
 
         # ⚠️ La borne se vérifie APRÈS le tour, jamais avant : on ne connaît le
         # coût d'un tour qu'une fois qu'il a eu lieu. Elle empêche donc le tour
@@ -265,13 +297,20 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
             started = time.monotonic()
             text, is_error, transport_ko = execute_tool(spec, transport, call)
             ms = int((time.monotonic() - started) * 1000)
+            # Journalisé ENTIER, puis plafonné pour le modèle : le journal garde
+            # ce que le transport a rendu, le modèle lit ce qu'il peut porter.
+            note("outil", id=call.id, nom=call.name, arguments=call.arguments,
+                 ok=not is_error, transport_ko=transport_ko, duree_ms=ms,
+                 texte=text, tronque_pour_le_modele=len(text) > MAX_TOOL_OUTPUT_CHARS)
+            pour_le_modele = _cap(text)
             steps.append(AgentStep(tool=call.name, ok=not is_error, duration_ms=ms,
                                    error=text[:200] if is_error else None,
                                    vide=bool(a_vide and not is_error
                                              and a_vide(call.name, text)),
                                    transport_ko=transport_ko))
             neutre.append({"name": call.name, "ok": not is_error, "duration_ms": ms})
-            results.append({"id": call.id, "text": text, "is_error": is_error})
+            results.append({"id": call.id, "text": pour_le_modele,
+                            "is_error": is_error})
         # La FORME des résultats dans le fil appartient au provider (un message
         # user chez Anthropic, N messages role:tool chez OpenAI) — la boucle ne
         # la connaît pas, elle appose ce qu'on lui rend.
@@ -286,6 +325,8 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
 
     if not reply and stopped == "end_turn":
         stopped = "no_reply"
+    note("fin", stopped=stopped, reponse=reply, usage=dict(usage), pas=len(steps),
+         modele=servi)
     # ⚠️ L'estampille remonte du tour, pas de la configuration : c'est ce que le
     # fournisseur a SERVI. Elle était déclarée sur `AgentResult` depuis l'origine,
     # lue par le worker et comptée par le bilan — mais AUCUN transport ne la

@@ -141,7 +141,7 @@ def complete(*, system: str, messages: list, tools: list[dict],
 
     Le `system` passe en premier message (la convention OpenAI) ; `messages` est
     le fil au format OpenAI (les `provider_raw` rejoués). Toute erreur HTTP
-    remonte à la boucle avec le DIRE du serveur, tronqué — jamais avalée."""
+    remonte à la boucle avec le DIRE du serveur, entier — jamais avalée."""
     corps = {
         "model": model(),
         "max_tokens": max_tokens(),
@@ -163,7 +163,9 @@ def complete(*, system: str, messages: list, tools: list[dict],
             detail = r.json().get("message") or r.json().get("error") or r.text
         except Exception:  # noqa: BLE001
             detail = r.text
-        raise RuntimeError(f"chat/completions → {r.status_code} : {str(detail)[:300]}")
+        # Le DIRE du serveur, ENTIER : il finit dans le journal du travail, où
+        # c'est la seule trace de ce qu'un fournisseur sans état a répondu.
+        raise RuntimeError(f"chat/completions → {r.status_code} : {detail}")
     d = r.json()
 
     choix = (d.get("choices") or [{}])[0]

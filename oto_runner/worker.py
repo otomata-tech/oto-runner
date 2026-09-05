@@ -19,17 +19,13 @@ recharge le fil, et continue — c'est le scénario prouvé au spike du 12/08.
 """
 from __future__ import annotations
 
-import dataclasses
-import json
 import logging
 import os
 import signal
-import re
 import time
-from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Optional
 
-from . import agent_runtime
+from . import agent_runtime, journal
 from .llm_select import get_provider
 from .agent_runtime import AgentSpec
 from .backend import Backend, BackendError
@@ -107,23 +103,6 @@ def _assainir_pour_transport(historique: list) -> list:
     return out
 
 
-
-
-_INSEE_VERS_NOTRE = {
-    "00": "sans_salarie", "01": "1_2", "02": "3_5", "03": "6_9",
-    "11": "10_19", "12": "20_49", "21": "50_99", "22": "100_199",
-    "31": "200_249", "32": "250_499", "41": "500_999", "42": "1000_1999",
-    "51": "2000_4999", "52": "5000_9999", "53": "10000_plus"}
-
-
-_SOCLE_CACHE = {}
-
-
-_SOCLE_TABLE: dict = {}
-
-
-
-
 def _modele_courant(provider) -> str:
     """Le nom du modèle configuré pour ce provider, sans jamais faire échouer.
 
@@ -134,30 +113,6 @@ def _modele_courant(provider) -> str:
         return provider.model() or "inconnu"
     except Exception:  # noqa: BLE001 — cf. docstring
         return "inconnu"
-
-
-def _vide(x) -> bool:
-    return x in (None, "", [], {}) or str(x).strip() == ""
-
-
-# La qualité VIDE compte comme une qualité de direction : c'est tout le sujet.
-# Le registre rend parfois un nom sans fonction, et six contacts perdus sur six,
-# sur deux passages, portaient exactement cette forme.
-
-
-def _nu(x):
-    """La valeur d'une case, qu'elle soit nue ou en couches.
-
-    ⚠️ Les couches se lisent À PLAT sur une ligne relue (`champ.comment`), mais
-    à l'intérieur d'un contact la valeur peut être enveloppée. Un déballeur qui
-    se trompe rend None à coup sûr — et un None se lit « pas de catégorie »,
-    donc « pas de contact de direction », donc un rappel tiré pour rien.
-    """
-    return x.get("valeur") if isinstance(x, dict) and "valeur" in x else x
-
-
-_MOTIF_RETABLI = ("fichier-client — valeur d'origine rétablie par le contrôle : "
-                  "l'écriture de ce passage l'avait remplacée")
 
 
 def _spec_du_job(job: dict) -> AgentSpec:
@@ -238,7 +193,14 @@ def _instruction_du(job: dict) -> str:
     return ordre
 
 
-def _traiter(backend: Backend, job: dict, provider) -> None:
+def _traiter(backend: Backend, job: dict, provider,
+             journal_: Optional[journal.Journal] = None) -> None:
+    """Un travail, de la réservation à la conclusion. `journal_` reçoit TOUT ce
+    que le worker voit (cf. `journal.py`) ; None = pas de journal (bancs)."""
+    def note(ev: str, **champs) -> None:
+        if journal_ is not None:
+            journal_.ecrire(ev, **champs)
+    on_event = journal_.evenement if journal_ is not None else None
     p = job.get("payload") or {}
     projet = p.get("project_id")
     # ⚠️ **L'agent travaille SOUS L'IDENTITÉ DU DEMANDEUR**, pas sous celle du
@@ -282,6 +244,7 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         backend.bind_run(job["id"], run_id)
         historique: list = []
         prompt = _instruction_du(job)
+        note("run", run_id=run_id, repris=False)
     else:  # continue — OU start re-claimé : reprise du fil existant
         run_id = job["run_id"]
         tours = backend.thread_read(run_id, include_raw=True)
@@ -290,6 +253,8 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         # Un `continue` porte son message user ; un start repris n'ajoute RIEN :
         # son message initial est DÉJÀ dans le fil (apposé au premier vol).
         prompt = p.get("input") if job["kind"] == "continue" else None
+        note("run", run_id=run_id, repris=True, fil_lu=len(tours),
+             fil_transporte=len(historique))
 
     mcp.run_id = run_id
     spec = _spec_du_job(job)
@@ -328,7 +293,8 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         # c'est la procédure qui le dit à l'agent, pas l'exécuteur.
         ordre = prompt or _instruction_du(job)
         res = provider.run_once(instructions=spec.system, inputs=ordre,
-                                tools=p.get("tools") or (), api_key=cle)
+                                tools=p.get("tools") or (), api_key=cle,
+                                on_event=on_event)
         # Le fil garde l'ORDRE et la SYNTHÈSE (l'observabilité au grain run) — le
         # verbatim des tours vit et meurt chez Mistral (store=False, conformité).
         releve = ", ".join(f"{s.tool}{'' if s.ok else ' (non exécuté)'}"
@@ -339,7 +305,8 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
                 {"role": "assistant", "content": res.reply})
     else:
         res = agent_runtime.run(spec, mcp, provider, prompt=prompt,
-                                history=historique, on_turn=apposer, api_key=cle)
+                                history=historique, on_turn=apposer, api_key=cle,
+                                on_event=on_event)
 
     # ⚠️ Le worker ne juge PAS ce que l'agent a produit. Il ne sait pas ce
     # qu'écrire veut dire, ni où l'agent devait écrire, ni si ne rien écrire
@@ -361,35 +328,19 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # (budget, rendement), et la déplacer les fausserait toutes d'un coup.
     lus_en_cache = int(res.usage.get("cache_read_input_tokens") or 0)
     ecrits_en_cache = int(res.usage.get("cache_creation_input_tokens") or 0)
-    # Le résultat DÉCLARÉ (R5) : ce que l'ordonnanceur de flotte lit pour ses
-    # gardes — un résumé, jamais du contenu de fil. `tool_counts` rend le TOUR
-    # PERDU lisible d'un coup d'œil : un agent qui analyse et conclut en prose
-    # SANS écrire ne produit aucune erreur — la seule trace est l'écart entre
-    # ses mots et ses appels. Le compte par outil le montre au grain job (des
-    # claims sans writes), sans lire le fil. `claims`/`writes`/`claim_vide`/
-    # `faux_depart` en sont la lecture ARRÊTÉE ICI : le verdict appartient au
-    # worker, qui a vu les appels, pas à l'ordonnanceur qui devrait le
-    # redériver à chaque tour.
+    # Le résultat DÉCLARÉ (R5) : ce que l'ordonnanceur lit pour ses bornes — un
+    # résumé d'EXÉCUTION, jamais du contenu de fil, jamais un jugement sur ce
+    # que l'agent a produit. `tool_counts` compte les APPELS par outil, sans les
+    # interpréter (le worker ne sait pas ce qu'écrire veut dire) : il rend le
+    # tour perdu lisible d'un coup d'œil — un agent qui analyse et conclut en
+    # prose sans rien appeler ne produit aucune erreur, la seule trace est
+    # l'écart entre ses mots et ses appels.
     compte: dict = {}
     for s in res.steps:
         if s.ok:
             compte[s.tool] = compte.get(s.tool, 0) + 1
-    # ⚠️ Le worker ne compte plus les réservations ni les écritures : il ne
-    # sait pas ce que ces gestes veulent dire. Il compte les APPELS, par outil,
-    # sans les interpréter — `tool_counts` suffit à qui sait lire le métier.
     outcome = "done" if res.stopped == "end_turn" else "blocked"
-    note = None
-
-    # Le résultat DÉCLARÉ : ce que l'ordonnanceur lit pour ses bornes — un
-    # résumé d'EXÉCUTION, jamais du contenu de fil, jamais un jugement sur ce
-    # que l'agent a produit. `tool_counts` rend le tour perdu lisible d'un coup
-    # d'œil : un agent qui analyse et conclut en prose sans rien appeler ne
-    # produit aucune erreur, et la seule trace est l'écart entre ses mots et ses
-    # appels.
-    #
-    # ⚠️ Le cache se compte À CÔTÉ des jetons, jamais dedans : `usage_tokens`
-    # reste entrée + sortie, base des bornes de flotte, et la déplacer les
-    # fausserait toutes d'un coup.
+    note_run = None
     resultat = {
         "usage_tokens": jetons,
         "usage_input": entree,
@@ -406,11 +357,17 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         # DEMANDÉ ; le transport, lui, sait ce qui a été SERVI et gagne.
         "model": res.model or _modele_courant(provider),
     }
+    cloture = "ok"
     try:
         mcp.outil("run_finish", {"run_id": run_id, "outcome": outcome,
-                                 "note": note})
+                                 "note": note_run})
     except Exception as e:  # noqa: BLE001 — la clôture ne fait pas échouer le job
+        cloture = f"refusé : {e}"
         logger.warning("job %s : run_finish refusé (%s)", job["id"], e)
+    # L'état final et la raison d'arrêt, tels que DÉCLARÉS à la plateforme — la
+    # dernière ligne d'un travail qui a conclu.
+    note("resultat", outcome=outcome, run_id=run_id, run_finish=cloture,
+         resultat=resultat, reponse=res.reply)
     backend.complete(job["id"], ok=True, run_id=run_id, result=resultat)
     logger.info("job %s : %s (%s · %d appels · %d jetons (+ %d lus en cache))",
                 job["id"], outcome, res.stopped, len(res.steps), jetons,
@@ -446,6 +403,39 @@ def _demander_arret(signum, _frame) -> None:
                 "va à son terme, puis l'agent sort", signum)
 
 
+def _un_travail(backend: Backend, job: dict, provider) -> None:
+    """UN travail réservé, de son journal ouvert à sa conclusion — ou à la trace
+    de son plantage. L'échec d'un travail n'arrête pas la batterie ; il laisse un
+    journal qui dit où il en était."""
+    j = journal.du_travail(job)
+    journal.debut(j, job, provider)
+    # ⚠️ Chaque annonce passe par `journal.relu` : le fichier est RELU avant
+    # d'être nommé, sinon ça LÈVE en nommant le chemin — le worker est celui qui
+    # écrit, un journal qu'il ne peut pas relire est un défaut, pas un aléa.
+    try:
+        _traiter(backend, job, provider, journal_=j)
+        logger.info("job %s : journal %s", job.get("id"), journal.relu(j.chemin))
+    except IdentiteInvalide as e:
+        # ⚠️ On ne conclut PAS : le serveur a déjà marqué ce travail en échec à
+        # la réservation. `complete` rendrait une erreur de bail — un bruit qui
+        # ferait chercher un problème de file là où il y a un problème de DROIT.
+        journal.erreur(j, e)
+        logger.error("job %s NON exécuté — %s. Ce travail ne repartira pas : "
+                     "il faut soit rendre son droit au demandeur, soit le "
+                     "reprogrammer sous une autre identité. Journal : %s",
+                     job.get("id"), e, journal.relu(j.chemin))
+    except Exception as e:  # noqa: BLE001 — l'échec d'un job n'arrête pas la batterie
+        journal.erreur(j, e)
+        logger.exception("job %s en échec — journal : %s", job.get("id"),
+                         journal.relu(j.chemin))
+        try:
+            backend.complete(job["id"], ok=False, error=str(e)[:400])
+        except BackendError as e2:
+            # Bail déjà perdu (re-claimé ailleurs) : le job ne nous appartient
+            # plus, on n'insiste pas.
+            logger.warning("complete %s : %s", job.get("id"), e2)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     if os.environ.get("OTO_RUNNER_ARMED") != "1":
@@ -456,6 +446,9 @@ def main() -> None:
     backend = Backend()
     provider = get_provider()
     provider.resolve_key()    # échoue FORT au boot si la clé manque, pas au 1er job
+    # Le journal par travail est le contrat « conserver tout » : un répertoire
+    # qu'on ne peut pas écrire se dit ICI, pas en faisant échouer le 1er travail.
+    passages = journal.preparer()
     # En one-shot, AUCUN heartbeat pendant la conversation (elle tourne chez
     # Mistral, deadline murale 900 s) : le bail doit la couvrir ENTIÈRE (960 >
     # 900), sinon un pair re-claime un job dont l'exécution court encore — mais
@@ -473,11 +466,12 @@ def main() -> None:
     # d'autre d'une bascule le disent au journal, sans qu'on ait à le deviner.
     nom_modele, resolu = _modele_courant(provider), None
     resolu = getattr(provider, "modele_resolu", lambda _n: None)(nom_modele)
-    logger.info("worker armé — file de %s · provider %s · modèle %s%s · clé %s",
+    logger.info("worker armé — file de %s · provider %s · modèle %s%s · clé %s · "
+                "journaux par travail dans %s/<flotte>/<job>.jsonl",
                 backend.base, provider.__name__.rsplit('_', 1)[-1], nom_modele,
                 f" (= {resolu})" if resolu and resolu != nom_modele else "",
                 f"de l'org quand elle en dépose une ({depot})" if depot
-                else "de la plateforme (aucun dépôt pour cet hôte)")
+                else "de la plateforme (aucun dépôt pour cet hôte)", passages)
     signal.signal(signal.SIGTERM, _demander_arret)
     signal.signal(signal.SIGINT, _demander_arret)
     while not _arret_demande:
@@ -497,27 +491,7 @@ def main() -> None:
             logger.info("arrêt demandé pendant la réservation — job %s rendu à la "
                         "file sans être entamé", job.get("id"))
             break
-        try:
-            _traiter(backend, job, provider)
-        except IdentiteInvalide as e:
-            # ⚠️ On ne conclut PAS : le serveur a déjà marqué ce travail en échec
-            # avec sa raison, à la réservation. Appeler `complete` ici rendrait
-            # une erreur de bail — un bruit qui accuserait la mauvaise pièce et
-            # ferait chercher un problème de file là où il y a un problème de
-            # DROIT. **L'agent s'arrête en le disant**, et c'est cette ligne-là
-            # qui le dit.
-            logger.error("job %s NON exécuté — %s. Ce travail ne repartira pas : "
-                         "il faut soit rendre son droit au demandeur, soit le "
-                         "reprogrammer sous une autre identité.", job.get("id"), e)
-            continue
-        except Exception as e:  # noqa: BLE001 — l'échec d'un job n'arrête pas la batterie
-            logger.exception("job %s en échec", job.get("id"))
-            try:
-                backend.complete(job["id"], ok=False, error=str(e)[:400])
-            except BackendError as e2:
-                # Bail déjà perdu (re-claimé ailleurs) : le job ne nous appartient
-                # plus, on n'insiste pas.
-                logger.warning("complete %s : %s", job.get("id"), e2)
+        _un_travail(backend, job, provider)
     logger.info("agent sorti proprement — aucun travail interrompu")
 
 

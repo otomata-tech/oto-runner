@@ -42,39 +42,15 @@ def _params_filtre(filter: Optional[dict], limit: int) -> dict:
     return params
 
 
-_MOTIFS = (
-    # (fragment cherché dans le message, nom du poste au bilan)
-    # ⚠️ Le refus du cran a DEUX formes, et c'est la seconde qui compte pour les
-    # fabrications : « aucune ligne de <table> ne porte <clé> = … ». Le 29/08 un
-    # agent a écrit un dictionnaire entier dans le champ SIREN — clé factice, avec
-    # son propre commentaire disant qu'il avait perdu la vraie. Sans le cran,
-    # c'était une ligne fantôme de plus. Mon compteur ne cherchait que la première
-    # forme : il a rangé le seul cas grave du passage dans « autre », et le bilan
-    # a annoncé ZÉRO création refusée. Un compteur qui rate le cas qu'il existe
-    # pour voir est pire qu'absent — il certifie qu'il ne s'est rien passé.
-    ("business_key_required", "création refusée par le cran"),
-    ("ne porte", "création refusée par le cran"),
-    ("n'est pas renseigné", "création refusée par le cran"),
-    ("introuvable", "ligne inconnue (identifiant inventé ou périmé)"),
-    ("not found", "ligne inconnue (identifiant inventé ou périmé)"),
-    ("réservée par", "ligne tenue par un autre travail"),
-    ("reserved by", "ligne tenue par un autre travail"),
-    ("required_when", "champ conditionnel manquant"),
-    ("run_id", "jeton de travail manquant"),
-)
-
-
-def _motif(message: str) -> str:
-    """Range un message de refus dans un poste lisible au bilan.
-
-    ⚠️ Un refus non classé garde son texte tronqué plutôt que d'aller dans un
-    « divers » : un poste fourre-tout masque précisément le motif neuf qu'on
-    aurait voulu voir apparaître."""
-    bas = message.lower()
-    for fragment, poste in _MOTIFS:
-        if fragment in bas:
-            return poste
-    return "autre : " + " ".join(message.split())[:60]
+# ⚠️ Il y avait ici un CLASSIFICATEUR de refus : une table de fragments
+# (« introuvable », « ne porte », « réservée par »…) qui rangeait chaque texte
+# serveur sous un libellé de son cru — « création refusée par le cran », « ligne
+# inconnue (identifiant inventé ou périmé) ». Relu contre les journaux serveur le
+# 06/09/2026 : il INVENTAIT. « création refusée par le cran ×1 » sur onze refus qui
+# étaient tous des mises à jour ; « ligne inconnue » pour un NAMESPACE introuvable.
+# Un libellé qui n'apparaît pas dans le texte serveur est une interprétation, et
+# elle a été crue. Le bilan conserve désormais les textes ENTIERS, groupés par
+# texte identique, et rien d'autre (`bilan_postes.refus_ecriture`).
 
 
 class BackendError(RuntimeError):
@@ -171,27 +147,26 @@ class Backend:
                 ko += 1
         return n, ko
 
-    def refus_par_motif(self, org: int, tool: str, *, minutes: int = 15,
-                        limit: int = 200) -> dict[str, int]:
-        """Les refus de `tool`, comptés PAR MOTIF, sur la fenêtre.
+    def refus_detail(self, org: int, tool: str, *, minutes: int = 15,
+                     limit: int = 200) -> list[dict]:
+        """Les refus de `tool` sur la fenêtre, UN PAR UN : quand, quel run, et le
+        texte ENTIER du refus. L'agrégation par motif se fait au bilan, sur ce
+        texte complet — jamais sur un préfixe.
 
         ⚠️ Pourquoi ce poste existe. Tant qu'aucun cran n'empêchait la création,
         une tentative de fabriquer une entreprise LAISSAIT UNE LIGNE : on la
         voyait, on la comptait, on remontait à sa cause. Sous le cran
         `key_required`, la même tentative devient un refus — et **un refus ne se
-        voit que si quelqu'un le compte**.
+        voit que si quelqu'un le compte**, ne se comprend que si on le lit entier.
 
-        Un zéro obtenu sous une garde ne dit pas que le geste a cessé : il dit
-        que le geste ne réussit plus. Sans ce comptage, on lirait un progrès là
-        où il n'y a qu'une protection qui tient — et une hausse ici serait un
-        signal, pas un échec : elle dirait que la consigne n'a pas porté et que
-        seul le cran retient."""
-        from collections import Counter
+        Le `run_id` est ce qui relie un refus au travail qui l'a provoqué, donc au
+        journal JSONL que le worker a écrit pour lui : sans lui, un refus est un
+        fait sans auteur."""
         from datetime import datetime, timedelta, timezone
         d = self._get(f"/api/orgs/{org}/monitoring/calls",
                       {"tool": tool, "limit": limit})
         seuil = datetime.now(timezone.utc) - timedelta(minutes=minutes)
-        motifs: Counter = Counter()
+        refus: list[dict] = []
         for c in d.get("calls") or []:
             if c.get("ok"):
                 continue
@@ -203,8 +178,9 @@ class Backend:
                 continue
             if t < seuil:
                 continue
-            motifs[_motif(str(c.get("error") or ""))] += 1
-        return dict(motifs)
+            refus.append({"quand": quand, "run_id": c.get("run_id"),
+                          "erreur": str(c.get("error") or "")})
+        return refus
 
     # ── la file de jobs (runner.jobs, R2) ────────────────────────────────────
     def claim(self, lease_seconds: int = 600, depot: str = "") -> Optional[dict]:
@@ -390,6 +366,30 @@ class Backend:
         out = self._get(f"/api/datastore/namespaces/{namespace}/rows",
                         _params_filtre(filter, limit=limit), org=org)
         return out.get("rows") or []
+
+    def schema(self, namespace: str, org: Optional[int] = None) -> Optional[dict]:
+        """Le schéma DÉCLARÉ du tableau (`{namespace, schema, enforced}` → `schema`),
+        None quand aucun n'est posé — un état normal, pas une erreur.
+
+        C'est là que vit la colonne de statut : le field `role="status"`, avec son
+        cycle de vie (`lifecycle.terminal`, `lifecycle.abandon_state`). Le bilan
+        la LIT ici plutôt que de supposer qu'elle s'appelle `statut`."""
+        out = self._get(f"/api/datastore/namespaces/{namespace}/schema", {}, org=org)
+        return out.get("schema") if isinstance(out, dict) else None
+
+    def aggregate(self, namespace: str, group_by: str,
+                  filter: Optional[dict] = None,
+                  org: Optional[int] = None) -> list[dict]:
+        """Le compte des lignes PAR VALEUR de `group_by`, sur le jeu filtré —
+        `[{<group_by>: valeur, "count": n}, …]`, calculé au serveur, sans
+        rapatrier les lignes (donc sans plafond de pagination à déclarer)."""
+        params = _params_filtre(filter, limit=1)
+        params.pop("limit")
+        params.update({"group_by": group_by,
+                       "metrics": json.dumps([{"op": "count"}])})
+        out = self._get(f"/api/datastore/namespaces/{namespace}/aggregate",
+                        params, org=org)
+        return out.get("groups") or []
 
     def row(self, namespace: str, row_id: str,
             org: Optional[int] = None) -> Optional[dict[str, Any]]:

@@ -80,7 +80,7 @@ def _lancer(monkeypatch, backend, traites, sur_traitement=None):
     monkeypatch.setattr(worker, "get_provider", lambda: _Provider)
     monkeypatch.setattr(worker, "_POLL_S", 0)
 
-    def _traiter(bk, job, prov):
+    def _traiter(bk, job, prov, journal_=None):
         traites.append(job["id"])
         if sur_traitement:
             sur_traitement(job)

@@ -23,6 +23,7 @@ from typing import Callable, Optional
 
 import yaml
 
+from . import journal
 from .backend import Backend, BackendError
 from .bilan import PERIODE_S as _BILAN_PERIODE_S
 from .bilan import ecrire_bilan
@@ -379,6 +380,12 @@ class FleetBilan:
     # Le motif vient du worker, seul à voir le déroulé. L'ordonnanceur ne le
     # recalcule pas : il ne sait pas ce qu'une étape veut dire.
     arrets: dict = field(default_factory=dict)
+    # Les travaux conclus dont le journal JSONL n'a PAS pu être relu d'ici.
+    # ⚠️ L'ordonnanceur ne nomme un journal qu'après l'avoir RELU : le 06/09 il a
+    # écrit « journal complet : passages/…/12670.jsonl » pour un fichier qui
+    # n'existait nulle part — le worker tournait ailleurs, sur une autre version.
+    # Un compte, et une conclusion en erreur, là où on lit le résultat.
+    journaux_absents: int = 0
 
 
 def run_fleet(spec: FleetSpec, backend: Backend, *,
@@ -515,11 +522,34 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                     continue
                 en_vol.discard(jid)
                 resultat = job.get("result") or {}
-                conclus[jid] = {"status": st, "result": resultat}
+                # Le journal JSONL du travail — RELU avant d'être nommé, jamais
+                # supposé (cf. `journal.relire`). Absent d'ici : compté, dit en
+                # erreur, et `null` pour le bilan.
+                chemin = journal.chemin(spec.name, jid)
+                niveau = logging.INFO if st == "done" else logging.WARNING
+                try:
+                    trace = f"journal complet : {journal.relu(chemin)}"
+                except journal.JournalIllisible as e:
+                    bilan.journaux_absents += 1
+                    chemin, niveau = None, logging.ERROR
+                    trace = (f"SANS JOURNAL RELU ({e}) — le worker qui a servi ce "
+                             "travail tourne ailleurs, ou sans journal")
+                # Le `run_id` relie le travail au journal des appels de l'org
+                # (chaque refus d'écriture porte le sien) : c'est par lui que le
+                # bilan nomme le job — et son journal JSONL — derrière un refus.
+                conclus[jid] = {"status": st, "result": resultat,
+                                "run_id": job.get("run_id"), "journal": chemin}
                 jetons_du_job = int(resultat.get("usage_tokens") or 0)
                 bilan.usage_tokens += jetons_du_job
                 motif = resultat.get("stopped") or "inconnu"
                 bilan.arrets[motif] = bilan.arrets.get(motif, 0) + 1
+                # Le journal de flotte reste compact : une ligne par travail
+                # conclu, qui POINTE vers le journal complet relu.
+                logger.log(niveau, "job %s %s (%s · %d jetons)%s — %s",
+                           jid, "conclu" if st == "done" else "FAILED", motif,
+                           jetons_du_job,
+                           "" if st == "done" else f" : {job.get('last_error')}",
+                           trace)
                 if st == "done":
                     bilan.done += 1
                     failed_consecutifs = 0
@@ -538,7 +568,6 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                 else:
                     bilan.failed += 1
                     failed_consecutifs += 1
-                    logger.warning("job %s FAILED : %s", jid, job.get("last_error"))
 
             try:
                 restantes = backend.count_rows(spec.namespace, filter=spec.filter,
@@ -632,6 +661,13 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                                  coupes, bilan.done + bilan.failed,
                                  ", ".join(f"{m}×{n}" for m, n in
                                            sorted(bilan.arrets.items())))
+                if bilan.journaux_absents:
+                    logger.error("⚠️ %d travail/travaux sur %d SANS JOURNAL RELU "
+                                 "depuis cet ordonnanceur (%s/<flotte>/<job>.jsonl) : "
+                                 "leur déroulé ne se relit que là où leur worker "
+                                 "tourne — s'il journalise.",
+                                 bilan.journaux_absents, bilan.done + bilan.failed,
+                                 journal.dossier())
                 if bilan.etat_muet:
                     logger.error("⚠️ ce passage a tourné EN AVEUGLE : %d geste(s) "
                                  "d'état n'ont pas pu être posés. Son avancement "

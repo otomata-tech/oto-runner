@@ -46,26 +46,34 @@ def _job(statut="done", jetons=1000, **outils):
             "result": {"usage_tokens": jetons, "tool_counts": dict(outils)}}
 
 
-def test_les_abouties_se_lisent_au_tableau():
-    """Une ligne aboutie = une ligne qui ne correspond PLUS au filtre de
-    réservation. Compter les jobs « done » comptait les tours perdus."""
+def test_les_sorties_se_lisent_au_tableau():
+    """Une ligne SORTIE = une ligne qui ne correspond PLUS au filtre de
+    réservation. Compter les jobs « done » comptait les tours perdus.
+
+    ⚠️ Ce poste s'appelait « abouties » : il comptait autant une ligne abandonnée
+    par la plateforme qu'une ligne enrichie. L'issue se lit au statut (cf.
+    `test_bilan_statuts.py`) ; sans schéma lisible, elle est OMISE avec sa
+    raison — jamais confondue avec la sortie de file."""
     b = BackendBilan(restantes=18)
     bilan = ecrire_bilan(_spec(), b, {1: _job(), 2: _job()},
                          lignes_initiales=30, secondes=120)
-    assert bilan["lignes"] == {"depart": 30, "restantes": 18, "abouties": 12}
-    assert bilan["jobs"]["termines"] == 2, "2 jobs conclus, 12 lignes abouties"
+    lignes = bilan["lignes"]
+    assert (lignes["depart"], lignes["restantes"], lignes["sorties"]) == (30, 18, 12)
+    assert lignes["abouties"] is None and "schéma" in lignes["abouties_omis"]
+    assert bilan["jobs"]["termines"] == 2, "2 jobs conclus, 12 lignes sorties"
 
 
 
 
-def test_le_cout_par_aboutie_vaut_null_quand_rien_nabouti():
-    """Zéro aboutie : le coût par ligne n'existe pas — null, jamais zéro ni
+def test_le_cout_par_ligne_vaut_null_quand_rien_nest_sorti():
+    """Zéro sortie : le coût par ligne n'existe pas — null, jamais zéro ni
     une division. Le total, lui, reste dû (il a été payé)."""
     b = BackendBilan(restantes=30)
     bilan = ecrire_bilan(_spec(), b, {1: _job(jetons=4000), 2: _job(jetons=2000)},
                          lignes_initiales=30, secondes=60)
-    assert bilan["lignes"]["abouties"] == 0
-    assert bilan["jetons"] == {"total": 6000, "par_job": 3000, "par_aboutie": None}
+    assert bilan["lignes"]["sorties"] == 0
+    assert bilan["jetons"] == {"total": 6000, "par_job": 3000,
+                               "par_sortie": None, "par_aboutie": None}
 
 
 
@@ -100,7 +108,8 @@ def test_un_backend_muet_ne_fabrique_pas_de_chiffre():
     bilan = ecrire_bilan(_spec(), Muet(), {1: _job()}, lignes_initiales=30,
                          secondes=60, arret="backend indisponible")
     assert bilan["lignes"]["restantes"] is None
-    assert bilan["lignes"]["abouties"] is None
+    assert bilan["lignes"]["sorties"] is None
+    assert bilan["jetons"]["par_sortie"] is None
     assert bilan["jetons"]["par_aboutie"] is None
 
 
@@ -170,28 +179,11 @@ def test_une_flotte_sans_declaration_sur_disque_ne_pose_rien(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-# ── Les refus, comptés PAR MOTIF ────────────────────────────────────────────
-# ⚠️ Sous un cran qui empêche la création, fabriquer une entreprise ne laisse
-# plus de ligne : ça devient un refus. Un zéro de lignes fantômes ne dira donc
-# plus que le geste a cessé — seulement qu'il ne réussit plus.
-
-def test_le_motif_d_un_refus_est_range_dans_un_poste_lisible():
-    from oto_runner.backend import _motif
-    assert _motif("400 business_key_required: la clé `siren` ...") == \
-        "création refusée par le cran"
-    assert _motif("row `000...` introuvable") == \
-        "ligne inconnue (identifiant inventé ou périmé)"
-    assert _motif("ligne déjà réservée par un autre run") == \
-        "ligne tenue par un autre travail"
-
-
-def test_un_motif_inconnu_garde_son_texte_plutot_que_d_aller_en_divers():
-    """⚠️ Un poste fourre-tout masque exactement le motif NEUF qu'on aurait
-    voulu voir apparaître — celui qu'aucune version précédente ne produisait."""
-    from oto_runner.backend import _motif
-    m = _motif("quota dépassé sur le connecteur amont")
-    assert m.startswith("autre : ")
-    assert "quota" in m
+# ── Les refus : ENTIERS, groupés par texte identique — plus aucun classificateur.
+# ⚠️ Il y avait ici quatre tests qui épinglaient une table de fragments rangeant
+# les refus sous des libellés inventés (« création refusée par le cran », « ligne
+# inconnue »). Relue contre les journaux serveur le 06/09/2026, elle inventait.
+# Les bancs des refus vivent dans `test_bilan_statuts.py`.
 
 
 # ── L'extinction se prouve par un ACTE D'EXTINCTION, pas par une date ───────
@@ -232,21 +224,3 @@ def test_une_accumulation_d_absences_ne_prouve_rien():
     """« Aucun dépôt depuis 2016 » date une ABSENCE, pas un acte."""
     assert _eteintes_sans_acte(
         "Aucun dépôt de comptes depuis 2016, aucun salarié, aucune trace web.") == 1
-
-
-# ── Le refus du cran a DEUX formes ──────────────────────────────────────────
-# ⚠️ Le compteur n'en cherchait qu'une. Il a donc rangé dans « autre » le seul
-# cas grave du quatrième passage — un agent écrivant une clé factice qui, sans
-# le cran, aurait créé une ligne fantôme — et le bilan a annoncé ZÉRO création
-# refusée. Un compteur qui rate le cas qu'il existe pour voir certifie qu'il ne
-# s'est rien passé.
-
-
-
-def test_une_ligne_tenue_par_un_autre_ne_devient_pas_une_creation():
-    """⚠️ Les deux motifs se ressemblent — « ne porte » ne doit pas avaler
-    « réservée par ». L'ordre des règles compte, et ce test le tient."""
-    from oto_runner.backend import _motif
-    assert _motif(
-        'ligne « 01a0 » réservée par « 9853 » jusqu\'à 2026-08-29'
-    ) == "ligne tenue par un autre travail"

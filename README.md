@@ -33,17 +33,59 @@ OTO_TOKEN=oto_…                      # jeton non porté du compte worker (une 
 ANTHROPIC_API_KEY=…                  # la clé de modèle = qui paie
 OTO_RUNNER_MODEL=claude-sonnet-5     # défaut assumé (coût) ; Opus par flotte si justifié
 OTO_RUNNER_ARMED=1                   # cf. ci-dessus
-OTO_RUNNER_FAUX_DEPARTS_DIR=…        # optionnel : où déposer la sortie d'un faux départ
+OTO_RUNNER_PASSAGES_DIR=passages     # où le worker écrit le JOURNAL de chaque travail
 OTO_RUNNER_RELANCES_MAX=0            # relances d'un fil qui rend un appel au client
 ```
 
-Le dépôt des faux départs est un outil de diagnostic qu'on arme : variable
-absente, rien n'est écrit. Posée, chaque job conclu en faux départ y laisse un
-`<job_id>.json` — outils appelés, **texte final intégral** de l'agent, et les
-entrées brutes du fournisseur quand il en rend : de quoi dire s'il a rédigé sa
-fiche en prose sans appeler l'écriture, s'il a renoncé, ou où le fil s'est
-arrêté. ⚠️ Ce fichier porte de la **donnée de la file de travail** : il est
-écrit en 0600, et **se purge après lecture**.
+## Le runner conserve TOUT : un journal par travail
+
+Nuit du 05 au 06/09/2026 : trois lignes, « abouties 3/3 », **7 écritures
+refusées sur 8** — et rien, après coup, pour dire ce que le modèle avait envoyé
+ni ce que le schéma lui avait répondu. Le bilan portait les motifs coupés à
+soixante caractères, juste avant la colonne et la raison ; le fil du run porte
+des sorties d'outils déjà tronquées pour le modèle ; la plateforme n'offre
+aucune lecture des jobs ; et le fournisseur OpenAI-compatible est sans état.
+*« Il faut que le runner conserve tout. »*
+
+Le worker écrit donc, pour chaque travail, un **JSONL** — un événement par
+ligne, horodaté, **écrit à chaque événement** (un travail qui plante laisse sa
+trace jusqu'au plantage) — dans `<OTO_RUNNER_PASSAGES_DIR>/<flotte>/<job_id>.jsonl`
+(`passages/` par défaut, relatif au répertoire courant du worker ; `<flotte>` est
+le nom de la déclaration, celui de `<flotte>.bilan.json` et `<flotte>.log` ;
+`hors-flotte` pour un travail sans flotte). Rien n'y est tronqué :
+
+```
+debut        le travail reçu (sans ses secrets), le fournisseur, le modèle demandé
+run          le run ouvert ou repris (et la taille du fil rechargé)
+systeme      le prompt système, l'allowlist, les plafonds
+historique   le fil rechargé, tel que transporté au modèle (reprise)
+utilisateur  le message initial (ou le message d'un `continue`)
+modele       un par tour : texte, appels AVEC leurs arguments complets, usage, modèle servi, blocs bruts
+outil        un par appel : arguments, sortie ENTIÈRE telle que rendue par le transport
+             (`tronque_pour_le_modele` dit si le modèle en a lu une version plafonnée), ok, durée
+fin          la raison d'arrêt, la réponse, l'usage cumulé
+resultat     le résultat DÉCLARÉ à la plateforme, l'outcome, la clôture du run
+erreur       le plantage : type, message ENTIER, pile
+```
+
+Sur le chemin Conversations : `conversation` (la requête entière, sans la clé),
+`reponse` (les `outputs` bruts), `relance`. Une ligne :
+
+```json
+{"t": "2026-09-06T01:23:10.412Z", "ev": "outil", "id": "call_1", "nom": "data_write", "arguments": {"namespace": "vivier", "key": "@claimed", "patch": {"qualification_piece": "cessation_registre"}}, "ok": false, "transport_ko": false, "duree_ms": 212, "texte": "Error calling tool 'data_write': écriture refusée par le schéma : …", "tronque_pour_le_modele": false}
+```
+
+⚠️ Trois règles. **Le fichier porte de la donnée de la file de travail** : 0600,
+répertoire 0700, jamais un secret (le jeton délégué et la clé de modèle n'y
+passent pas). **Une écriture qui échoue lève** — un runner qui cesserait de
+conserver en silence violerait le contrat ; le répertoire est vérifié au boot.
+**Personne n'annonce un journal sans l'avoir relu** : le worker comme
+l'ordonnanceur relisent le fichier (il existe, n'est pas vide, sa dernière ligne
+se parse) avant d'écrire « journal complet : … » ; sinon l'ordonnanceur dit
+`SANS JOURNAL RELU`, en erreur, compte (`journaux_absents`) et conclut dessus.
+Le journal est écrit **là où le worker tourne** : quand les workers sont sur une
+autre machine que l'ordonnanceur, c'est là qu'il se lit — et c'est précisément
+ce que « sans journal relu » signale.
 
 En mode Conversations, les outils sont exécutés par le connecteur : un appel
 d'outil qui REVIENT au client interrompt le fil, et le job conclut sans avoir
@@ -320,22 +362,39 @@ fin **quelle que soit la borne** — panne et interruption comprises, parce que
 c'est précisément ces jours-là qu'on le lit.
 
 ```
-bilan flotte prospects-demo : abouties 12/30 · faux départs 2 · 1,8 M jetons · 150,0 k/aboutie · data_write 14 appels, 0 refusé
+bilan flotte prospects-demo : sorties 12/30 · statut final : enrichi 10 · echec 2 · abouties 10 · 1,8 M jetons · 180,0 k/aboutie · data_write 14 appels, 2 refusés · Error calling tool 'data_write': écriture refusée par le schéma : `qualification_piece` = … ×2 · détail complet : prospects-demo.bilan.json
 ```
 
 Le même bilan se pose en JSON à côté de la déclaration (`flotte.yaml` →
-`flotte.bilan.json`, réécrit atomiquement à chaque fois) : lignes
-(départ / restantes / abouties), jobs (terminés / échoués / faux départs),
-jetons (total, par job, par ligne aboutie), écritures (réservations et
-écritures), et refus d'écriture.
+`flotte.bilan.json`, réécrit atomiquement à chaque fois) : lignes (départ /
+restantes / **sorties** / **par_statut** / **abouties**), jobs (terminés /
+échoués), jetons (total, par job, par sortie, par aboutie), et refus d'écriture
+(comptes, **motifs** = textes serveur entiers groupés par texte identique, et
+**detail** : quand, run, job, journal JSONL relu, texte complet).
 
-⚠️ **« Aboutie » se lit au TABLEAU, jamais aux jobs** : c'est une ligne qui ne
-correspond PLUS au `filter` de réservation. Le coût par ligne aboutie vaut
-`null` tant que rien n'a abouti — jamais un chiffre calculé sur zéro. Les refus
-d'écriture (`data_write` refusé par RBAC, quota ou schéma : le job conclut
-« done » sans une ligne écrite) se lisent au journal des appels de l'org, ce qui
-demande un `org:` dans la déclaration ; sans lui le poste est omis, et le bilan
-dit pourquoi.
+⚠️ **La sortie de la file n'est pas l'issue.** « Sortie » = une ligne qui ne
+correspond PLUS au `filter` de réservation — autant une ligne enrichie qu'une
+ligne basculée `echec` par la plateforme après trois réservations sans écriture.
+Le 06/09/2026 ce poste s'appelait « abouties » et disait « 3/3 » sur deux
+abandons. Le bilan lit désormais la **colonne de statut au schéma du tableau**
+(le field `role="status"`, avec son `lifecycle`) et ventile les lignes du
+périmètre — le filtre sans sa clause de statut — par valeur finale ;
+« abouties » ne compte que les états **terminaux hors `abandon_state`**. Trois
+états, jamais deux : `abouties` vaut `null` **avec sa raison** (`abouties_omis`)
+quand le schéma ne déclare pas de statut, quand le filtre ne borne que le
+statut (la ventilation porte alors sur tout le tableau), ou quand le périmètre
+porte plus de lignes terminales que de sorties (un lot rejoué). Le coût par
+ligne vaut `null` tant que rien n'est sorti — jamais un chiffre calculé sur zéro.
+
+Les refus d'écriture (`data_write` refusé par RBAC, quota ou schéma : le job
+conclut « done » sans une ligne écrite) se lisent au journal des appels de
+l'org, ce qui demande un `org:` dans la déclaration ; sans lui le poste est omis,
+et le bilan dit pourquoi. ⚠️ **Le bilan n'interprète plus un refus.** Il y avait
+un classificateur (« création refusée par le cran », « ligne inconnue ») : relu
+contre les journaux serveur le 06/09, il inventait — et il a été cru. Les textes
+sont conservés entiers, groupés par texte identique ; le journal de flotte les
+abrège à l'affichage et pointe vers le JSON, et au bilan de fin chaque refus
+est écrit entier sur sa ligne, avec le travail et le journal JSONL qui le portent.
 
 ## Tests
 

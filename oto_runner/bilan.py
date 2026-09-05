@@ -15,7 +15,14 @@ Deux règles de lecture, toutes deux payées cher :
 - **le coût se lit au résultat DÉCLARÉ des jobs** (`usage_tokens`,
   `tool_counts`), et les refus d'appel au
   JOURNAL des appels de l'org : une écriture refusée (RBAC, quota, schéma) ne
-  fait pas échouer le job — l'agent conclut « done » sans une ligne écrite.
+  fait pas échouer le job — l'agent conclut « done » sans une ligne écrite ;
+- **la sortie de la file n'est pas l'issue.** Une ligne sort du filtre de
+  réservation autant en finissant `echec` — l'état d'ABANDON du cycle de vie,
+  posé par la plateforme après trois réservations sans écriture — qu'en
+  finissant enrichie. « Abouties 3/3 » sur deux abandons (06/09/2026) : le bilan
+  ventile désormais les lignes par valeur FINALE de leur colonne de statut, lue
+  au schéma (`role="status"`), et « abouties » ne compte que les états terminaux
+  qui ne sont pas l'abandon. Les postes vivent dans `bilan_postes.py`.
 
 Rien ici n'arrête une flotte : une lecture qui échoue devient un poste `null`
 assumé et une ligne de journal, jamais un chiffre inventé ni un traceback qui
@@ -58,14 +65,15 @@ import tempfile
 from datetime import datetime, timezone
 from typing import Optional
 
+from .bilan_postes import (REFUS_OUTIL as _REFUS_OUTIL, abouties_de,
+                           lignes_par_statut, refus_ecriture, valeur)
+
+__all__ = ["ecrire_bilan", "annoter_lignes_sorties", "controler_fiches",
+           "extinction_sans_acte", "valeur", "chemin_json", "PERIODE_S"]
 
 logger = logging.getLogger("oto_runner.bilan")
 
 PERIODE_S = 600            # défaut du champ de déclaration `bilan_periode_s`
-_REFUS_OUTIL = "data_write"
-_REFUS_FENETRE_MAX_MIN = 24 * 60   # une campagne dure des semaines : on plafonne
-_REFUS_LIMITE = 200                # les N derniers appels lus au journal d'org
-
 
 
 def _postes_jobs(jobs: dict) -> dict:
@@ -99,36 +107,6 @@ def _restantes(spec, backend) -> Optional[int]:
         return None
 
 
-def _refus_ecriture(spec, backend, secondes: float) -> tuple[Optional[dict],
-                                                             Optional[str]]:
-    """« n appels, k refusés » sur `data_write`, lu au journal des appels d'org.
-
-    Rend (poste, raison de l'omission) — l'un des deux vaut toujours None : un
-    poste absent dit POURQUOI il l'est, il ne se confond jamais avec un zéro."""
-    if getattr(spec, "org", None) is None:
-        return None, "déclaration sans org : le journal des appels n'est pas lisible"
-    minutes = max(1, min(int(secondes // 60), _REFUS_FENETRE_MAX_MIN))
-    try:
-        n, ko = backend.tool_health(spec.org, _REFUS_OUTIL, minutes=minutes,
-                                    limit=_REFUS_LIMITE)
-    except Exception as e:  # noqa: BLE001 — la sonde ne tue pas la flotte
-        logger.warning("bilan : santé de %s illisible : %s", _REFUS_OUTIL, e)
-        return None, f"journal des appels illisible : {e}"
-    # ⚠️ Le DÉTAIL par motif, et non le seul compte. Sous un cran qui empêche la
-    # création, une tentative de fabriquer une entreprise ne laisse plus de ligne :
-    # elle devient un refus. Un refus ne se voit que si on le compte — sans ce
-    # poste, on lirait un progrès là où il n'y a qu'une protection qui tient.
-    try:
-        motifs = backend.refus_par_motif(spec.org, _REFUS_OUTIL, minutes=minutes,
-                                         limit=_REFUS_LIMITE)
-    except Exception as e:  # noqa: BLE001 — la sonde ne tue pas la flotte
-        logger.warning("bilan : motifs de refus illisibles : %s", e)
-        motifs = None
-    return ({"outil": _REFUS_OUTIL, "fenetre_minutes": minutes,
-             "limite": _REFUS_LIMITE, "appels": n, "refuses": ko,
-             "motifs": motifs}, None)
-
-
 def _jetons_lisibles(n: Optional[int]) -> str:
     """Un ordre de grandeur qui se lit d'un coup d'œil : « 1,8 M », « 24,1 k »."""
     if n is None:
@@ -140,16 +118,34 @@ def _jetons_lisibles(n: Optional[int]) -> str:
     return str(n)
 
 
-def _ligne(bilan: dict) -> str:
+_MOTIF_AFFICHE = 90   # sur la LIGNE de journal seulement : le JSON porte tout
+
+
+def _abrege(texte: str) -> str:
+    return texte if len(texte) <= _MOTIF_AFFICHE else texte[:_MOTIF_AFFICHE] + "…"
+
+
+def _ligne(bilan: dict, chemin: Optional[str]) -> str:
     """La ligne de journal : des effectifs bruts AVEC leur dénominateur — un
-    pourcentage cacherait qu'il porte sur trois lignes."""
-    lignes, jobs, jetons = bilan["lignes"], bilan["jobs"], bilan["jetons"]
-    abouties = "?" if lignes["abouties"] is None else lignes["abouties"]
-    postes = [f"abouties {abouties}/{lignes['depart']}",
-              f"{_jetons_lisibles(jetons['total'])} jetons"]
+    pourcentage cacherait qu'il porte sur trois lignes — et chaque poste NOMME
+    ce qu'il compte : « sorties » (de la file), « abouties » (état terminal hors
+    abandon), jamais l'un pour l'autre. Compacte : les motifs y sont abrégés, et
+    la ligne pointe vers le JSON qui les porte entiers."""
+    lignes, jetons = bilan["lignes"], bilan["jetons"]
+    sorties = "?" if lignes["sorties"] is None else lignes["sorties"]
+    postes = [f"sorties {sorties}/{lignes['depart']}"]
+    if lignes["par_statut"]:
+        postes.append("statut final : " + " · ".join(
+            f"{k} {n}" for k, n in sorted(lignes["par_statut"].items(),
+                                           key=lambda kv: -kv[1])))
+    postes.append(f"abouties {lignes['abouties']}" if lignes["abouties"] is not None
+                  else f"abouties non mesurées ({lignes['abouties_omis']})")
+    postes.append(f"{_jetons_lisibles(jetons['total'])} jetons")
     postes.append(f"{_jetons_lisibles(jetons['par_aboutie'])}/aboutie"
                   if jetons["par_aboutie"] is not None
-                  else "pas de jetons/aboutie (0 aboutie)")
+                  else f"{_jetons_lisibles(jetons['par_sortie'])}/sortie"
+                  if jetons["par_sortie"] is not None
+                  else "pas de jetons/sortie (0 sortie)")
     refus = bilan["refus_ecriture"]
     if refus:
         postes.append(f"{refus['outil']} {refus['appels']} appels, "
@@ -158,11 +154,24 @@ def _ligne(bilan: dict) -> str:
         # pas si les agents inventent des entreprises ou oublient un jeton.
         for poste, n in sorted((refus.get("motifs") or {}).items(),
                                key=lambda kv: -kv[1])[:2]:
-            postes.append(f"{poste} ×{n}")
+            postes.append(f"{_abrege(poste)} ×{n}")
     else:
         postes.append(f"{_REFUS_OUTIL} non mesuré "
                       f"({bilan['refus_ecriture_omis']})")
+    if chemin:
+        postes.append(f"détail complet : {chemin}")
     return f"bilan flotte {bilan['flotte']} : " + " · ".join(postes)
+
+
+def _journaliser_refus(refus: Optional[dict]) -> None:
+    """Au bilan de FIN : chaque refus ENTIER sur sa ligne, avec le travail et le
+    journal JSONL qui le portent — le journal de flotte peut rester compact à
+    condition de mener au détail."""
+    for r in (refus or {}).get("detail") or []:
+        logger.info("refus %s à %s UTC — job %s : %s — journal du job : %s",
+                    refus["outil"], r["quand"], r["job"] or "? (run %s, hors "
+                    "de cette flotte ou non conclu)" % r["run_id"], r["erreur"],
+                    r["journal"] or "—")
 
 
 def chemin_json(spec) -> Optional[str]:
@@ -268,10 +277,6 @@ ACTE_EXTINCTION = re.compile(
     r"|jugement d'ouverture|redressement judiciaire"
     r"|reprise par|absorbée par|absorbee par|fusion-absorption",
     re.I)
-
-
-def valeur(x):
-    return x.get("valeur") if isinstance(x, dict) and "valeur" in x else x
 
 
 def extinction_sans_acte(fiche: dict) -> bool:
@@ -422,12 +427,16 @@ def ecrire_bilan(spec, backend, jobs: dict, *, lignes_initiales: int,
     pour que l'appelant n'ait rien à recalculer."""
     postes = _postes_jobs(jobs)
     restantes = _restantes(spec, backend)
-    abouties = None if restantes is None else max(0, lignes_initiales - restantes)
+    # ex-« abouties » : les lignes qui ne correspondent PLUS au filtre — sorties
+    # de la file, quelle qu'en soit l'issue. L'issue, c'est le statut.
+    sorties = None if restantes is None else max(0, lignes_initiales - restantes)
+    statut = lignes_par_statut(spec, backend)
+    abouties, abouties_omis = abouties_de(statut, sorties)
     conclus = postes["termines"] + postes["echoues"]
-    refus, refus_omis = _refus_ecriture(spec, backend, secondes)
+    refus, refus_omis = refus_ecriture(spec, backend, secondes, jobs)
     # Seulement au bilan de FIN : une ligne peut encore sortir pendant la flotte,
     # et l'annoter à chaque tour ferait du bruit sans rien apprendre.
-    sorties = annoter_lignes_sorties(spec, backend, jobs) if arret else None
+    annotees = annoter_lignes_sorties(spec, backend, jobs) if arret else None
     controles = controler_fiches(spec, backend, jobs) if arret else None
     bilan = {
         "horodatage": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -440,18 +449,28 @@ def ecrire_bilan(spec, backend, jobs: dict, *, lignes_initiales: int,
         "arret": arret or None,
         "secondes": round(float(secondes), 1),
         "lignes": {"depart": lignes_initiales, "restantes": restantes,
-                   "abouties": abouties},
+                   "sorties": sorties,
+                   # La valeur FINALE de la colonne de statut, sur le périmètre
+                   # du passage (le filtre sans sa clause de statut).
+                   "par_statut": statut.get("par_statut"),
+                   "statut": {k: statut[k] for k in ("colonne", "perimetre",
+                                                     "abandon", "terminaux", "omis")
+                              if k in statut},
+                   # Terminales hors abandon — null AVEC sa raison sinon.
+                   "abouties": abouties, "abouties_omis": abouties_omis},
         "jobs": {"termines": postes["termines"], "echoues": postes["echoues"],},
         # ⚠️ Compté À PART, jamais fondu dans « abouties » : un bilan qui rend
         # « 98 traitées » sans dire que 2 sont sorties muettes rend un
         # dénominateur amputé qui a l'air complet.
-        "lignes_sorties": sorties,
+        "lignes_sorties": annotees,
         # Deux contradictions internes qu'une grille de six critères a laissées
         # passer, toutes deux attrapables par une requête : une estampille qui
         # nomme le mauvais modèle, une fiche éteinte dont les notes disent « actif ».
         "controles": controles,
         "jetons": {"total": postes["jetons"],
                    "par_job": round(postes["jetons"] / conclus) if conclus else None,
+                   "par_sortie": (round(postes["jetons"] / sorties)
+                                  if sorties else None),
                    # Le vrai coût d'une campagne : ce que coûte une ligne qui
                    # ABOUTIT, jamais ce que coûte un job (un job peut n'avoir
                    # rien produit). Aucune aboutie ⟹ null, pas une division.
@@ -460,8 +479,10 @@ def ecrire_bilan(spec, backend, jobs: dict, *, lignes_initiales: int,
         "refus_ecriture": refus,
         "refus_ecriture_omis": refus_omis,
     }
-    logger.info("%s", _ligne(bilan))
     chemin = chemin_json(spec)
+    logger.info("%s", _ligne(bilan, chemin))
+    if arret:
+        _journaliser_refus(refus)
     if chemin:
         _ecrire(chemin, bilan)
     else:

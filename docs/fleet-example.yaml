@@ -14,7 +14,12 @@ filter: {statut: a_traiter}       # ce qui reste à traiter (borne + comptage)
 project: 42                       # le contexte de chaque appel (_project)
 
 tools:                            # l'allowlist du run — fail-closed côté worker
-  - data_claim_next
+  - data_claim_next               # réserver une ligne…
+  - data_release                  # …et pouvoir la RENDRE : les deux vont ensemble.
+                                  # Sans `data_release`, un agent qui conclut sans
+                                  # écrire garde sa ligne sous bail jusqu'à
+                                  # l'expiration (10 min) — et toute flotte copiée
+                                  # d'ici réservait sans pouvoir rendre.
   - data_write
   - fr_get
   - serper_search
