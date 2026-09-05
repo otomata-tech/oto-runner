@@ -52,38 +52,19 @@ def test_aucun_texte_de_repli_ne_subsiste_dans_le_worker():
     assert not replis, f"le worker compose encore : {replis}"
 
 
-# ── et l'objet nommé doit avoir quelque chose à appliquer ─────────────────────
-
-def test_une_procedure_nommee_mais_vide_arrete_l_agent(monkeypatch):
-    """Le pire cas de ce chemin : rien n'échoue. L'agent reçoit « lis la
-    procédure X et applique-la » avec une section Procédure vide, improvise, et
-    ce que valent les lignes écrites ne se découvre qu'en les relisant."""
-    import pytest
-
-    class _McpVide(_McpMuet):
-        def outil(self, nom, args=None):
-            return {"run_id": "run-1", "body_md": "   "}
-
-    monkeypatch.setattr(worker, "McpSession", _McpVide)
-    job = {"id": 31, "kind": "start", "delegated_token": "oto_delegue",
-           "payload": {"project_id": 3, "org_id": 42, "procedure": "veille",
-                       "input": "Lis la procédure `veille` et applique-la."}}
-
-    class _P:
-        __name__ = "agent_llm"
-        ONE_SHOT = False
-
-        @staticmethod
-        def model():
-            return "m"
-
-    with pytest.raises(worker.ProcedureVide) as e:
-        worker._traiter(_BackendMuet(), job, _P)
-    assert "`veille`" in str(e.value)
-
-
-def test_un_travail_sans_procedure_nommee_reste_possible():
-    """L'instruction fait foi seule : c'est un usage légitime, pas une anomalie.
-    Refuser ici fermerait un chemin qui marche pour attraper un cas voisin."""
-    assert worker._corps_applicable({"body_md": ""}, None) == ""
-    assert worker._corps_applicable({}, "") == ""
+# ── ce que le worker ne juge plus, parce qu'il ne le connaît plus ────────────
+#
+# ⚠️ Deux bancs vivaient ici, retirés le 05/09/2026 avec le concept qu'ils
+# gardaient : « une procédure nommée mais vide arrête l'agent » et « un travail
+# sans procédure nommée reste possible ».
+#
+# Ils n'étaient pas faux — ils supposaient seulement que tout travail applique une
+# PROCÉDURE. Or le worker héberge une boucle agentique : la même instruction,
+# collée dans n'importe quel client, ferait le même travail sans qu'aucune
+# procédure existe. Un agent peut trier une boîte, faire une veille, relancer
+# quelqu'un. Le worker ne charge donc plus aucun objet et n'en juge aucun ; si
+# l'instruction suppose d'en lire un, c'est l'AGENT qui le lit, avec ses outils.
+#
+# Ce que le worker refuse encore est ce qui l'empêche, LUI, de travailler : une
+# instruction absente (il n'en compose pas) et un porteur absent (il n'a pas
+# d'identité à prêter). Les bancs de ces deux-là sont ci-dessus.

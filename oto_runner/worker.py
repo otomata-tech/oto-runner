@@ -6,10 +6,10 @@ d'architecture (chantier runner R2) — ce cran rend la gate MÉCANIQUE : un wor
 lancé par accident ne consomme rien, il explique et sort. Une fois la gate levée,
 armer = une ligne dans l'unit.
 
-Le cycle d'un job :
-- `start`   : ouvrir le run (`run_start`, sous `_project` du payload), le lier au
-  job (`bind_run`), jouer la boucle sur un fil NEUF, apposer chaque tour au fil,
-  clore (`run_finish` + `complete`).
+Le cycle d'un travail :
+- `start`   : ouvrir un run TECHNIQUE (`run_start`, libellé du travail), le lier
+  au travail (`bind_run`), jouer la boucle sur un fil NEUF avec l'instruction
+  reçue, apposer chaque tour au fil, clore.
 - `continue`: RECHARGER le fil du run (`thread_read include_raw` — les
   `provider_raw`, rejoués verbatim), jouer la boucle avec le message du payload
   (ou sans rien : reprise après une mort en plein tour), apposer, clore le job.
@@ -160,11 +160,25 @@ _MOTIF_RETABLI = ("fichier-client — valeur d'origine rétablie par le contrôl
                   "l'écriture de ce passage l'avait remplacée")
 
 
-def _spec_du_job(job: dict, procedure_md: str) -> AgentSpec:
+def _spec_du_job(job: dict) -> AgentSpec:
+    """Le cadre d'exécution, et RIEN D'AUTRE.
+
+    ⚠️ Le prompt système portait une section « ## Procédure », que le worker
+    remplissait en allant lire l'objet nommé par le travail. C'était un concept
+    OTO dans le transport : un agent peut faire tout autre chose qu'appliquer une
+    procédure — une veille, un tri, une relance — et la même instruction, collée
+    dans n'importe quel client, produirait le même travail sans qu'aucune
+    procédure existe.
+
+    Le worker héberge une boucle agentique : il injecte l'instruction reçue et
+    laisse tourner. Si le travail suppose de lire un objet, c'est l'INSTRUCTION
+    qui le dit et l'AGENT qui le lit — avec ses outils, comme il le ferait de
+    lui-même.
+    """
     p = job.get("payload") or {}
     outils = frozenset(p.get("tools") or ())
     return AgentSpec(
-        system=_SYSTEM_FRAME + "\n\n## Procédure\n\n" + procedure_md,
+        system=_SYSTEM_FRAME,
         tools=outils,
         max_steps=int(p.get("max_steps") or agent_runtime.DEFAULT_MAX_STEPS),
         # ⚠️ Le plafond de JETONS du déroulé, posé par qui enfile. Absent = pas de
@@ -193,20 +207,6 @@ class SansInstruction(RuntimeError):
     """
 
 
-class ProcedureVide(RuntimeError):
-    """L'objet que l'instruction désigne n'a rien à appliquer.
-
-    ⚠️ Le pire cas de tout ce chemin, parce qu'il ne ressemble pas à une panne :
-    l'agent reçoit « lis la procédure `X` et applique-la » avec une section
-    Procédure VIDE, et il improvise. Rien n'échoue, des lignes s'écrivent, et
-    ce qu'elles valent ne se découvre qu'en les relisant une par une.
-
-    Le worker ne juge pas ce qu'une procédure contient — il ne sait pas ce que
-    ce travail veut dire. Il constate seulement qu'un objet a été NOMMÉ et qu'il
-    est vide, ce qui est mesurable sans rien comprendre au métier.
-    """
-
-
 class SansPorteur(RuntimeError):
     """Ce travail n'a personne à impersonner.
 
@@ -225,21 +225,6 @@ class SansPorteur(RuntimeError):
 class IdentiteInvalide(RuntimeError):
     """Le porteur du travail ne peut plus agir — le serveur l'a dit et a arrêté
     le travail. ⚠️ **Ne pas retenter** : réessayer rejouerait le même verdict."""
-
-
-def _corps_applicable(procedure: dict, slug: str) -> str:
-    """Le corps de la procédure nommée — ou un refus franc si elle est vide.
-
-    Sans slug, il n'y a pas d'objet à appliquer et l'instruction fait foi seule :
-    c'est un usage légitime, on ne le refuse pas.
-    """
-    corps = ((procedure or {}).get("body_md") or "").strip()
-    if slug and not corps:
-        raise ProcedureVide(
-            f"la procédure `{slug}` est vide ou introuvable : le travail dit de "
-            "l'appliquer, et il n'y a rien à appliquer. L'agent ne part pas — il "
-            "improviserait, et ça ne se verrait que dans ce qu'il aurait écrit.")
-    return corps
 
 
 def _instruction_du(job: dict) -> str:
@@ -283,9 +268,11 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
     # eu lieu avant la mort) — il REPREND son fil au lieu de rouvrir un run
     # neuf. Sans ça, chaque kill -9 fabriquait un run orphelin et un doublon.
     if job["kind"] == "start" and not job.get("run_id"):
-        procedure = mcp.outil("oto_procedure", {"op": "get", "slug": p["procedure"]})
-        d = mcp.outil("run_start", {"label": p.get("label") or f"run hébergé — {p['procedure']}",
-                                    "doctrine": p["procedure"]})
+        # ⚠️ Le libellé est TECHNIQUE : le worker ne sait pas ce que ce travail
+        # fait. Il portait le nom de la procédure et la posait en `doctrine` —
+        # deux concepts oto dans un hôte qui n'a pas à les connaître.
+        d = mcp.outil("run_start",
+                      {"label": p.get("label") or f"travail hébergé {job.get('id')}"})
         run_id = d.get("run_id")
         if not run_id:
             # Un blip transport peut rendre un succès au contenu dégradé (le
@@ -300,16 +287,12 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         tours = backend.thread_read(run_id, include_raw=True)
         historique = _assainir_pour_transport(
             [t["provider_raw"] for t in tours if t.get("provider_raw")])
-        # La procédure se recharge à CHAQUE job — jamais figée dans le fil.
-        slug = p.get("procedure")
-        procedure = (mcp.outil("oto_procedure", {"op": "get", "slug": slug})
-                     if slug else {"body_md": ""})
         # Un `continue` porte son message user ; un start repris n'ajoute RIEN :
         # son message initial est DÉJÀ dans le fil (apposé au premier vol).
         prompt = p.get("input") if job["kind"] == "continue" else None
 
     mcp.run_id = run_id
-    spec = _spec_du_job(job, _corps_applicable(procedure, p.get("procedure")))
+    spec = _spec_du_job(job)
 
     def apposer(role: str, neutre: dict, brut: dict) -> None:
         # L'appose du fil EST la persistance : elle mérite des rejeux avant de
