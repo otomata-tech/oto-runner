@@ -135,7 +135,7 @@ def test_la_boucle_distingue_la_panne_de_transport_de_lerreur_doutil():
 
 
 def _job():
-    return {"id": 7, "kind": "start", "run_id": None,
+    return {"id": 7, "kind": "start", "delegated_token": "oto_delegue", "run_id": None,
             "payload": {"procedure": "demo", "namespace": "lignes-demo",
                         "tools": [_CLAIM, _WRITE], "input": "Vas-y.",
                         "max_steps": 3}}

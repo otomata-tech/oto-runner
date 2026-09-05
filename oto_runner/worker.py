@@ -207,6 +207,21 @@ class ProcedureVide(RuntimeError):
     """
 
 
+class SansPorteur(RuntimeError):
+    """Ce travail n'a personne à impersonner.
+
+    ⚠️ Le worker est un SERVEUR de boucles agentiques : chaque boucle agit au nom
+    de son user, et le serveur n'a **aucune identité métier**. Faute de jeton
+    délégué, la session retombait sur celui du worker — un agent qui écrit au nom
+    du compte hébergeant le runner. Rien ne le signale : les écritures
+    aboutissent, seule l'attribution est fausse.
+
+    Le serveur refuse donc de prêter la sienne. Le backend refuse déjà à la
+    réservation (oto-backend#880) ; ceci est le dernier ressort, pour un serveur
+    d'une version antérieure.
+    """
+
+
 class IdentiteInvalide(RuntimeError):
     """Le porteur du travail ne peut plus agir — le serveur l'a dit et a arrêté
     le travail. ⚠️ **Ne pas retenter** : réessayer rejouerait le même verdict."""
@@ -250,8 +265,13 @@ def _traiter(backend: Backend, job: dict, provider) -> None:
         # Le serveur a DÉJÀ marqué le travail en échec avec sa raison. On la
         # remonte au journal et on passe : la retenter serait rejouer le refus.
         raise IdentiteInvalide(refus)
-    mcp = McpSession(project=projet, org=p.get("org_id"),
-                     token=job.get("delegated_token") or None)
+    jeton = job.get("delegated_token")
+    if not jeton:
+        raise SansPorteur(
+            f"le travail {job.get('id')} n'a pas de jeton délégué : personne à "
+            "impersonner. Le worker n'a pas d'identité métier à prêter — "
+            "reprogramme-le, il partira au nom de qui le demande.")
+    mcp = McpSession(project=projet, org=p.get("org_id"), token=jeton)
     # ⚠️ La clé de modèle de l'org, remise avec CE travail. Elle ne vit pas plus
     # longtemps que lui : la garder d'un travail à l'autre ferait payer une org
     # pour le travail d'une autre — et le seul endroit où ça se verrait serait
