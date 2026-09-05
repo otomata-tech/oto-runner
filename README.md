@@ -134,6 +134,32 @@ Chaque job conclu déclare son coût et sa sortie (`usage_tokens`,
 fil. `usage_tokens` reste **input + output** — la base des bornes de flotte
 (budget, rendement) ne bouge pas ; le cache se compte à côté.
 
+## ⚠️ Le 05/09/2026 à 13:05 UTC, `oto_procedure` a changé de sens
+
+Le worker **chargeait** la procédure nommée par un travail et l'injectait dans le
+prompt système. Depuis le déploiement `dc78c10c`, il ne connaît plus cet objet :
+si un travail suppose de lire une procédure, c'est **son instruction qui le dit**
+et **l'agent qui la lit**.
+
+Conséquence pour quiconque relit un relevé d'outils (`tool_counts`), et c'est un
+piège d'interprétation à double sens :
+
+| dans un travail… | absence d'appel à `oto_procedure` |
+|---|---|
+| **avant** le 05/09 13:05 UTC | **normale** — l'agent n'avait aucune raison d'appeler ce qu'il avait déjà dans son prompt |
+| **après** | **signale une consigne jamais lue** — l'agent a travaillé sur sa seule instruction |
+
+**Même chiffre, sens opposé, et la bascule est un déploiement — donc invisible
+dans les données.** Relire un ancien log avec la grille d'aujourd'hui fait
+conclure à un désastre qui n'a pas eu lieu ; relire un log récent avec la grille
+d'hier fait se rassurer sur un précédent qui ne vaut plus.
+
+Le cas qui a fait écrire ce paragraphe : une campagne de 504 fiches clientes dont
+l'instruction, réécrite la veille pour une autre raison, avait perdu la seule
+phrase qui nommait la procédure. Elle fonctionnait parce que le worker injectait ;
+après ce déploiement, elle aurait produit 504 fiches improvisées **sans une seule
+erreur**, et le bilan aurait annoncé « 504 abouties ».
+
 ## Il n'y a PAS d'instruction par défaut
 
 Le worker **exécute** une instruction, il n'en **compose** pas. Il ne sait pas ce
