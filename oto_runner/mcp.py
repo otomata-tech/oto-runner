@@ -86,6 +86,7 @@ class McpSession:
         self.session: Optional[str] = None
         self._n = 0
         self._props: Optional[dict] = None   # tool → propriétés d'entrée déclarées
+        self._outils: Optional[list] = None  # le tools/list de la session, lu UNE fois
         self._ouvrir()
 
     def _post(self, corps: dict, avec_entetes: bool = False):
@@ -134,21 +135,25 @@ class McpSession:
         """Les schémas de l'allowlist, au format modèle — lus du tools/list de la
         session (donc déjà filtrés par la visibilité du COMPTE du worker : deux
         crans, le compte puis l'allowlist du job)."""
-        self._n += 1
-        d = self._post({"jsonrpc": "2.0", "id": self._n,
-                        "method": "tools/list", "params": {}})
-        outils = (d.get("result") or {}).get("tools")
-        if not outils:
-            # Un tools/list qui échoue (502 en vol) laissait un cache VIDE :
-            # le fail-safe ne posait plus AUCUN jeton, et le job mourait plus
-            # loin sur une erreur MÉTIER trompeuse (« Aucune doctrine (scope
-            # org) », vécu — jamais rejouée car non transitoire). Échec NET
-            # ici : le retry de job repart d'une session saine.
-            raise RuntimeError(
-                f"tools/list vide ou en erreur ({str(d)[:120]}) — session dégradée")
+        if self._outils is None:
+            # Une session vit un travail : le catalogue se lit UNE fois, et sert
+            # aux schémas comme au relevé d'écart (`catalogue`).
+            self._n += 1
+            d = self._post({"jsonrpc": "2.0", "id": self._n,
+                            "method": "tools/list", "params": {}})
+            outils = (d.get("result") or {}).get("tools")
+            if not outils:
+                # Un tools/list qui échoue (502 en vol) laissait un cache VIDE :
+                # le fail-safe ne posait plus AUCUN jeton, et le job mourait plus
+                # loin sur une erreur MÉTIER trompeuse (« Aucune doctrine (scope
+                # org) », vécu — jamais rejouée car non transitoire). Échec NET
+                # ici : le retry de job repart d'une session saine.
+                raise RuntimeError(
+                    f"tools/list vide ou en erreur ({str(d)[:120]}) — session dégradée")
+            self._outils = list(outils)
         out = []
         self._props = {}
-        for t in outils:
+        for t in self._outils:
             props = ((t.get("inputSchema") or {}).get("properties") or {})
             self._props[t.get("name") or ""] = frozenset(props)
             if t.get("name") in names:
@@ -157,6 +162,15 @@ class McpSession:
                             "input_schema": t.get("inputSchema")
                             or {"type": "object", "properties": {}}})
         return out
+
+    def catalogue(self) -> frozenset:
+        """TOUS les noms d'outils que la session voit — pour dire, au journal du
+        travail, l'ÉCART entre ce que l'instruction nomme et ce que l'allowlist
+        autorise. 06/09/2026 : « avec `oto_procedure` » dans l'instruction,
+        `oto_procedure` absent de `tools` — et l'agent n'a jamais lu la consigne."""
+        if self._props is None:
+            self.schemas(frozenset())
+        return frozenset(self._props)
 
     def _declares(self, name: str) -> frozenset:
         """Les propriétés d'entrée DÉCLARÉES par ce tool. C'est ce qui rend la

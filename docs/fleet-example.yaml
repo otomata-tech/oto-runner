@@ -13,7 +13,25 @@ namespace: prospects-demo         # la file : le tableau datastore à drainer
 filter: {statut: a_traiter}       # ce qui reste à traiter (borne + comptage)
 project: 42                       # le contexte de chaque appel (_project)
 
+# L'INSTRUCTION de départ — OBLIGATOIRE : le worker n'en compose pas (il ne sait
+# pas ce que le travail fait). `{namespace}` et `{filter}` sont interpolés. Elle
+# nomme la file, dit de LIRE la procédure (avec `oto_procedure`, autorisé
+# ci-dessous), et d'où viennent les données — cf. README, « quatre gestes ».
+input: >
+  Lis d'abord la procédure `enrichissement-fiche` avec oto_procedure et applique-la :
+  elle fait autorité. Ta file de travail est le tableau `{namespace}`, filtre {filter}.
+  Réserve UNE ligne avec data_claim_next ; si la réservation ne rend rien, la file
+  est vide : conclus. Tout ce que tu ajoutes vient d'une source ouverte pendant ce
+  run (fr_get, serper_search) — recopier la ligne n'apporte rien, la compléter de
+  mémoire est une invention, même plausible. Écris la fiche sur @claimed avec
+  data_write, puis conclus ton run.
+
 tools:                            # l'allowlist du run — fail-closed côté worker
+  - oto_procedure                 # LIRE la procédure nommée ci-dessus : le worker
+                                  # n'injecte rien, c'est l'agent qui la lit — avec
+                                  # cet outil. Sans lui, « Outil indisponible » et
+                                  # l'agent travaille sans consigne (vécu 04–06/09) ;
+                                  # la déclaration est REFUSÉE au chargement.
   - data_claim_next               # réserver une ligne…
   - data_release                  # …et pouvoir la RENDRE : les deux vont ensemble.
                                   # Sans `data_release`, un agent qui conclut sans
@@ -31,11 +49,13 @@ budget_tokens: 5000000            # cap de sécurité — la flotte s'arrête PR
 max_steps: 40                     # tours de modèle par run ; le run se ré-enfile
                                   # via la flotte tant que la file n'est pas vide
 
-# Le RENDEMENT : ce que la campagne PRODUIT rapporté à ce qu'elle coûte. Sans
-# `jetons_par_ecriture_max`, la borne est inactive.
-jetons_par_ecriture_max: 40000    # plafond de jetons par écriture, sur la fenêtre
-rendement_fenetre: 10             # fenêtre glissante de jobs conclus (défaut 10) ;
-                                  # tant qu'elle n'est pas pleine, aucun verdict
+# Le plafond de jetons d'UNE LIGNE, descendu dans chaque travail et appliqué par
+# l'agent lui-même. Absent = pas de borne (65 571 jetons sur une ligne, 01/09).
+# ⚠️ Cet exemple a porté jusqu'au 06/09 deux réglages qui n'ont JAMAIS existé
+# dans le code (`jetons_par_ecriture_max`, `rendement_fenetre`) : qui le copiait
+# partait sans borne en croyant en avoir une. Le runner avertit sur tout champ
+# inconnu — et cet exemple n'en porte plus aucun (un test le tient).
+max_tokens_per_row: 40000
 
 # Le BILAN : il retombe à cette cadence pendant le vol, et une fois à la fin.
 # Il se pose à côté de cette déclaration, en JSON : `<ce fichier>.bilan.json`.

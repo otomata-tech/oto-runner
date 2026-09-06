@@ -75,10 +75,28 @@ def base_url() -> str:
 
 
 def max_tokens() -> int:
-    try:
-        return int(os.environ.get("OTO_RUNNER_MAX_TOKENS", "") or DEFAULT_MAX_TOKENS)
-    except ValueError:
+    """`OTO_RUNNER_MAX_TOKENS` — le plafond de COMPLÉTION d'un tour (défaut 8192).
+
+    ⚠️ Sur Scaleway les jetons de RAISONNEMENT partagent ce plafond avec la
+    réponse : une fiche fait 3–6 k, et 8192 coupe la réponse quand le modèle a
+    raisonné avant (`finish_reason: length`, visible dans le journal du travail
+    au `stop_reason` du tour). Le régler par flotte est une affaire d'env du
+    worker, comme le modèle."""
+    brut = os.environ.get("OTO_RUNNER_MAX_TOKENS", "").strip()
+    if not brut:
         return DEFAULT_MAX_TOKENS
+    if not brut.isdigit() or int(brut) < 1:
+        raise LlmUnavailable(f"OTO_RUNNER_MAX_TOKENS = {brut!r} : un entier ≥ 1 est attendu")
+    return int(brut)
+
+
+def effort() -> Optional[str]:
+    """`OTO_RUNNER_EFFORT`, envoyé en `reasoning_effort` (le nom OpenAI-compatible)
+    quand il est posé ; absent = on n'envoie RIEN et le fournisseur applique son
+    défaut. ⚠️ Scaleway active le raisonnement par défaut et le FACTURE : ne pas
+    pouvoir le régler coûte. Aucune valeur par défaut ici — la variable n'était lue
+    que côté Anthropic (`output_config.effort`), et personne ne le savait."""
+    return os.environ.get("OTO_RUNNER_EFFORT", "").strip() or None
 
 
 # ⚠️ Ce provider parle à un hôte CONFIGURABLE (Scaleway par défaut, mais aussi
@@ -156,6 +174,8 @@ def complete(*, system: str, messages: list, tools: list[dict],
     }
     if tools:
         corps["tools"] = tools
+    if effort():
+        corps["reasoning_effort"] = effort()
     r = _post_borne(base_url() + "/chat/completions", corps,
                     {"Authorization": f"Bearer {api_key or resolve_key()}"})
     if r.status_code >= 400:

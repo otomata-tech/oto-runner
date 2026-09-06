@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 
-from oto_runner import fleet
+from oto_runner import declaration, fleet
 
 
 # Ce que la campagne porte côté serveur, hors état et métadonnées : la liste des
@@ -49,8 +49,10 @@ _NON_LUS = {
 
 
 def _lus_par_le_runner() -> set[str]:
-    """Les clés que `spec_depuis_flotte` lit RÉELLEMENT dans la campagne servie."""
-    s = open(fleet.__file__).read()
+    """Les clés que `spec_depuis_flotte` lit RÉELLEMENT dans la campagne servie
+    (la déclaration vit dans `declaration.py` depuis le 06/09, partagée avec le
+    mode direct)."""
+    s = open(declaration.__file__).read()
     i = s.index("def spec_depuis_flotte")
     j = s.index("\ndef ", i + 10)
     corps = s[i:j]
@@ -94,7 +96,7 @@ def test_aucune_exclusion_ne_survit_a_sa_lecture():
 def test_la_borne_declaree_gagne_sur_le_defaut():
     """Et elle agit : ce n'est pas qu'une lecture, c'est la valeur appliquée."""
     spec = fleet.spec_depuis_flotte(
-        {"id": 1, "procedure": "p", "namespace": "n", "tools": ["data_write"],
+        {"id": 1, "procedure": "p", "namespace": "n", "tools": ["data_write", "oto_procedure"],
          "input": "fais ceci", "max_consecutive_failures": 7})
     assert spec.max_consecutive_failures == 7
     corps = open(fleet.__file__).read()

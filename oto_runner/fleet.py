@@ -7,26 +7,24 @@ maintenir la concurrence déclarée, et s'arrêter proprement sur l'une des
 bornes — file vide, volume, budget de jetons, rendement effondré, ou trop
 d'échecs consécutifs.
 
-La déclaration est un YAML par flotte (cf. `docs/fleet-example.yaml`) — jamais
-un secret dedans : le jeton et la clé de modèle viennent de l'environnement.
-⚠️ Le worker est un pool HOMOGÈNE : son modèle vient de SON environnement
-(`OTO_RUNNER_MODEL`), pas de la déclaration — un champ `model` dans le YAML
-est logué puis ignoré, pour que la divergence soit VISIBLE, jamais silencieuse.
+La déclaration (un YAML par flotte, cf. `docs/fleet-example.yaml`) et le travail
+qu'elle fait enfiler vivent dans `declaration.py`, partagés avec le mode direct.
 """
 from __future__ import annotations
 
 import logging
-import os
 import time
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from typing import Callable, Optional
-
-import yaml
 
 from . import journal
 from .backend import Backend, BackendError
-from .bilan import PERIODE_S as _BILAN_PERIODE_S
 from .bilan import ecrire_bilan
+# La déclaration et le travail qu'elle construit vivent dans `declaration.py`,
+# partagés avec le mode direct ; réexportés ici pour qui lit la flotte.
+from .declaration import (FleetSpec, load_spec, spec_depuis_flotte,  # noqa: F401
+                          _CHAMPS, _NON_DECLARABLES)
+from .declaration import payload as _payload
 
 logger = logging.getLogger("oto_runner.fleet")
 
@@ -53,248 +51,6 @@ _MAX_FAUX_DEPARTS_CONSECUTIFS = 5
 # DÉBIT. Le 29/08, 54 échecs consécutifs sont passés inaperçus parce que le
 # relâchement journalisait et continuait — un best-effort sans destination.
 # Un échec de relâchement compte donc comme un échec d'écriture.
-# ⚠️ Le message de lancement NOMME la file : un agent à qui on dit « la file de
-# travail » sans la nommer DEVINE des noms de tableaux (vécu : entreprises,
-# projet_220, data… tous inconnus, puis des SIREN hallucinés et une conclusion
-# vide). Le harnais historique nommait le tableau dans sa conversation — le
-# driver fait pareil, depuis la déclaration.
-# ⚠️ **Il n'y a PAS d'instruction par défaut, et c'est délibéré.**
-#
-# Le worker est un client MCP : il exécute une instruction, il ne la compose pas.
-# Il ne sait pas ce que l'instruction contient, ni ce que l'agent va faire — donc
-# il ne peut pas en écrire une qui vaille.
-#
-# Il en existait une, en dur, sept lignes : « ta file est ce tableau, réserve
-# chaque ligne, traite-les selon la procédure, puis conclus ». Deux défauts, et
-# le second a coûté cher :
-#
-#   ① elle mettait du MÉTIER dans le worker — un tableau, des lignes, une
-#     réservation — alors qu'il ne sait rien de tout ça ;
-#   ② sa FORME enseignait un court-circuit. Réserve → traite → conclus est une
-#     partition en trois temps où « chercher » n'apparaît nulle part, sinon caché
-#     dans « selon la procédure ». Mesuré dans la nuit du 03 au 04/09 sur des
-#     vagues réelles : **7 jobs sur 11 n'appelaient AUCUN outil** et écrivaient
-#     quand même une fiche complète — le modèle RACONTAIT les appels au lieu de
-#     les émettre, avec des dates et des dirigeants inventés, dans un compte rendu
-#     parfaitement structuré. Avec une instruction qui dit d'où viennent les
-#     données : 1 sur 9, puis 1 sur 20.
-#
-# ⚠️ Et la garde d'alors visait à côté : « n'invente jamais une ligne ni un
-# identifiant » protège l'EXISTENCE d'une ligne, pas le CONTENU d'une fiche.
-# Inventer un dirigeant ne violait aucune consigne.
-#
-# L'instruction vient donc de qui déclare le passage, et elle est dérivée de
-# l'objet côté SERVEUR — là où l'on sait de quoi on parle. Ce que ce module fait
-# d'elle : l'interpoler et la transmettre. Rien d'autre.
-
-@dataclass(frozen=True)
-class FleetSpec:
-    procedure: str
-    namespace: str
-    tools: tuple
-    # Le nom de la flotte : le TAG apposé à chaque job (`fleet`), par lequel on
-    # retrouve les jobs d'une campagne — plus par « id ≥ N ». `load_spec` le
-    # tire du nom du fichier de déclaration ; une spec construite en code le
-    # DÉCLARE. Aucun repli sur le namespace : deux flottes peuvent drainer la
-    # même file, et un tag deviné est un tag faux — pire qu'un tag absent.
-    name: str
-    # L'identifiant de la flotte DÉCLARÉE EN BASE. Absent ⟹ le driver la déclare
-    # au démarrage et journalise l'identifiant obtenu ; le remettre dans la
-    # déclaration fait REPRENDRE le même passage au lieu d'en ouvrir un second.
-    # ⚠️ Il remplace le tag texte `payload["fleet"]` comme rattachement de
-    # référence : un tag vit dans un JSON libre, un identifiant porte une clé
-    # étrangère, se compte, et se refuse s'il désigne la flotte d'une autre org.
-    fleet_id: Optional[int] = None
-    filter: dict = field(default_factory=dict)   # ce qui est encore à traiter
-    project: Optional[int] = None
-    org: Optional[int] = None       # l'org de la MISSION (le namespace y vit)
-    concurrency: int = 3
-    ramp_seconds: int = 60
-    volume: Optional[int] = None                 # None = épuisement de la file
-    budget_tokens: Optional[int] = None
-    max_steps: int = 40
-    # L'instruction de départ, telle que le déclarant l'a écrite. OBLIGATOIRE :
-    # un passage sans instruction est un défaut de ce qui l'a déclaré, pas
-    # quelque chose que le worker complète de lui-même.
-    input: str = ""
-    # Les outils sans lesquels un job « done » est un job FAUX : leur PANNE
-    # arrête la flotte (arrêt ANORMAL ⟹ relance auto quand ils reviennent).
-    #
-    # ⚠️ CE N'EST PAS une liste de droits. Ce que l'agent a le DROIT d'appeler se
-    # gouverne en base, par org (activation et restriction de connecteur) — et
-    # l'allowlist d'un run est `tools`, juste au-dessus. Faire de ce champ-ci une
-    # seconde source de vérité pour « qui peut appeler quoi » créerait un doublon
-    # dont l'un des deux finirait par mentir. Ici on ne dit pas ce qui est
-    # PERMIS : on dit ce dont la panne rend le résultat FAUX.
-    critical_tools: tuple = ()
-    # Le plafond de jetons D'UNE LIGNE, descendu dans CHAQUE travail enfilé —
-    # donc appliqué par l'agent lui-même, quel que soit le chemin qui l'a mis en
-    # file. Absent ⟹ aucune borne par ligne : 65 571 jetons sur une seule ligne,
-    # mesurés le 01/09.
-    #
-    # ⚠️ Ce n'est PAS le « rendement » (jetons par écriture produite, jugé sur une
-    # fenêtre glissante) que le README a décrit du 27/08 au 02/09 : ce
-    # mécanisme-là a été conçu, documenté sous les noms `jetons_par_ecriture_max`
-    # et `rendement_fenetre`, puis remplacé par cette borne simple — sans que la
-    # doc suive. Aucun des deux noms n'a jamais existé dans le code. Qui écrivait
-    # sa déclaration depuis le README repartait donc SANS borne, en croyant en
-    # avoir une.
-    max_tokens_per_row: Optional[int] = None
-    # Combien d'échecs d'affilée arrêtent le passage. Absent ⟹ le défaut du
-    # runner (`_MAX_FAILED_CONSECUTIFS`).
-    #
-    # ⚠️ Le serveur porte ce champ depuis l'origine, le VALIDE à la déclaration
-    # (il doit valoir au moins 1) — et le runner l'IGNORAIT, appliquant sa
-    # constante quoi qu'on déclare. **Une borne déclarée mais pas appliquée ne se
-    # découvre que le jour où on comptait dessus** : elle ne fausse pas un relevé,
-    # elle laisse tourner une campagne qu'on croyait bornée. Et la validation
-    # côté serveur achevait de convaincre qu'elle était prise en compte.
-    #
-    # Mesuré le 03/09 avant de corriger : les 14 campagnes déclarées la laissaient
-    # à `null`. **Personne ne s'était cru protégé** — c'est ce qui distingue ce
-    # cas d'un incident.
-    max_consecutive_failures: Optional[int] = None
-    bilan_periode_s: int = _BILAN_PERIODE_S   # cadence du bilan intermédiaire
-    source: str = ""              # la déclaration : le bilan JSON se pose à côté
-
-    def __post_init__(self):
-        if not (self.input or "").strip():
-            # ⚠️ Le refus dit ce qui manque, PAS ce qu'il faudrait écrire : le
-            # worker ne sait pas ce qu'une instruction doit contenir. Lister ici
-            # « dis d'où viennent les données, nomme les outils comme source… »
-            # remettrait du métier dans le transport — et ce métier-là est celui
-            # d'UNE famille de passages (enrichir des fiches), pas de tous.
-            raise ValueError(
-                "instruction de départ absente : un passage ne démarre pas sans "
-                "elle. Le worker exécute une instruction, il n'en compose pas.")
-        if not self.name:
-            raise ValueError(
-                "nom de flotte vide : c'est le tag `fleet` de chaque job, ce "
-                "par quoi on retrouve une campagne. Il vient du nom du fichier "
-                "de déclaration (`campagne.yaml` ⟹ `campagne`) ou se déclare "
-                "explicitement — il ne se devine pas.")
-
-
-# Ce qu'une déclaration ne peut PAS porter : `name` vient du nom du fichier,
-# `source` de son chemin, `fleet_id` est attribué par la base.
-_NON_DECLARABLES = frozenset({"name", "source", "fleet_id"})
-
-# ⚠️ DÉRIVÉ du dataclass, jamais réécrit à la main. La liste manuelle avait pris
-# deux champs de retard — `critical_tools` et `max_tokens_per_row` — et
-# l'avertissement criait donc sur des réglages qui MARCHENT. Un opérateur a failli
-# retirer la ligne qui bornait sa dépense parce que le runner lui disait qu'elle
-# était ignorée (02/09). **Un avertissement faux est pire que pas d'avertissement :
-# il pousse au geste inverse du bon.** Un champ ajouté demain à `FleetSpec` est
-# reconnu ici sans que personne y pense.
-_CHAMPS = frozenset(f.name for f in fields(FleetSpec)) - _NON_DECLARABLES
-
-
-def load_spec(path: str) -> FleetSpec:
-    with open(path) as f:
-        raw = yaml.safe_load(f) or {}
-    inconnus = sorted(set(raw) - _CHAMPS)
-    if inconnus:
-        # ⚠️ Dire ce qui EST reconnu à côté de ce qui ne l'est pas : sans le
-        # voisinage, une faute de frappe (`max_token_per_row`) se lit comme une
-        # fonctionnalité absente, et on cherche dans le code plutôt que dans le
-        # fichier.
-        logger.warning("déclaration : champs inconnus, ignorés : %s — les champs "
-                       "reconnus sont : %s", ", ".join(inconnus),
-                       ", ".join(sorted(_CHAMPS)))
-    volume = raw.get("volume")
-    if not isinstance(volume, int):
-        volume = None                            # « épuisement » ou absent
-    return FleetSpec(
-        procedure=raw["procedure"],
-        namespace=raw["namespace"],
-        tools=tuple(raw.get("tools") or ()),
-        filter=dict(raw.get("filter") or {}),
-        project=raw.get("project"),
-        org=raw.get("org"),
-        concurrency=int(raw.get("concurrency") or 3),
-        ramp_seconds=int(raw.get("ramp_seconds") or 60),
-        volume=volume,
-        budget_tokens=raw.get("budget_tokens"),
-        max_steps=int(raw.get("max_steps") or 40),
-        max_tokens_per_row=raw.get("max_tokens_per_row"),
-        input=raw.get("input") or "",
-        critical_tools=tuple(raw.get("critical_tools") or ()),
-        bilan_periode_s=int(raw.get("bilan_periode_s") or _BILAN_PERIODE_S),
-        source=path,
-        name=os.path.splitext(os.path.basename(path))[0])
-
-
-def spec_depuis_flotte(f: dict) -> FleetSpec:
-    """Une spec construite depuis la flotte DÉCLARÉE en base.
-
-    C'est le pendant de `load_spec` : la même chose, lue là où le dashboard et
-    les agents la lisent aussi. **Un passage piloté par sa configuration en base
-    est le même objet pour tout le monde** — piloté par un fichier posé à côté de
-    l'exécutable, il n'existe que pour qui a accès à la machine.
-
-    ⚠️ Ce qui n'a PAS d'équivalent en base reste au défaut du runner :
-    `ramp_seconds`, `critical_tools` et la cadence du bilan sont des réglages
-    d'EXÉCUTION locale, pas de la configuration déclarée du passage. Les inventer
-    en base pour « tout avoir au même endroit » mélangerait ce qu'un opérateur
-    déclare et ce qu'une machine règle.
-
-    **Le critère qui tient la frontière dans le temps : si ce réglage change,
-    quelqu'un doit-il le savoir ?** La cadence d'un bilan, non. La montée en
-    charge, non plus — *à condition que la borne de DÉPENSE soit déclarée*, sinon
-    une machine mal réglée dépasserait sans que la configuration ait bougé. Elle
-    l'est (`max_rows`, `max_tokens`, `max_tokens_per_row` vivent dans la flotte).
-
-    ⚠️ Et `critical_tools` reste local parce qu'il désigne *ce dont la panne rend
-    un résultat FAUX*, pas *ce que l'agent a le droit d'appeler* — cette
-    seconde question a déjà son domicile en base (activation de connecteur par
-    org), et deux domiciles pour une même règle finissent par diverger.
-    """
-    manquants = [c for c in ("id", "procedure") if not f.get(c)]
-    if manquants:
-        raise ValueError(
-            f"flotte illisible — champs absents : {', '.join(manquants)}. "
-            "Une flotte se déclare avant d'être pilotée.")
-    return FleetSpec(
-        procedure=f["procedure"],
-        namespace=f.get("namespace") or "",
-        tools=tuple(f.get("tools") or ()),
-        filter=dict(f.get("row_filter") or {}),
-        project=f.get("project_id"),
-        org=f.get("org_id"),
-        concurrency=int(f.get("workers") or 3),
-        volume=f.get("max_rows"),
-        budget_tokens=f.get("max_tokens"),
-        max_steps=int(f.get("max_steps") or 40),
-        max_tokens_per_row=f.get("max_tokens_per_row"),
-        max_consecutive_failures=f.get("max_consecutive_failures"),
-        input=f.get("input") or "",
-        # La flotte EXISTE déjà : on la reprend, on n'en déclare pas une seconde.
-        fleet_id=int(f["id"]),
-        source=f"flotte #{f['id']}",
-        name=f.get("label") or f"flotte-{f['id']}")
-
-
-def _payload(spec: FleetSpec) -> dict:
-    import json as _json
-    # Interpolation PRUDENTE (replace, jamais .format : un input custom peut
-    # porter des accolades qui ne sont pas des placeholders).
-    message = (spec.input
-               .replace("{namespace}", spec.namespace)
-               .replace("{filter}", _json.dumps(spec.filter, ensure_ascii=False)))
-    return {"procedure": spec.procedure, "tools": list(spec.tools),
-            "project_id": spec.project, "org_id": spec.org,
-            "namespace": spec.namespace,
-            "fleet": spec.name,
-            "max_steps": spec.max_steps,
-            # ⚠️ La borne DESCEND avec le travail. Elle vivait sur la flotte, où
-            # seul un ordonnanceur savait la lire — donc personne dès qu'un
-            # passage tourne sans lui. Portée par le travail, elle s'applique
-            # quel que soit le chemin qui l'a enfilé.
-            "max_tokens": spec.max_tokens_per_row,
-            "input": message,
-            "label": f"flotte {spec.namespace} — {spec.procedure}"}
-
-
 # La borne « outil critique en échec » (27/08). Un job dont les outils
 # échouent conclut quand même « done » — bornes, budget et heartbeat disaient
 # « ça tourne » pendant que la flotte marquait 2 395 fiches « enrichies » sans

@@ -164,12 +164,37 @@ def du_travail(job: dict) -> Journal:
 
 
 def debut(journal: Journal, job: dict, provider) -> None:
-    """L'événement d'ouverture : le travail tel que reçu (sans ses secrets), et le
-    fournisseur qui va le servir. Le payload porte l'instruction de départ — c'est
-    le « message initial » avant toute interpolation du worker."""
+    """L'événement d'ouverture : le travail tel que reçu (sans ses secrets), les
+    outils AUTORISÉS, et le fournisseur qui va le servir. Le payload porte
+    l'instruction de départ — le « message initial » avant toute interpolation."""
+    p = job.get("payload") or {}
     journal.ecrire("debut", job=_sans_secrets(job),
+                   outils_autorises=sorted(p.get("tools") or ()),
                    provider=getattr(provider, "__name__", None),
                    modele_demande=_modele(provider))
+
+
+def ecart_instruction(catalogue: Optional[frozenset], autorises, instruction: str) -> dict:
+    """Ce que l'instruction NOMME sans que `tools` l'autorise, et ce que `tools`
+    autorise sans que le catalogue le connaisse — l'événement qui aurait tout dit
+    dès le 04/09 : « avec `oto_procedure` » dans l'instruction, `oto_procedure`
+    hors de la liste, et chaque travail « done » sans avoir lu la consigne.
+
+    Le catalogue vient de la session MCP (`McpSession.catalogue`) : seul un nom
+    que la plateforme SERT compte comme un outil nommé — sans lui, on ne devine
+    pas (`a_enrichir`, `lot_test` ressemblent à des outils et n'en sont pas).
+    Catalogue absent ⟹ `null` avec sa raison, jamais une liste vide qui
+    rassurerait."""
+    autorises = set(autorises or ())
+    if catalogue is None:
+        return {"nommes_hors_liste": None, "autorises_inconnus": None,
+                "ecart_omis": "transport sans catalogue d'outils"}
+    texte = instruction or ""
+    nommes = sorted(t for t in catalogue if t not in autorises
+                    and re.search(rf"(?<![A-Za-z0-9_]){re.escape(t)}(?![A-Za-z0-9_])", texte))
+    return {"nommes_hors_liste": nommes,
+            "autorises_inconnus": sorted(autorises - set(catalogue)),
+            "catalogue": len(catalogue)}
 
 
 def erreur(journal: Journal, e: BaseException) -> None:

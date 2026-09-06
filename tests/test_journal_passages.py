@@ -128,15 +128,18 @@ def test_le_journal_du_worker_ouvre_conclut_et_ne_porte_aucun_secret(monkeypatch
     with caplog.at_level(logging.INFO):
         W._un_travail(FauxBackend(), _job(), _Provider)
     annonce = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("job 7 : journal"))
-    assert "7.jsonl (4 événements, dernier : resultat)" in annonce, (
+    assert "7.jsonl (5 événements, dernier : resultat)" in annonce, (
         "le worker n'annonce son journal qu'après l'avoir RELU")
 
     chemin = tmp_path / "passages" / "banc-demo" / "7.jsonl"
     assert chemin.exists(), "un répertoire par flotte, un fichier par travail"
     assert oct(chemin.stat().st_mode & 0o777) == "0o600", "donnée de file : 0600"
     evs = _lignes(chemin)
-    assert [e["ev"] for e in evs] == ["debut", "run", "modele", "resultat"]
+    assert [e["ev"] for e in evs] == ["debut", "outils", "run", "modele", "resultat"]
     debut = evs[0]
+    assert debut["outils_autorises"] == ["data_rows"], "les outils AUTORISÉS, dès l'ouverture"
+    assert evs[1]["ecart_omis"] == "transport sans catalogue d'outils", (
+        "sans catalogue, l'écart est OMIS avec sa raison — jamais une liste vide")
     assert debut["job"]["payload"]["input"] == "Vas-y.", "le message initial, tel que reçu"
     assert debut["provider"] == "agent_llm_openai" and debut["modele_demande"] == "gpt-oss-120b"
     brut = chemin.read_text()
@@ -156,7 +159,7 @@ def test_un_plantage_laisse_type_message_ENTIER_et_pile(monkeypatch, tmp_path):
     W._un_travail(b, _job(), _Provider)
 
     evs = _lignes(tmp_path / "passages" / "banc-demo" / "7.jsonl")
-    assert [e["ev"] for e in evs] == ["debut", "run", "modele", "erreur"]
+    assert [e["ev"] for e in evs] == ["debut", "outils", "run", "modele", "erreur"]
     erreur = evs[-1]
     assert erreur["type"] == "RuntimeError" and erreur["message"] == message
     assert "Traceback" in erreur["traceback"] and "faux_run" in erreur["traceback"]

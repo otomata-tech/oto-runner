@@ -35,7 +35,19 @@ OTO_RUNNER_MODEL=claude-sonnet-5     # défaut assumé (coût) ; Opus par flotte
 OTO_RUNNER_ARMED=1                   # cf. ci-dessus
 OTO_RUNNER_PASSAGES_DIR=passages     # où le worker écrit le JOURNAL de chaque travail
 OTO_RUNNER_RELANCES_MAX=0            # relances d'un fil qui rend un appel au client
+OTO_RUNNER_EFFORT=…                  # profondeur de raisonnement — Anthropic `output_config.effort`,
+                                     # OpenAI-compatible `reasoning_effort` ; ABSENT = rien n'est envoyé
+OTO_RUNNER_MAX_TOKENS=8192           # plafond de COMPLÉTION d'un tour (les deux providers)
 ```
+
+⚠️ **Deux réglages que Scaleway facture ou coupe.** `OTO_RUNNER_EFFORT` n'était lu
+que côté Anthropic ; Scaleway active le raisonnement **par défaut** et le facture
+— sans ce réglage, on paie un raisonnement qu'on n'a pas choisi. Il n'a pas de
+défaut : absent, rien n'est envoyé et le fournisseur applique le sien. Et sur
+Scaleway les jetons de raisonnement **partagent le plafond de complétion** avec la
+réponse : une fiche fait 3–6 k, et `8192` coupe la réponse quand le modèle a
+raisonné avant (`finish_reason: length`, lisible au `stop_reason` du tour dans le
+journal du travail). `OTO_RUNNER_MAX_TOKENS` se règle par worker, comme le modèle.
 
 ## Le runner conserve TOUT : un journal par travail
 
@@ -127,6 +139,48 @@ exécuté, le rejeu ne peut pas doubler une écriture. Si la réouverture échou
 une ligne, n'a rien écrit, et porte des appels morts au transport : le backend
 le rejoue. Il n'existe pas d'issue légitime « conclu, rien écrit ».
 
+## Deux modes : par la file, ou direct
+
+*« Soit prise par DB, soit direct. »* Le **même** travail — même instruction,
+mêmes outils, même boucle, même journal — se joue de deux façons :
+
+| | **par la file** (`python -m oto_runner.fleet flotte.yaml`) | **direct** (`python -m oto_runner.direct flotte.yaml [--lignes N] [--concurrence K]`) |
+|---|---|---|
+| qui exécute | les workers (`oto-runner@{1,2,3}` sur la box), qui **réservent** des jobs | ce processus, ici, tout de suite |
+| la file de jobs | `POST /api/me/runner/jobs` : enfiler, réserver, lier, battre, conclure | **aucune** — jamais un appel à cette route |
+| le jeton | le jeton **délégué** remis avec chaque job (l'agent agit pour le demandeur) | `OTO_TOKEN` du poste, qui tient lieu de jeton délégué |
+| le modèle | celui de l'env des **workers** | celui de l'env de **ce processus** (`OTO_RUNNER_MODEL`) |
+| le journal JSONL | `passages/<flotte>/<job_id>.jsonl`, **là où le worker tourne** | `passages/<flotte>/direct-<horodatage>-<n>.jsonl`, ici |
+| le bilan | `<flotte>.bilan.json` | `<flotte>.direct-<horodatage>.bilan.json` — même forme |
+
+**Quand utiliser lequel.** La file pour une campagne : plusieurs machines, reprise
+après une mort, baux, délégation d'identité, arrêt gracieux — tout ce que la
+plateforme garantit. Le direct pour **mesurer un passage sous la main** : une
+consigne, un modèle, un réglage, sur N lignes, avec le journal complet et le
+bilan sous les yeux dans la minute, sans déployer un worker ni ouvrir de job.
+
+⚠️ **Un seul corps d'exécution.** Le mode direct passe par `worker._un_travail`
+(`_traiter`, tel qu'il tourne en production) avec le travail que la flotte
+construit (`declaration.payload`). Les trois verbes vers la file — `bind_run`,
+`extend`, `complete` (`file_de_travail.FileDeTravail`) — sont le **seul** point
+de variation : servis par la file serveur dans un mode, inertes dans l'autre
+(`SansFile`, qui journalise ce qu'il aurait fait). Un banc qui mesurerait un
+autre chemin sous le même nom serait un instrument menteur de plus ; un test le
+tient (`tests/test_direct.py`).
+
+**Ce que le mode direct NE mesure PAS** : la tenue du protocole de réservation
+des jobs (aucun job n'existe) ; la concurrence entre agents telle qu'une batterie
+de workers la vit (`--concurrence K` lance K **processus** sur un poste — pas des
+threads : la deadline murale des requêtes repose sur `SIGALRM`, thread principal
+seulement) ; les délégations de jeton (tout tourne sous le jeton du `.env`).
+
+**Le bilan direct dit le modèle réellement servi.** Le fournisseur rapporte dans
+chaque réponse le modèle qu'il a servi (`model`) ; le journal du travail le porte
+à chaque tour et à la conclusion (`modele_servi`, à côté de `modele_demande`), et
+le bilan direct conclut « modèle demandé X · servi Y » — **différent** quand il
+l'est. Une étiquette de flotte a trompé deux heures de mesures une nuit ; le
+nom demandé n'est pas une mesure, la réponse du fournisseur en est une.
+
 ## La flotte
 
 `python -m oto_runner.fleet flotte.yaml` enfile des jobs `start` sur une file de
@@ -201,6 +255,21 @@ l'instruction, réécrite la veille pour une autre raison, avait perdu la seule
 phrase qui nommait la procédure. Elle fonctionnait parce que le worker injectait ;
 après ce déploiement, elle aurait produit 504 fiches improvisées **sans une seule
 erreur**, et le bilan aurait annoncé « 504 abouties ».
+
+## Une déclaration qui demande de lire ce qu'elle n'autorise pas à lire ne part pas
+
+Trouvé le 06/09/2026 dans le journal d'un travail (événement #5 : *« Outil
+`oto_procedure` indisponible pour ce run »*) : l'instruction disait *« Lis d'abord
+la procédure … avec `oto_procedure` »*, et `oto_procedure` n'était pas dans
+`tools`. L'allowlist est fail-closed, le worker n'injecte rien de métier :
+**l'agent n'a jamais lu la consigne, dans aucune flotte de la campagne**, et
+chaque travail concluait « done ». `load_spec` (et la flotte lue en base)
+**refuse** désormais une déclaration qui nomme une `procedure` sans autoriser
+`oto_procedure`, ou dont l'instruction nomme `oto_procedure` sans l'autoriser —
+un refus franc qui nomme le défaut, jamais une correction silencieuse. Et le
+journal de chaque travail porte, dès l'ouverture, les outils autorisés puis
+l'**écart** entre ce que l'instruction nomme et ce que la liste autorise,
+confronté au catalogue réel de la session (`outils.nommes_hors_liste`).
 
 ## Il n'y a PAS d'instruction par défaut
 

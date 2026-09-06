@@ -174,3 +174,43 @@ def test_les_jetons_servis_par_le_cache_ne_comptent_pas_comme_neufs(monkeypatch)
     t = P.complete(system="s", messages=[], tools=None)
     assert t.usage["input_tokens"] == 124, "le neuf, pas le total"
     assert t.usage["cache_read_input_tokens"] == 2688
+
+
+# ── Ce que Scaleway facture et coupe : le raisonnement, et le plafond de complétion ──
+
+def _corps_envoye(monkeypatch):
+    vu = {}
+
+    def post(url, json=None, **k):
+        vu.update(json)
+        return _Resp(_reponse({"role": "assistant", "content": "ok"}))
+
+    monkeypatch.setattr(P.requests, "post", post)
+    P.complete(system="s", messages=[], tools=[], api_key="k")
+    return vu
+
+
+def test_sans_OTO_RUNNER_EFFORT_rien_n_est_envoye_le_fournisseur_applique_son_defaut(monkeypatch):
+    """Aucune valeur par défaut ici : absent = on n'envoie rien. La variable n'était
+    lue que côté Anthropic, et Scaleway active le raisonnement par défaut — et le
+    facture."""
+    monkeypatch.delenv("OTO_RUNNER_EFFORT", raising=False)
+    assert "reasoning_effort" not in _corps_envoye(monkeypatch)
+
+
+def test_OTO_RUNNER_EFFORT_part_en_reasoning_effort(monkeypatch):
+    monkeypatch.setenv("OTO_RUNNER_EFFORT", "low")
+    assert _corps_envoye(monkeypatch)["reasoning_effort"] == "low"
+
+
+def test_OTO_RUNNER_MAX_TOKENS_borne_la_completion(monkeypatch):
+    """Sur Scaleway les jetons de raisonnement partagent ce plafond avec la fiche :
+    8192 coupe la réponse (`finish_reason: length`). La variable existe et est LUE."""
+    monkeypatch.delenv("OTO_RUNNER_MAX_TOKENS", raising=False)
+    assert _corps_envoye(monkeypatch)["max_tokens"] == P.DEFAULT_MAX_TOKENS == 8192
+    monkeypatch.setenv("OTO_RUNNER_MAX_TOKENS", "20000")
+    assert _corps_envoye(monkeypatch)["max_tokens"] == 20000
+    monkeypatch.setenv("OTO_RUNNER_MAX_TOKENS", "beaucoup")
+    with pytest.raises(P.LlmUnavailable, match="OTO_RUNNER_MAX_TOKENS"):
+        P.max_tokens()
+

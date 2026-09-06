@@ -25,7 +25,9 @@ from oto_runner.fleet import FleetSpec, spec_depuis_flotte
 def _flotte(**over) -> dict:
     base = {
         "id": 7, "label": "passage-3", "procedure": "enrichissement",
-        "namespace": "edition", "row_filter": {"lot": "a"}, "tools": ["oto_kb"],
+        # `oto_procedure` : une flotte qui nomme une procédure doit autoriser
+        # l'outil qui la lit, sinon la déclaration est refusée (06/09).
+        "namespace": "edition", "row_filter": {"lot": "a"}, "tools": ["oto_kb", "oto_procedure"],
         "project_id": 12, "org_id": 226, "workers": 4, "max_rows": 150,
         "max_tokens": 2_000_000, "max_steps": 30, "input": "traite la ligne",
     }
@@ -37,7 +39,7 @@ def test_la_configuration_declaree_devient_la_spec():
     s = spec_depuis_flotte(_flotte())
     assert isinstance(s, FleetSpec)
     assert s.procedure == "enrichissement" and s.namespace == "edition"
-    assert s.filter == {"lot": "a"} and s.tools == ("oto_kb",)
+    assert s.filter == {"lot": "a"} and s.tools == ("oto_kb", "oto_procedure")
     assert s.project == 12 and s.org == 226
     assert s.concurrency == 4 and s.volume == 150
     assert s.budget_tokens == 2_000_000 and s.max_steps == 30
@@ -83,8 +85,9 @@ def test_un_champ_absent_retombe_sur_le_defaut_sans_inventer():
     """⚠️ Les défauts d'EXÉCUTION se supposent (combien d'agents, combien de
     tours) ; l'INSTRUCTION ne se suppose pas — elle dit ce que l'agent doit
     faire, et le worker ne le sait pas."""
-    s = spec_depuis_flotte({"id": 3, "procedure": "p", "input": "fais ceci"})
-    assert s.namespace == "" and s.tools == () and s.filter == {}
+    s = spec_depuis_flotte({"id": 3, "procedure": "p", "input": "fais ceci",
+                            "tools": ["oto_procedure"]})   # exigé dès qu'une procédure est nommée
+    assert s.namespace == "" and s.tools == ("oto_procedure",) and s.filter == {}
     assert s.concurrency == 3 and s.max_steps == 40
     assert s.volume is None and s.budget_tokens is None
 

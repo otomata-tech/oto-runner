@@ -8,3 +8,6 @@ __pycache__/
 .env.*
 !.env.example
 *.egg-info/
+# ⚠️ Les journaux par travail (`oto_runner/journal.py`) portent de la DONNÉE de la
+# file de travail — lignes clientes, sorties d'outils. Le dépôt est PUBLIC.
+passages/

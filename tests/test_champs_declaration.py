@@ -45,7 +45,7 @@ def test_l_avertissement_dit_ce_qui_EST_reconnu(tmp_path, caplog):
 
     d = tmp_path / "campagne.yaml"
     d.write_text("procedure: p\nnamespace: n\ninput: fais ceci\n"
-                 "max_token_per_row: 40000\n")
+                 "tools: [oto_procedure]\nmax_token_per_row: 40000\n")
     with caplog.at_level(logging.WARNING):
         load_spec(str(d))
     message = "\n".join(r.getMessage() for r in caplog.records)
@@ -66,7 +66,7 @@ def test_une_declaration_valide_n_avertit_de_rien(tmp_path, caplog):
 
     d = tmp_path / "campagne.yaml"
     d.write_text("procedure: p\nnamespace: n\ninput: fais ceci\n"
-                 "max_tokens_per_row: 40000\n"
+                 "tools: [oto_procedure]\nmax_tokens_per_row: 40000\n"
                  "critical_tools: [data_write]\nconcurrency: 3\nvolume: 30\n")
     with caplog.at_level(logging.WARNING):
         spec = load_spec(str(d))
