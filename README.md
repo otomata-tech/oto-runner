@@ -39,6 +39,8 @@ OTO_RUNNER_EFFORT=…                  # profondeur de raisonnement — Anthropi
                                      # OpenAI-compatible `reasoning_effort` ; ABSENT = rien n'est envoyé
 OTO_RUNNER_MAX_TOKENS=8192           # plafond de COMPLÉTION d'un tour (les deux providers)
 OTO_RUNNER_MAX_TOOL_OUTPUT=120000    # plafond, en CARACTÈRES, d'une sortie d'outil servie au modèle
+OTO_RUNNER_PARALLEL_TOOLS=1          # 1 (défaut) = le modèle groupe ses appels d'outils dans un
+                                     # tour ; 0 = UN SEUL par tour (`parallel_tool_calls: false`)
 ```
 
 ⚠️ **Le plafond de sortie d'outil se règle, et son défaut a changé.** À 12 000
@@ -62,6 +64,16 @@ Scaleway les jetons de raisonnement **partagent le plafond de complétion** avec
 réponse : une fiche fait 3–6 k, et `8192` coupe la réponse quand le modèle a
 raisonné avant (`finish_reason: length`, lisible au `stop_reason` du tour dans le
 journal du travail). `OTO_RUNNER_MAX_TOKENS` se règle par worker, comme le modèle.
+
+⚠️ **Le groupement des appels d'outils se règle** (chemin OpenAI-compatible).
+Mistral Large 3 groupe jusqu'à **13 appels dans un même tour**, puis écrit la
+fiche sans jamais reformuler une requête après un résultat décevant (mesuré le
+06/09/2026). `OTO_RUNNER_PARALLEL_TOOLS=0` envoie `parallel_tool_calls: false` —
+un appel par tour, chaque résultat lu avant le suivant ; absent ou `1` = le
+comportement actuel, rien n'est envoyé ; toute autre valeur **lève**. Le réglage
+est dit au journal du travail, dans l'événement `systeme`, à côté de
+`max_tool_output`. Si le serveur rend tout de même plusieurs appels dans un tour,
+le runner les exécute comme d'habitude — aucune garde ne masque son écart.
 
 ## Le runner conserve TOUT : un journal par travail
 

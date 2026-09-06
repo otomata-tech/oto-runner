@@ -169,6 +169,39 @@ def effort() -> Optional[str]:
     return os.environ.get("OTO_RUNNER_EFFORT", "").strip() or None
 
 
+_ENV_PARALLEL = "OTO_RUNNER_PARALLEL_TOOLS"
+
+
+def parallel_tools() -> bool:
+    """`OTO_RUNNER_PARALLEL_TOOLS` — `1` (défaut, le comportement actuel) ou `0`
+    pour UN SEUL appel d'outil par tour, envoyé en `parallel_tool_calls: false`
+    (le nom OpenAI-compatible, accepté par Mistral).
+
+    ⚠️ Mesure de la nuit du 06/09/2026 : Mistral Large 3 groupe jusqu'à **13
+    appels d'outils dans un même tour**, puis écrit la fiche sans JAMAIS
+    reformuler une requête après un résultat décevant — il a tout demandé avant
+    d'avoir rien lu. Le mode séquentiel rend chaque résultat visible avant
+    l'appel suivant ; il se TESTE, il n'est pas encore le défaut.
+
+    ⚠️ Une valeur illisible LÈVE. Un réglage qu'on croit posé et qui ne l'est pas
+    ferait conclure un banc sur le comportement d'en face."""
+    brut = os.environ.get(_ENV_PARALLEL, "").strip()
+    if not brut:
+        return True
+    if brut not in ("0", "1"):
+        raise ValueError(
+            f"{_ENV_PARALLEL} = {brut!r} : `1` (groupé, le défaut) ou `0` "
+            "(séquentiel) est attendu")
+    return brut == "1"
+
+
+def reglages() -> dict:
+    """Ce que ce provider a de RÉGLABLE et qui change le déroulé — lu par la
+    boucle pour l'événement `systeme` du journal, à côté de `max_tool_output` :
+    un passage se relit sans avoir à deviner sous quel réglage il a tourné."""
+    return {"parallel_tool_calls": parallel_tools()}
+
+
 # ⚠️ Ce provider parle à un hôte CONFIGURABLE (Scaleway par défaut, mais aussi
 # La Plateforme). Le dépôt de clé se lit donc de la base URL, jamais du nom du
 # module ni de la variable d'environnement : `OTO_RUNNER_OPENAI_API_KEY` sert
@@ -250,6 +283,11 @@ def complete(*, system: str, messages: list, tools: list[dict],
         corps["tools"] = tools
     if effort():
         corps["reasoning_effort"] = effort()
+    if not parallel_tools():
+        # ⚠️ Le serveur peut TOUT DE MÊME rendre plusieurs appels dans un tour :
+        # la boucle les exécutera comme d'habitude. Aucune garde ici — ce serait
+        # cacher que le fournisseur n'a pas respecté ce qu'on lui a demandé.
+        corps["parallel_tool_calls"] = False
     r = _post_borne(base_url() + "/chat/completions", corps,
                     {"Authorization": f"Bearer {api_key or resolve_key()}"},
                     on_event=on_event)

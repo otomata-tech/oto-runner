@@ -182,6 +182,18 @@ def max_tool_output() -> int:
     return int(brut)
 
 
+def _reglages_du_provider(provider) -> dict:
+    """Les réglages PROPRES au provider qui changent le déroulé, pour le journal.
+
+    La boucle n'en connaît aucun — elle demande, le provider répond ; celui qui
+    n'a rien à déclarer n'ajoute rien à l'événement `systeme`. C'est le pendant
+    de `max_tool_output` : sous quel réglage ce passage a tourné, dit UNE fois,
+    à l'ouverture du journal. Sans ça, un banc qui compare deux réglages ne
+    saurait pas, après coup, lequel a produit quel déroulé."""
+    lire = getattr(provider, "reglages", None)
+    return dict(lire()) if callable(lire) else {}
+
+
 def _cap(text: str, limite: int) -> tuple[str, bool]:
     """(ce que le modèle lit, a-t-on coupé). La coupure est DITE, en français,
     avec ce qui manque.
@@ -274,7 +286,7 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
     limite_sortie = max_tool_output()
     note("systeme", texte=spec.system, outils=sorted(spec.tools),
          max_steps=plafond, max_tokens=spec.max_tokens, label=spec.label,
-         max_tool_output=limite_sortie)
+         max_tool_output=limite_sortie, **_reglages_du_provider(provider))
     if history:
         note("historique", messages=list(messages), total=len(history),
              transportes=len(messages))

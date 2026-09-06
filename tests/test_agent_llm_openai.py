@@ -14,7 +14,10 @@ import pytest
 import requests
 
 from oto_runner import agent_llm_openai as P
+from oto_runner import agent_runtime
+from oto_runner.agent_runtime import AgentSpec
 from oto_runner.llm_types import LlmUnavailable, Turn
+from tests.test_agent_runtime import FauxTransport
 
 
 class _Resp:
@@ -324,3 +327,58 @@ def test_OTO_RUNNER_MAX_TOKENS_borne_la_completion(monkeypatch):
     with pytest.raises(P.LlmUnavailable, match="OTO_RUNNER_MAX_TOKENS"):
         P.max_tokens()
 
+
+# ── Le GROUPEMENT des appels d'outils : un par tour, ou tous à la fois ───────
+#
+# Mesuré dans la nuit du 06/09/2026 : Mistral Large 3 groupe jusqu'à 13 appels
+# dans un même tour, puis écrit la fiche sans jamais reformuler une requête après
+# un résultat décevant. Le mode séquentiel se teste — donc il se règle, et le
+# réglage se relit dans le journal du passage.
+
+def test_sans_reglage_le_corps_ne_porte_RIEN_le_fournisseur_groupe_comme_avant(monkeypatch):
+    """Absent = le comportement actuel, à l'octet près : la clé n'apparaît pas."""
+    monkeypatch.delenv("OTO_RUNNER_PARALLEL_TOOLS", raising=False)
+    assert "parallel_tool_calls" not in _corps_envoye(monkeypatch)
+    assert P.parallel_tools() is True
+    monkeypatch.setenv("OTO_RUNNER_PARALLEL_TOOLS", "1")
+    assert "parallel_tool_calls" not in _corps_envoye(monkeypatch)
+
+
+def test_a_zero_le_corps_porte_parallel_tool_calls_false(monkeypatch):
+    """`parallel_tool_calls` est le nom OpenAI-compatible, accepté par Mistral :
+    un seul appel d'outil par tour, donc un résultat lu avant l'appel suivant."""
+    monkeypatch.setenv("OTO_RUNNER_PARALLEL_TOOLS", "0")
+    assert _corps_envoye(monkeypatch)["parallel_tool_calls"] is False
+
+
+def test_une_valeur_illisible_LEVE_jamais_un_repli_silencieux(monkeypatch):
+    """Un réglage qu'on croit posé et qui ne l'est pas ferait conclure un banc sur
+    le comportement d'en face."""
+    monkeypatch.setenv("OTO_RUNNER_PARALLEL_TOOLS", "false")
+    with pytest.raises(ValueError, match="OTO_RUNNER_PARALLEL_TOOLS"):
+        P.parallel_tools()
+    with pytest.raises(ValueError, match="OTO_RUNNER_PARALLEL_TOOLS"):
+        P.complete(system="s", messages=[], tools=[], api_key="k")
+
+
+def test_le_reglage_est_DIT_au_journal_a_cote_de_max_tool_output(monkeypatch):
+    """Un banc qui compare groupé et séquentiel ne vaut que si chaque passage dit
+    sous quel réglage il a tourné — une fois, à l'ouverture du journal, comme le
+    plafond de sortie d'outil."""
+    monkeypatch.setattr(P.requests, "post", lambda *a, **k: _Resp(
+        _reponse({"role": "assistant", "content": "fini"})))
+    spec = AgentSpec(system="le cadre", tools=frozenset({"data_rows"}),
+                     max_steps=2, label="job:1")
+
+    def systeme(valeur):
+        monkeypatch.setenv("OTO_RUNNER_PARALLEL_TOOLS", valeur)
+        evs: list = []
+        agent_runtime.run(spec, FauxTransport(), P, prompt="vas-y", api_key="k",
+                          on_event=lambda ev, champs: evs.append((ev, champs)))
+        assert evs[0][0] == "systeme"
+        return evs[0][1]
+
+    sequentiel = systeme("0")
+    assert sequentiel["parallel_tool_calls"] is False
+    assert sequentiel["max_tool_output"] == agent_runtime.max_tool_output()
+    assert systeme("1")["parallel_tool_calls"] is True
