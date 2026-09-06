@@ -134,10 +134,22 @@ def _texte(erreur: str) -> str:
 
 def refus_ecriture(spec, backend, secondes: float, jobs: dict) -> tuple[Optional[dict],
                                                                     Optional[str]]:
-    """« n appels, k refusés » sur `data_write`, lu au journal des appels d'org —
-    avec chaque refus en DÉTAIL : quand, quel run, quel travail de cette flotte,
-    quel journal JSONL (celui que l'ordonnanceur a relu), et le texte complet du
-    refus. `motifs` groupe les textes IDENTIQUES ; il n'interprète pas.
+    """Les refus de `data_write` DE CETTE FLOTTE, lus au journal des appels d'org —
+    avec chaque refus en DÉTAIL : quand, quel run, quel travail, quel journal
+    JSONL (celui que l'ordonnanceur a relu), et le texte complet du refus.
+    `motifs` groupe les textes IDENTIQUES ; il n'interprète pas.
+
+    ⚠️ **Un refus ne compte pour cette flotte que si son run est un travail de
+    cette flotte.** Le journal des appels est celui de l'ORG, sur une fenêtre
+    horaire : deux passages simultanés y déposent leurs refus côte à côte. Le
+    06/09/2026, le bilan de `cmp-808614150` a affiché « data_write 3 appels, 2
+    refusés » alors que ce travail n'avait fait qu'un seul `data_write` — le
+    second refus venait du run d'une autre flotte. Le détail le disait déjà
+    (« hors de cette flotte ») **et le comptait quand même** : ce qui n'est pas
+    attribuable à un travail de la flotte se compte À PART et se nomme.
+
+    Ce que l'org a fait sur la fenêtre reste dit, sous son vrai nom
+    (`appels_org`, `refuses_org`) : c'est un contexte, pas le compte du passage.
 
     Rend (poste, raison de l'omission) — l'un des deux vaut toujours None."""
     org = getattr(spec, "org", None)
@@ -154,22 +166,31 @@ def refus_ecriture(spec, backend, secondes: float, jobs: dict) -> tuple[Optional
     # fabriquer une entreprise ne laisse plus de ligne : ça devient un refus, et
     # un refus ne se voit que si on le compte — et ne se comprend que si on le
     # lit ENTIER.
+    liste, omis = None, None
     try:
         liste = backend.refus_detail(org, REFUS_OUTIL, minutes=minutes,
                                      limit=REFUS_LIMITE)
     except Exception as e:  # noqa: BLE001
         logger.warning("bilan : détail des refus illisible : %s", e)
-        liste = None
-    motifs = detail = None
+        omis = f"détail des refus illisible : {e}"
+    motifs = detail = refuses = hors = None
     if liste is not None:
         par_run = {j.get("run_id"): jid for jid, j in jobs.items() if j.get("run_id")}
-        motifs, detail = Counter(), []
+        motifs, detail, refuses, hors = Counter(), [], 0, 0
         for r in liste:
             erreur = _texte(r.get("erreur"))
             job = par_run.get(r.get("run_id"))
-            motifs[erreur] += 1
+            if job is None:
+                # Le run n'est aucun travail de cette flotte : il est compté à
+                # part et étiqueté. ⚠️ Un travail de la flotte qui n'aurait pas
+                # rendu son run_id tomberait ici — c'est pourquoi un travail en
+                # ÉCHEC conclut désormais avec le sien (cf. `conclusion.py`).
+                hors += 1
+            else:
+                motifs[erreur] += 1
+                refuses += 1
             detail.append({"quand": r.get("quand"), "run_id": r.get("run_id"),
-                           "job": job,
+                           "job": job, "hors_flotte": job is None,
                            # Le chemin RELU par l'ordonnanceur, ou null : jamais
                            # un chemin supposé pour un fichier qu'on n'a pas vu.
                            "journal": (jobs[job].get("journal") if job is not None
@@ -177,4 +198,8 @@ def refus_ecriture(spec, backend, secondes: float, jobs: dict) -> tuple[Optional
                            "erreur": erreur})
         motifs = dict(motifs)
     return ({"outil": REFUS_OUTIL, "fenetre_minutes": minutes, "limite": REFUS_LIMITE,
-             "appels": n, "refuses": ko, "motifs": motifs, "detail": detail}, None)
+             # Ce que l'ORG a fait sur la fenêtre : un contexte, jamais le compte
+             # de ce passage — le nom le dit pour qu'on ne les confonde plus.
+             "appels_org": n, "refuses_org": ko,
+             "refuses": refuses, "refuses_hors_flotte": hors,
+             "refuses_omis": omis, "motifs": motifs, "detail": detail}, None)

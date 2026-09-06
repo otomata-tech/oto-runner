@@ -175,9 +175,10 @@ def test_les_motifs_sont_les_textes_serveur_ENTIERS_groupes_par_texte_identique(
                     "journal": "passages/flotte-demo/12648.jsonl"}}
     bilan = ecrire_bilan(_spec_lot(), b, jobs, lignes_initiales=1, secondes=240)
     refus = bilan["refus_ecriture"]
-    assert refus["appels"] == 8 and refus["refuses"] == 7
+    assert refus["appels_org"] == 8 and refus["refuses_org"] == 7, (
+        "ce que l'ORG a fait sur la fenêtre reste dit, sous son vrai nom")
     assert len(LONG) > 60
-    assert refus["motifs"] == {LONG: 1, "row `0000` introuvable": 1}
+    assert refus["motifs"] == {LONG: 1}, "les motifs de CETTE flotte"
     for motif in refus["motifs"]:
         assert not motif.startswith("autre"), "aucun libellé qui ne soit le texte serveur"
     premier, second = refus["detail"]
@@ -188,6 +189,47 @@ def test_les_motifs_sont_les_textes_serveur_ENTIERS_groupes_par_texte_identique(
     assert "motif" not in premier, "le détail ne porte aucune interprétation"
     assert second["job"] is None and second["journal"] is None, (
         "un run d'une autre flotte, ou non conclu : dit, pas inventé")
+
+
+def test_un_refus_d_un_run_ETRANGER_ne_se_compte_pas_dans_cette_flotte(caplog):
+    """⚠️ 06/09/2026 : le bilan de `cmp-808614150` a affiché « data_write 3
+    appels, 2 refusés » quand le journal de ce travail n'en portait qu'UN. Le
+    second venait du run d'une autre flotte, sur la même fenêtre horaire du
+    journal d'org — le détail le disait déjà (« hors de cette flotte ») et le
+    comptait quand même. Ce qui n'est pas attribuable à un travail de la flotte
+    se compte à part, et se nomme."""
+    b = BackendRefus([{"statut": "echec", "count": 1}], restantes=0)
+    jobs = {12648: {**_job(), "run_id": "r-12648", "journal": None}}
+    with caplog.at_level(logging.INFO):
+        bilan = ecrire_bilan(_spec_lot(), b, jobs, lignes_initiales=1, secondes=240,
+                             arret="file vide")
+    refus = bilan["refus_ecriture"]
+    assert refus["refuses"] == 1, "un seul refus est attribuable à cette flotte"
+    assert refus["refuses_hors_flotte"] == 1 and refus["refuses_omis"] is None
+    assert refus["motifs"] == {LONG: 1}, "le motif étranger n'entre pas au compte"
+    assert [d["hors_flotte"] for d in refus["detail"]] == [False, True]
+    ligne = next(r.getMessage() for r in caplog.records if "bilan flotte" in r.getMessage())
+    assert "1 refusé de cette flotte" in ligne
+    assert "1 refus hors de cette flotte, non comptés" in ligne
+    etranger = next(r.getMessage() for r in caplog.records
+                    if r.getMessage().startswith("refus data_write")
+                    and "r-ailleurs" in r.getMessage())
+    assert "HORS de cette flotte" in etranger and "non compté" in etranger
+
+
+def test_sans_detail_lisible_les_refus_de_la_flotte_ne_sont_PAS_devines():
+    """Le compte de la flotte se déduit du DÉTAIL (un refus, un run). Détail
+    illisible ⟹ `refuses` vaut null AVEC sa raison — jamais le compte de l'org
+    servi à la place, qui porterait les refus des passages voisins."""
+    class SansDetail(BackendRefus):
+        def refus_detail(self, org, tool, *, minutes=15, limit=200):
+            raise RuntimeError("monitoring/calls → 503")
+
+    b = SansDetail([{"statut": "echec", "count": 1}], restantes=0)
+    bilan = ecrire_bilan(_spec_lot(), b, {}, lignes_initiales=1, secondes=240)
+    refus = bilan["refus_ecriture"]
+    assert refus["refuses"] is None and refus["detail"] is None
+    assert "503" in refus["refuses_omis"] and refus["refuses_org"] == 7
 
 
 def test_un_travail_conclu_dont_le_journal_n_a_pas_ete_relu_ne_pointe_nulle_part():

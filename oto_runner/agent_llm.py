@@ -21,7 +21,7 @@ Le reste du contrat est inchangé, et c'est lui qui compte :
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .llm_types import LlmUnavailable, ToolCall, Turn
 
@@ -220,13 +220,19 @@ def fil_cache(messages: list) -> list:
 
 
 def complete(*, system: str, messages: list, tools: list[dict],
-             api_key: Optional[str] = None) -> Turn:
+             api_key: Optional[str] = None,
+             on_event: Optional[Callable[[str, dict], None]] = None) -> Turn:
     """UN tour de modèle — synchrone : le worker est un process dédié, pas un
     serveur mono-loop, il a le droit d'attendre.
 
     `messages` = le fil au format provider (les `provider_raw` du fil backend,
     rejoués dans l'ordre) ; `tools` = `[{name, description, input_schema}]`.
-    Toute erreur réseau/quota remonte à la boucle, qui décide (backoff du job)."""
+    Toute erreur réseau/quota remonte à la boucle, qui décide (backoff du job).
+
+    `on_event(type, champs)` : le journal du travail — le seam en sert UN seul
+    contrat aux deux adaptateurs. Ici il ne reçoit rien : le SDK Anthropic
+    retente lui-même les incidents de transport, et ce qu'il retente ne remonte
+    pas jusqu'ici. Côté OpenAI-compatible, la retentative est à nous et se dit."""
     anthropic = _sdk()
     if anthropic is None:
         raise LlmUnavailable("le paquet `anthropic` n'est pas installé")

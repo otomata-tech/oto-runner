@@ -25,10 +25,11 @@ import signal
 import time
 from typing import Optional
 
-from . import agent_runtime, journal
+from . import agent_runtime, conclusion, journal
 from .llm_select import get_provider
 from .agent_runtime import AgentSpec
 from .backend import Backend, BackendError
+from .conclusion import RunEnCours
 from .fil import assainir_pour_transport as _assainir_pour_transport
 from .mcp import McpSession
 
@@ -145,15 +146,21 @@ def _instruction_du(job: dict) -> str:
 
 
 def _traiter(backend: Backend, job: dict, provider,
-             journal_: Optional[journal.Journal] = None, file=None) -> None:
+             journal_: Optional[journal.Journal] = None, file=None,
+             tenu: Optional[RunEnCours] = None) -> None:
     """Un travail, de la réservation à la conclusion. `journal_` reçoit TOUT ce
     que le worker voit (cf. `journal.py`) ; None = pas de journal (bancs).
 
     `file` : ce que le travail dit à sa FILE — `bind_run`, `extend`, `complete`
     (cf. `file_de_travail`). None = le backend lui-même, qui sert les deux
     contrats en production. ⚠️ C'est le SEUL point de variation entre la flotte
-    et le mode direct : tout le reste de ce corps est commun aux deux."""
+    et le mode direct : tout le reste de ce corps est commun aux deux.
+
+    `tenu` : ce que ce travail TIENT au fur et à mesure (session MCP, run
+    ouvert). Rempli ici, lu par `_un_travail` s'il faut LIBÉRER après une mort
+    en plein vol — sans quoi la ligne réservée reste verrouillée tout son bail."""
     file = backend if file is None else file
+    tenu = RunEnCours() if tenu is None else tenu
 
     def note(ev: str, **champs) -> None:
         if journal_ is not None:
@@ -177,6 +184,7 @@ def _traiter(backend: Backend, job: dict, provider,
             "impersonner. Le worker n'a pas d'identité métier à prêter — "
             "reprogramme-le, il partira au nom de qui le demande.")
     mcp = McpSession(project=projet, org=p.get("org_id"), token=jeton)
+    tenu.mcp = mcp
     # Ce que l'instruction NOMME sans que l'allowlist l'autorise — confronté au
     # catalogue RÉEL de la session (cf. `journal.ecart_instruction`) : l'événement
     # qui aurait dit dès le 04/09 que l'agent ne lirait jamais la consigne.
@@ -200,7 +208,7 @@ def _traiter(backend: Backend, job: dict, provider,
         # deux concepts oto dans un hôte qui n'a pas à les connaître.
         d = mcp.outil("run_start",
                       {"label": p.get("label") or f"travail hébergé {job.get('id')}"})
-        run_id = d.get("run_id")
+        run_id = tenu.run_id = d.get("run_id")
         if not run_id:
             # Un blip transport peut rendre un succès au contenu dégradé (le
             # parse rend {"_texte": …} sans lever) — le KeyError brut qui
@@ -211,7 +219,7 @@ def _traiter(backend: Backend, job: dict, provider,
         prompt = _instruction_du(job)
         note("run", run_id=run_id, repris=False)
     else:  # continue — OU start re-claimé : reprise du fil existant
-        run_id = job["run_id"]
+        run_id = tenu.run_id = job["run_id"]
         tours = backend.thread_read(run_id, include_raw=True)
         historique = _assainir_pour_transport(
             [t["provider_raw"] for t in tours if t.get("provider_raw")])
@@ -284,56 +292,15 @@ def _traiter(backend: Backend, job: dict, provider,
     # La donnée est protégée là où elle vit : la plateforme conserve la valeur
     # d'avant. Et ce que l'agent produit se juge par qui l'a commandé.
 
-    entree = int(res.usage.get("input_tokens") or 0)
-    sortie = int(res.usage.get("output_tokens") or 0)
-    jetons = entree + sortie
-    # Le cache de prompt se compte À CÔTÉ, jamais dedans : `input_tokens` est le
-    # reste NON caché, donc les jetons lus en cache ne sont pas dans `jetons`.
-    # `usage_tokens` reste input+output — c'est la base des bornes de flotte
-    # (budget, rendement), et la déplacer les fausserait toutes d'un coup.
-    lus_en_cache = int(res.usage.get("cache_read_input_tokens") or 0)
-    ecrits_en_cache = int(res.usage.get("cache_creation_input_tokens") or 0)
-    # Le résultat DÉCLARÉ (R5) : ce que l'ordonnanceur lit pour ses bornes — un
-    # résumé d'EXÉCUTION, jamais du contenu de fil, jamais un jugement sur ce
-    # que l'agent a produit. `tool_counts` compte les APPELS par outil, sans les
-    # interpréter (le worker ne sait pas ce qu'écrire veut dire) : il rend le
-    # tour perdu lisible d'un coup d'œil — un agent qui analyse et conclut en
-    # prose sans rien appeler ne produit aucune erreur, la seule trace est
-    # l'écart entre ses mots et ses appels.
-    compte: dict = {}
-    for s in res.steps:
-        if s.ok:
-            compte[s.tool] = compte.get(s.tool, 0) + 1
+    demande = _modele_courant(provider)
+    resultat = conclusion.resultat_declare(res, demande)
+    jetons, lus_en_cache = resultat["usage_tokens"], resultat["usage_cache_read"]
     outcome = "done" if res.stopped == "end_turn" else "blocked"
-    note_run = None
-    resultat = {
-        "usage_tokens": jetons,
-        "usage_input": entree,
-        "usage_output": sortie,
-        "usage_cache_read": lus_en_cache,
-        "usage_cache_write": ecrits_en_cache,
-        "stopped": res.stopped,
-        "steps": len(res.steps),
-        "tool_counts": compte,
-        # ⚠️ Repli SUR LE WORKER, pas seulement dans les transports : c'est ce qui
-        # ferme la classe. Un transport qui oublierait de poser l'estampille
-        # rendrait à nouveau `null` partout — et un `null` ne se distingue pas
-        # d'un job qui n'a pas tourné. Ici, au pire, on estampille ce qu'on a
-        # DEMANDÉ ; le transport, lui, sait ce qui a été SERVI et gagne.
-        "model": res.model or _modele_courant(provider),
-    }
-    cloture = "ok"
-    try:
-        mcp.outil("run_finish", {"run_id": run_id, "outcome": outcome,
-                                 "note": note_run})
-    except Exception as e:  # noqa: BLE001 — la clôture ne fait pas échouer le job
-        cloture = f"refusé : {e}"
-        logger.warning("job %s : run_finish refusé (%s)", job["id"], e)
+    cloture = conclusion.clore(tenu, outcome, job_id=job["id"])
     # L'état final et la raison d'arrêt, tels que DÉCLARÉS — la dernière ligne
     # d'un travail qui a conclu. Le modèle DEMANDÉ et le modèle SERVI, tous deux :
     # l'étiquette d'une flotte a trompé deux heures de mesures (06/09) ; quand ils
     # diffèrent, les deux se voient.
-    demande = _modele_courant(provider)
     note("resultat", outcome=outcome, run_id=run_id, run_finish=cloture,
          resultat=resultat, reponse=res.reply, modele_demande=demande,
          modele_servi=res.model)
@@ -381,11 +348,13 @@ def _un_travail(backend: Backend, job: dict, provider, file=None) -> None:
     file = backend if file is None else file
     j = journal.du_travail(job)
     journal.debut(j, job, provider)
+    # Ce que le travail tiendra : rempli par `_traiter`, lu ici s'il meurt.
+    tenu = RunEnCours()
     # ⚠️ Chaque annonce passe par `journal.relu` : le fichier est RELU avant
     # d'être nommé, sinon ça LÈVE en nommant le chemin — le worker est celui qui
     # écrit, un journal qu'il ne peut pas relire est un défaut, pas un aléa.
     try:
-        _traiter(backend, job, provider, journal_=j, file=file)
+        _traiter(backend, job, provider, journal_=j, file=file, tenu=tenu)
         logger.info("job %s : journal %s", job.get("id"), journal.relu(j.chemin))
     except IdentiteInvalide as e:
         # ⚠️ On ne conclut PAS : le serveur a déjà marqué ce travail en échec à
@@ -397,15 +366,15 @@ def _un_travail(backend: Backend, job: dict, provider, file=None) -> None:
                      "reprogrammer sous une autre identité. Journal : %s",
                      job.get("id"), e, journal.relu(j.chemin))
     except Exception as e:  # noqa: BLE001 — l'échec d'un job n'arrête pas la batterie
+        # ⚠️ La cause d'abord, ENTIÈRE (type, message, pile) : rien de ce qui
+        # suit ne doit la masquer. Puis le travail REND ce qu'il tient — run clos
+        # en `failed`, ligne libérée, `resultat` au journal, job conclu en échec.
+        # Sans ça, un incident de transport laissait un run ouvert et une ligne
+        # verrouillée quinze minutes (nuit du 06/09, deux travaux).
         journal.erreur(j, e)
+        conclusion.en_echec(j, tenu, job, file, e, _modele_courant(provider))
         logger.exception("job %s en échec — journal : %s", job.get("id"),
                          journal.relu(j.chemin))
-        try:
-            file.complete(job["id"], ok=False, error=str(e)[:400])
-        except BackendError as e2:
-            # Bail déjà perdu (re-claimé ailleurs) : le job ne nous appartient
-            # plus, on n'insiste pas.
-            logger.warning("complete %s : %s", job.get("id"), e2)
 
 
 def main() -> None:

@@ -38,7 +38,21 @@ OTO_RUNNER_RELANCES_MAX=0            # relances d'un fil qui rend un appel au cl
 OTO_RUNNER_EFFORT=…                  # profondeur de raisonnement — Anthropic `output_config.effort`,
                                      # OpenAI-compatible `reasoning_effort` ; ABSENT = rien n'est envoyé
 OTO_RUNNER_MAX_TOKENS=8192           # plafond de COMPLÉTION d'un tour (les deux providers)
+OTO_RUNNER_MAX_TOOL_OUTPUT=120000    # plafond, en CARACTÈRES, d'une sortie d'outil servie au modèle
 ```
+
+⚠️ **Le plafond de sortie d'outil se règle, et son défaut a changé.** À 12 000
+caractères, la consigne métier rendue par `oto_procedure` (44 818 caractères) et
+le schéma du tableau (38 079) arrivaient **coupés à leur premier tiers** : le
+modèle inventait des options et une colonne, oubliait `statut: enrichi`, relisait
+la procédure trois fois pour tenter d'en voir plus, et concluait « le schéma ne
+contient pas de colonne contacts » — elle existait, dans la partie coupée (nuit
+du 06/09/2026, tous les passages). Le défaut est passé à **120 000 caractères
+≈ 30 k jetons** : une procédure de 45 k et un schéma de 40 k passent entiers, et
+on reste très en dessous des fenêtres des modèles servis. Quand une troncature a
+tout de même lieu, le texte servi se termine par une phrase qui **dit combien de
+caractères manquent** et interdit de conclure par absence ; le journal, lui,
+garde le texte ENTIER et note la longueur réellement servie (`servi_chars`).
 
 ⚠️ **Deux réglages que Scaleway facture ou coupe.** `OTO_RUNNER_EFFORT` n'était lu
 que côté Anthropic ; Scaleway active le raisonnement **par défaut** et le facture
@@ -72,13 +86,24 @@ run          le run ouvert ou repris (et la taille du fil rechargé)
 systeme      le prompt système, l'allowlist, les plafonds
 historique   le fil rechargé, tel que transporté au modèle (reprise)
 utilisateur  le message initial (ou le message d'un `continue`)
-modele       un par tour : texte, appels AVEC leurs arguments complets, usage, modèle servi, blocs bruts
+modele       un par tour : texte, appels AVEC leurs arguments complets, usage, modèle servi,
+             durée du tour (`duree_ms`), blocs bruts
 outil        un par appel : arguments, sortie ENTIÈRE telle que rendue par le transport
-             (`tronque_pour_le_modele` dit si le modèle en a lu une version plafonnée), ok, durée
+             (`tronque_pour_le_modele` dit si le modèle en a lu une version plafonnée,
+             `servi_chars` combien il en a reçu), ok, durée
 fin          la raison d'arrêt, la réponse, l'usage cumulé
-resultat     le résultat DÉCLARÉ à la plateforme, l'outcome, la clôture du run
-erreur       le plantage : type, message ENTIER, pile
+resultat     le résultat DÉCLARÉ à la plateforme, l'outcome, la clôture du run —
+             **y compris quand le travail meurt** (`outcome: failed`), après l'`erreur`
+erreur       le plantage : type, message ENTIER, pile — la CAUSE, jamais le dernier mot
 ```
+
+Un `systeme` supplémentaire dit chaque **retentative** d'un tour de modèle (essai,
+motif, attente). Un incident de transport — connexion perdue, délai d'attente,
+429, 5xx — est rejoué trois fois (5 s puis 20 s) avant d'échouer : deux travaux
+sont morts sur un `ReadTimeout` isolé le 06/09, l'un après cinq minutes de
+silence du fournisseur. Et **un travail qui meurt clôt son run** (`run_finish`
+`failed`, ce qui libère la ligne qu'il tenait) avant de se conclure en échec :
+sans ça, la ligne réservée restait verrouillée tout son bail (quinze minutes).
 
 Sur le chemin Conversations : `conversation` (la requête entière, sans la clé),
 `reponse` (les `outputs` bruts), `relance`. Une ligne :

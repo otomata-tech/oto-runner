@@ -19,13 +19,17 @@ La forme de fil OpenAI, confinée ici :
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
-from typing import Optional
+import time
+from typing import Callable, Optional
 
 import requests
 
 from .llm_types import LlmUnavailable, ToolCall, Turn
+
+logger = logging.getLogger("oto_runner")
 
 DEFAULT_BASE = "https://api.scaleway.ai/v1"
 # gpt-oss-120b : le candidat du banc — 0,15/0,60 €/M, tool calling prouvé, et le
@@ -37,16 +41,36 @@ _TIMEOUT = (10, 300)
 # goutte tient la connexion indéfiniment (vécu : un tour de modèle figé 35 min,
 # pile bloquée dans ssl.read). Le plafond wall-clock coupe pour de vrai.
 _WALL_TIMEOUT_S = 420
+# ── La RETENTATIVE d'un tour de modèle ───────────────────────────────────────
+#
+# ⚠️ Un incident de TRANSPORT n'est pas une réponse : il ne tue plus le travail.
+# Nuit du 06/09/2026, deux travaux en mode direct morts sur un `ReadTimeout`
+# isolé (l'un pendant l'envoi — 10 s —, l'autre après 300 s sans un octet, cinq
+# minutes après le dernier appel d'outil). En flotte, le job se serait rejoué
+# plus tard ; en direct, il était PERDU (« volume atteint »), avec son run
+# ouvert et sa ligne verrouillée. Trois essais, 5 s puis 20 s.
+_ESSAIS = 3
+_ATTENTES_S = (5, 20)
+# ⚠️ `ReadTimeout` et `ConnectTimeout` descendent de `Timeout` ; `ConnectTimeout`
+# descend AUSSI de `ConnectionError`. Ces deux classes couvrent les trois cas.
+_TRANSPORT = (requests.exceptions.ConnectionError, requests.exceptions.Timeout)
+# Ce que rend un fournisseur DÉBORDÉ, par opposition à un appel mal formé : 429
+# (quota) et les 5xx sont des états passagers. Un 4xx est une RÉPONSE — le
+# rejouer rejouerait le même verdict, et le journal porterait trois fois la
+# même erreur au lieu d'une.
+_STATUTS_REJOUES = frozenset({429, 500, 502, 503, 504})
 
 
 class _Deadline(Exception):
     pass
 
 
-def _post_borne(url: str, corps: dict, entetes: dict):
-    """POST avec un VRAI plafond de durée (SIGALRM — le worker est mono-thread).
-    Lève LlmUnavailable au-delà : la boucle échoue proprement, le job se rejoue
-    et REPREND son fil — jamais un process suspendu qu'il faut tuer à la main."""
+def _post_une_fois(url: str, corps: dict, entetes: dict):
+    """UN POST, sous un VRAI plafond de durée (SIGALRM — le worker est mono-thread).
+
+    ⚠️ L'alarme est armée ICI et désarmée ICI, à chaque essai : une attente entre
+    deux essais ne doit jamais courir sous l'alarme du précédent, et le handler
+    d'origine est rendu à chaque sortie."""
     def _coupe(signum, frame):
         raise _Deadline()
 
@@ -61,6 +85,52 @@ def _post_borne(url: str, corps: dict, entetes: dict):
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, ancien)
+
+
+def _post_borne(url: str, corps: dict, entetes: dict,
+                on_event: Optional[Callable[[str, dict], None]] = None):
+    """Le POST au fournisseur, RETENTÉ sur incident de transport.
+
+    Trois essais, 5 s puis 20 s d'attente, chacun sous son propre plafond mural.
+    Chaque retentative est DITE au journal du travail (événement `systeme`) :
+    sans elle, un tour qui a coûté trente secondes de plus n'a aucune explication
+    après coup, et c'est le journal qui fait foi.
+
+    Après le dernier essai : `LlmUnavailable` — jamais une exception `requests`
+    nue. C'est la classe que la boucle a déjà pour « le substrat n'a pas
+    répondu », et le worker en fait un échec propre (run clos, ligne rendue).
+
+    Un statut rejouable encore présent au DERNIER essai rend la réponse telle
+    quelle : c'est `complete` qui lève alors, avec le dire du serveur ENTIER —
+    on ne remplace pas ce que le fournisseur explique par notre propre résumé.
+
+    ⚠️ La deadline murale n'est PAS rejouée : elle a déjà attendu sept minutes
+    sur un serveur qui gouttait, la rejouer paierait trois fois cette attente."""
+    dernier: Optional[BaseException] = None
+    motif = ""
+    for essai in range(1, _ESSAIS + 1):
+        try:
+            r = _post_une_fois(url, corps, entetes)
+        except _TRANSPORT as e:
+            dernier, motif = e, f"{type(e).__name__} : {e}"
+        else:
+            if r.status_code not in _STATUTS_REJOUES or essai == _ESSAIS:
+                return r
+            dernier, motif = None, f"HTTP {r.status_code} : {r.text[:300]}"
+        if essai == _ESSAIS:
+            break
+        attente = _ATTENTES_S[essai - 1]
+        if on_event:
+            on_event("systeme", {"quoi": "retentative du tour de modèle",
+                                 "essai": essai, "essais": _ESSAIS,
+                                 "sur": motif, "attente_s": attente})
+        logger.warning("tour de modèle : %s — essai %s/%s dans %s s",
+                       motif, essai + 1, _ESSAIS, attente)
+        time.sleep(attente)
+    raise LlmUnavailable(
+        f"le fournisseur n'a pas répondu en {_ESSAIS} essais — dernier "
+        f"incident : {motif}") from dernier
+
 
 _ENV_KEY = "OTO_RUNNER_OPENAI_API_KEY"
 _ENV_BASE = "OTO_RUNNER_OPENAI_BASE"
@@ -154,12 +224,16 @@ def format_tools(schemas: list[dict]) -> list[dict]:
 
 
 def complete(*, system: str, messages: list, tools: list[dict],
-             api_key: Optional[str] = None) -> Turn:
+             api_key: Optional[str] = None,
+             on_event: Optional[Callable[[str, dict], None]] = None) -> Turn:
     """UN tour de modèle — synchrone, le worker a le droit d'attendre.
 
     Le `system` passe en premier message (la convention OpenAI) ; `messages` est
     le fil au format OpenAI (les `provider_raw` rejoués). Toute erreur HTTP
-    remonte à la boucle avec le DIRE du serveur, entier — jamais avalée."""
+    remonte à la boucle avec le DIRE du serveur, entier — jamais avalée.
+
+    `on_event(type, champs)` : le journal du travail, quand la boucle en tient
+    un — il reçoit chaque retentative de transport (cf. `_post_borne`)."""
     corps = {
         "model": model(),
         "max_tokens": max_tokens(),
@@ -177,7 +251,8 @@ def complete(*, system: str, messages: list, tools: list[dict],
     if effort():
         corps["reasoning_effort"] = effort()
     r = _post_borne(base_url() + "/chat/completions", corps,
-                    {"Authorization": f"Bearer {api_key or resolve_key()}"})
+                    {"Authorization": f"Bearer {api_key or resolve_key()}"},
+                    on_event=on_event)
     if r.status_code >= 400:
         try:
             detail = r.json().get("message") or r.json().get("error") or r.text

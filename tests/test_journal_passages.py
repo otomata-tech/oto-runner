@@ -38,12 +38,17 @@ def _lignes(chemin) -> list[dict]:
 
 # ── La boucle : tout, entier ─────────────────────────────────────────────────
 
-def test_une_erreur_d_outil_longue_est_journalisee_ENTIERE_et_plafonnee_pour_le_modele(tmp_path):
+def test_une_erreur_d_outil_longue_est_journalisee_ENTIERE_et_plafonnee_pour_le_modele(
+        tmp_path, monkeypatch):
     """LE cas : le refus d'un schéma nomme la colonne et la raison — en fin de
-    message. Le modèle lit la version plafonnée ; le journal garde tout."""
+    message. Le modèle lit la version plafonnée ; le journal garde tout.
+
+    Le plafond est abaissé ici pour tenir en un test : à son défaut (120 000),
+    ce refus de 42 k passerait entier — c'est le sujet d'un autre banc."""
+    monkeypatch.setenv("OTO_RUNNER_MAX_TOOL_OUTPUT", "12000")
     refus = ("écriture refusée par le schéma : `qualification_piece` = "
              "`cessation_registre` n'est pas une option — " + "détail " * 6_000)
-    assert len(refus) > agent_runtime.MAX_TOOL_OUTPUT_CHARS
+    assert len(refus) > agent_runtime.max_tool_output()
     t = FauxTransport({"data_write": (refus, True)})
     arguments = {"namespace": "vivier", "key": "@claimed",
                  "patch": {"qualification_piece": "cessation_registre"}}
@@ -59,9 +64,14 @@ def test_une_erreur_d_outil_longue_est_journalisee_ENTIERE_et_plafonnee_pour_le_
     outil, = [e for e in evs if e["ev"] == "outil"]
     assert outil["texte"] == refus, "le journal porte la sortie ENTIÈRE"
     assert outil["ok"] is False and outil["tronque_pour_le_modele"] is True
+    assert outil["servi_chars"] < len(refus), (
+        "le journal dit AUSSI la longueur réellement servie au modèle — sans "
+        "elle, « qu'a-t-il lu ? » n'a pas de réponse après coup")
+    assert evs[0]["max_tool_output"] == 12_000, "sous quel plafond ce déroulé a tourné"
     assert outil["arguments"] == arguments, "les arguments sont complets, pas résumés"
     lu_par_le_modele = res.messages[-2]["content"][0]["content"]
-    assert len(lu_par_le_modele) < len(refus) and "tronquée" in lu_par_le_modele
+    assert len(lu_par_le_modele) == outil["servi_chars"]
+    assert "SORTIE TRONQUÉE" in lu_par_le_modele
     assert evs[0]["texte"] == "le cadre" and evs[1]["texte"] == "vas-y"
     modele = evs[2]
     assert modele["appels"] == [{"id": "t0", "nom": "data_write", "arguments": arguments}]
@@ -159,11 +169,67 @@ def test_un_plantage_laisse_type_message_ENTIER_et_pile(monkeypatch, tmp_path):
     W._un_travail(b, _job(), _Provider)
 
     evs = _lignes(tmp_path / "passages" / "banc-demo" / "7.jsonl")
-    assert [e["ev"] for e in evs] == ["debut", "outils", "run", "modele", "erreur"]
-    erreur = evs[-1]
+    assert [e["ev"] for e in evs] == ["debut", "outils", "run", "modele",
+                                      "erreur", "resultat"]
+    erreur = evs[-2]
     assert erreur["type"] == "RuntimeError" and erreur["message"] == message
     assert "Traceback" in erreur["traceback"] and "faux_run" in erreur["traceback"]
-    assert ("complete", False, None) in b.appels, "le travail est bien conclu en échec"
+    assert ("complete", False, "r-NEUF") in b.appels, (
+        "le travail est conclu en échec AVEC son run — c'est ce qui relie ses "
+        "refus d'écriture à lui, au bilan")
+
+
+def test_un_travail_mort_en_plein_vol_CLOT_son_run_et_le_dit(monkeypatch, tmp_path):
+    """⚠️ Nuit du 06/09 : deux travaux tués par un `ReadTimeout` du fournisseur.
+    Journal terminé sur `erreur`, `run_finish` jamais appelé — **et la ligne que
+    le run tenait est restée verrouillée jusqu'à l'expiration de son bail**
+    (quinze minutes), pendant que le mode direct annonçait « volume atteint ».
+    Un travail mort rend ce qu'il tient tout de suite."""
+    from tests.test_worker_reprise import FauxBackend, FauxMcp
+
+    vus: list = []
+
+    class McpEspion(FauxMcp):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            vus.append(self)
+
+    _boucle_scriptee(monkeypatch, leve=RuntimeError("Read timed out. (read timeout=300)"))
+    monkeypatch.setattr(W, "McpSession", McpEspion)
+    W._un_travail(FauxBackend(), _job(), _Provider)
+
+    mcp, = vus
+    assert mcp.outils == ["run_start", "run_finish"], "le run ouvert est CLOS"
+    nom, args = mcp.appels[-1]
+    assert args["run_id"] == "r-NEUF" and args["outcome"] == "failed"
+    assert "Read timed out" in args["note"], "la clôture porte le motif"
+
+    fin = _lignes(tmp_path / "passages" / "banc-demo" / "7.jsonl")[-1]
+    assert fin["ev"] == "resultat" and fin["outcome"] == "failed"
+    assert fin["run_finish"] == "ok" and fin["run_id"] == "r-NEUF"
+    assert fin["resultat"]["type"] == "RuntimeError"
+    assert "read timeout=300" in fin["resultat"]["erreur"]
+
+
+def test_un_run_finish_refuse_se_DIT_et_ne_masque_pas_la_cause(monkeypatch, tmp_path):
+    """La clôture est un geste de tenue : son refus se journalise, il n'écrase
+    pas l'erreur d'origine et ne fait pas échouer davantage."""
+    from tests.test_worker_reprise import FauxBackend, FauxMcp
+
+    class McpQuiRefuse(FauxMcp):
+        def outil(self, name, args=None):
+            d = super().outil(name, args)
+            if name == "run_finish":
+                raise RuntimeError("run_finish : 403 le run n'est plus à vous")
+            return d
+
+    _boucle_scriptee(monkeypatch, leve=RuntimeError("boum"))
+    monkeypatch.setattr(W, "McpSession", McpQuiRefuse)
+    W._un_travail(FauxBackend(), _job(), _Provider)
+
+    evs = _lignes(tmp_path / "passages" / "banc-demo" / "7.jsonl")
+    assert evs[-2]["ev"] == "erreur" and evs[-2]["message"] == "boum"
+    assert evs[-1]["run_finish"].startswith("refusé : ")
 
 
 def test_un_travail_sans_flotte_va_dans_hors_flotte_et_un_tag_douteux_ne_fait_pas_de_chemin():

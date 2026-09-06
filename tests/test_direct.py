@@ -146,6 +146,33 @@ def test_seuls_les_trois_verbes_varient_le_journal_est_IDENTIQUE(monkeypatch, tm
     assert sans.conclus[7]["result"]["model"] == "gpt-oss-120b-2508"
 
 
+def test_sans_file_un_travail_MORT_clot_son_run_et_rend_le_sien(monkeypatch, tmp_path):
+    """Le chemin d'échec ne varie pas non plus : le run est clos `failed` (ce
+    qui libère la ligne réservée), le journal se termine par `resultat`, et le
+    travail conclu porte son `run_id` — sans lui, ses refus d'écriture
+    n'appartiendraient à personne au bilan.
+
+    ⚠️ En flotte, un travail mort se rejoue plus tard ; en direct il est perdu
+    (« volume atteint »). C'est là que la libération immédiate compte le plus."""
+    _boucle_scriptee(monkeypatch)
+
+    def meurt(*a, **kw):
+        raise RuntimeError("Read timed out. (read timeout=10)")
+
+    monkeypatch.setattr(W.agent_runtime, "run", meurt)
+    job = _job("start")
+    job["payload"]["fleet"] = "sans-file"
+    sans = SansFile()
+    W._un_travail(FauxBackend(), job, _PROVIDER, file=sans)
+
+    assert sans.conclus[7]["status"] == "failed"
+    assert sans.conclus[7]["run_id"] == "r-NEUF"
+    assert "read timeout=10" in sans.conclus[7]["error"]
+    evs = [json.loads(l) for l in open(journal.chemin("sans-file", 7))]
+    assert [e["ev"] for e in evs[-2:]] == ["erreur", "resultat"]
+    assert evs[-1]["outcome"] == "failed" and evs[-1]["run_finish"] == "ok"
+
+
 def test_le_mode_direct_n_appelle_JAMAIS_la_file_de_jobs(monkeypatch):
     """Le vrai `_traiter`, un vrai `Backend` dont on espionne les routes : le fil du
     run est posé (`/api/me/runs/thread`), le tableau est lu — et pas UNE requête

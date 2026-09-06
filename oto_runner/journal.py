@@ -198,8 +198,12 @@ def ecart_instruction(catalogue: Optional[frozenset], autorises, instruction: st
 
 
 def erreur(journal: Journal, e: BaseException) -> None:
-    """Le plantage, avec sa pile ENTIÈRE — le dernier événement d'un travail qui
-    n'a pas conclu."""
+    """Le plantage, avec sa pile ENTIÈRE — la CAUSE, écrite avant tout le reste.
+
+    ⚠️ Ce n'est plus le dernier événement : un travail mort rend ensuite ce qu'il
+    tient (run clos en `failed`, ligne libérée) et le dit en `resultat`, cf.
+    `conclusion.py`. L'ordre est voulu — la cause d'abord, ce qu'on en a fait
+    ensuite ; rien de ce qui suit ne doit masquer ce qui a tué le travail."""
     journal.ecrire("erreur", type=type(e).__name__, message=str(e),
                    traceback=traceback.format_exc())
 

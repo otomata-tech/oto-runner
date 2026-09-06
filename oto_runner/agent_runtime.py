@@ -27,6 +27,7 @@ par job, borné dur à 64.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -34,7 +35,21 @@ from typing import Callable, Optional, Protocol
 
 from .llm_types import ToolCall, Turn  # noqa: F401 — le contrat du provider
 
-MAX_TOOL_OUTPUT_CHARS = 12_000
+# ── Le plafond de la sortie d'outil SERVIE AU MODÈLE, en caractères ─────────
+#
+# ⚠️ 12 000 caractères ont fait dérailler TOUS les passages de la nuit du
+# 06/09/2026. La consigne métier rendue par `oto_procedure` fait 44 818
+# caractères, le schéma du tableau 38 079 : le modèle n'en a lu que le premier
+# tiers (~3 900 jetons d'entrée au tour suivant). Il a inventé des options
+# (`active_maison_du_livre`, `liquidation_judiciaire`, `registre`) et une colonne
+# (`dirigeants`), oublié `statut: enrichi` et `notes_verification`, relu la
+# procédure trois fois pour tenter d'en voir plus, et conclu que « le schéma ne
+# contient pas de colonne contacts » — elle existait, dans la partie coupée.
+#
+# 120 000 caractères ≈ 30 k jetons : une procédure de 45 k et un schéma de 40 k
+# passent ENTIERS, et on reste très en dessous des fenêtres des modèles servis.
+DEFAULT_MAX_TOOL_OUTPUT_CHARS = 120_000
+_ENV_MAX_TOOL_OUTPUT = "OTO_RUNNER_MAX_TOOL_OUTPUT"
 # Signatures d'erreurs TRANSITOIRES d'outil : rejouées UNE fois, silencieusement
 # (le modèle ne voit que la seconde réponse). La politique de reprise est de la
 # MÉCANIQUE, pas de la consigne : en prose elle coûte des caractères (payés en
@@ -152,12 +167,37 @@ OnTurn = Callable[[str, dict, dict], None]
 OnEvent = Callable[[str, dict], None]
 
 
-def _cap(text: str) -> str:
-    if len(text) <= MAX_TOOL_OUTPUT_CHARS:
-        return text
-    return (text[:MAX_TOOL_OUTPUT_CHARS]
-            + f"\n…[sortie tronquée à {MAX_TOOL_OUTPUT_CHARS} caractères — "
-              "affine la requête (filtre, limite) pour en voir moins à la fois]")
+def max_tool_output() -> int:
+    """Le plafond effectif : `OTO_RUNNER_MAX_TOOL_OUTPUT`, sinon le défaut.
+
+    ⚠️ Une valeur illisible LÈVE. Un plafond qu'on croit posé et qui ne l'est
+    pas coupe la consigne en silence — c'est exactement le défaut qu'on corrige,
+    on ne va pas le réintroduire par un repli complaisant."""
+    brut = os.environ.get(_ENV_MAX_TOOL_OUTPUT, "").strip()
+    if not brut:
+        return DEFAULT_MAX_TOOL_OUTPUT_CHARS
+    if not brut.isdigit() or int(brut) < 1:
+        raise ValueError(
+            f"{_ENV_MAX_TOOL_OUTPUT} = {brut!r} : un entier ≥ 1 est attendu")
+    return int(brut)
+
+
+def _cap(text: str, limite: int) -> tuple[str, bool]:
+    """(ce que le modèle lit, a-t-on coupé). La coupure est DITE, en français,
+    avec ce qui manque.
+
+    ⚠️ Un modèle qui ignore qu'il lit un extrait conclut SUR l'extrait en croyant
+    tout voir : le 06/09, « le schéma ne contient pas de colonne contacts » sur
+    un schéma coupé à son premier tiers. La phrase de fin nomme donc le nombre de
+    caractères manquants et interdit explicitement la conclusion par absence."""
+    if len(text) <= limite:
+        return text, False
+    return (text[:limite]
+            + f"\n\n…[SORTIE TRONQUÉE : tu ne lis que les {limite} premiers "
+              f"caractères sur {len(text)} — il en manque {len(text) - limite}. "
+              "N'en conclus PAS que ce qui n'apparaît pas ici n'existe pas : "
+              "affine ta requête (filtre, limite, section) pour lire la suite.]",
+            True)
 
 
 def _trim(messages: list) -> list:
@@ -229,8 +269,12 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
 
     messages = _trim(history or [])
     plafond = max(1, min(spec.max_steps, HARD_MAX_STEPS))
+    # Lu UNE fois par déroulé, et DIT au journal : un passage se relit sans avoir
+    # à deviner sous quel plafond de sortie d'outil il a tourné.
+    limite_sortie = max_tool_output()
     note("systeme", texte=spec.system, outils=sorted(spec.tools),
-         max_steps=plafond, max_tokens=spec.max_tokens, label=spec.label)
+         max_steps=plafond, max_tokens=spec.max_tokens, label=spec.label,
+         max_tool_output=limite_sortie)
     if history:
         note("historique", messages=list(messages), total=len(history),
              transportes=len(messages))
@@ -249,8 +293,14 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
     servi: Optional[str] = None
 
     for _ in range(plafond + 1):
+        # ⚠️ Le tour est CHRONOMÉTRÉ : sans ça, un journal ne dit pas si un tour a
+        # pris deux secondes ou cinq minutes — et c'est la première question qu'on
+        # se pose devant un travail mort sur un délai d'attente du fournisseur.
+        debut_tour = time.monotonic()
         turn = provider.complete(system=spec.system, messages=messages,
-                                 tools=schemas, api_key=api_key)
+                                 tools=schemas, api_key=api_key,
+                                 on_event=on_event)
+        duree_tour_ms = int((time.monotonic() - debut_tour) * 1000)
         for k in USAGE_KEYS:
             usage[k] = usage.get(k, 0) + int(turn.usage.get(k) or 0)
         # Le DERNIER tour fait foi : un fournisseur qui bascule d'alias en cours
@@ -259,7 +309,8 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
         note("modele", texte=turn.text, stop_reason=turn.stop_reason,
              appels=[{"id": c.id, "nom": c.name, "arguments": c.arguments}
                      for c in turn.tool_calls],
-             usage=dict(turn.usage or {}), modele=turn.model, brut=turn.raw_content)
+             usage=dict(turn.usage or {}), modele=turn.model,
+             duree_ms=duree_tour_ms, brut=turn.raw_content)
 
         # ⚠️ La borne se vérifie APRÈS le tour, jamais avant : on ne connaît le
         # coût d'un tour qu'une fois qu'il a eu lieu. Elle empêche donc le tour
@@ -299,10 +350,13 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
             ms = int((time.monotonic() - started) * 1000)
             # Journalisé ENTIER, puis plafonné pour le modèle : le journal garde
             # ce que le transport a rendu, le modèle lit ce qu'il peut porter.
+            pour_le_modele, tronque = _cap(text, limite_sortie)
             note("outil", id=call.id, nom=call.name, arguments=call.arguments,
                  ok=not is_error, transport_ko=transport_ko, duree_ms=ms,
-                 texte=text, tronque_pour_le_modele=len(text) > MAX_TOOL_OUTPUT_CHARS)
-            pour_le_modele = _cap(text)
+                 texte=text, tronque_pour_le_modele=tronque,
+                 # Ce que le modèle a RÉELLEMENT reçu (marqueur de troncature
+                 # compris) : la question « qu'a-t-il lu ? » se lit au journal.
+                 servi_chars=len(pour_le_modele))
             steps.append(AgentStep(tool=call.name, ok=not is_error, duration_ms=ms,
                                    error=text[:200] if is_error else None,
                                    vide=bool(a_vide and not is_error

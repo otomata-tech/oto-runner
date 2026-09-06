@@ -1,0 +1,136 @@
+"""La CONCLUSION d'un travail : clore le run oto, la dire au journal, rendre la ligne.
+
+Un travail se termine de deux façons, et **les deux passent ici** :
+
+- il **conclut** — la boucle a rendu un résultat : le run se clôt `done` (ou
+  `blocked` quand la boucle s'est arrêtée sur une borne), le résultat DÉCLARÉ
+  part à la file, l'événement `resultat` ferme le journal ;
+- il **meurt en plein vol** — une exception remonte de la boucle. C'est le
+  chemin qui manquait. Nuit du 06/09/2026 : deux travaux tués par un
+  `ReadTimeout` du fournisseur, journal terminé sur un `erreur`, `run_finish`
+  jamais appelé — **et la ligne que le run tenait est restée verrouillée
+  jusqu'à l'expiration de son bail** (quinze minutes), pendant que le mode
+  direct annonçait « volume atteint ». Un travail mort doit rendre ce qu'il
+  tient TOUT DE SUITE : c'est `run_finish(outcome="failed")` qui libère.
+
+⚠️ Clore ne fait jamais échouer davantage. La clôture est un geste de TENUE :
+son refus se dit (`run_finish: "refusé : …"`) et n'écrase pas la cause d'origine,
+déjà écrite au journal avec sa pile.
+
+⚠️ Ce module ne juge RIEN de ce que l'agent a produit — il ne sait pas ce
+qu'écrire veut dire. Il compte des jetons, des pas et des appels, et recopie ce
+que la boucle a dit d'elle-même.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Optional
+
+from .backend import BackendError
+
+logger = logging.getLogger("oto_runner")
+
+_NOTE_MAX = 400        # ce qu'on met dans la note d'un run_finish / d'un complete
+
+
+@dataclass
+class RunEnCours:
+    """Ce qu'un travail TIENT pendant qu'il tourne : sa session MCP et son run.
+
+    Rempli par `worker._traiter` au fur et à mesure, lu par `worker._un_travail`
+    quand le travail meurt : sans lui, l'étage qui rattrape l'exception ne sait
+    ni quel run est ouvert ni sous quelle identité le clore — et ne libère rien.
+    """
+    mcp: object = None
+    run_id: Optional[str] = None
+
+
+def clore(tenu: RunEnCours, outcome: str, note: Optional[str] = None,
+          job_id=None) -> str:
+    """`run_finish` — rend « ok » ou « refusé : <le dire du serveur> ».
+
+    Ne lève JAMAIS : un run_finish refusé ne fait pas échouer un travail que la
+    campagne a déjà payé, il se dit au journal et à la ligne de log.
+
+    ⚠️ C'est `run_finish` qui LIBÈRE ce que le run tient — les lignes réservées
+    en premier. Sans run ouvert il n'y a rien à clore, et ça se dit aussi :
+    jamais un appel à vide, jamais un « ok » qui n'a rien fermé."""
+    if tenu.mcp is None or not tenu.run_id:
+        return "aucun run ouvert"
+    try:
+        tenu.mcp.outil("run_finish", {"run_id": tenu.run_id, "outcome": outcome,
+                                      "note": note})
+        return "ok"
+    except Exception as e:  # noqa: BLE001 — cf. docstring
+        logger.warning("job %s : run_finish refusé (%s)", job_id, e)
+        return f"refusé : {e}"
+
+
+def resultat_declare(res, modele_par_defaut: str) -> dict:
+    """Le résultat DÉCLARÉ (R5) : ce que l'ordonnanceur lit pour ses bornes.
+
+    Un résumé d'EXÉCUTION — jamais du contenu de fil, jamais un jugement sur ce
+    que l'agent a produit. `tool_counts` compte les APPELS par outil sans les
+    interpréter : il rend le tour perdu lisible d'un coup d'œil (un agent qui
+    analyse et conclut en prose sans rien appeler ne produit aucune erreur ; la
+    seule trace est l'écart entre ses mots et ses appels)."""
+    entree = int(res.usage.get("input_tokens") or 0)
+    sortie = int(res.usage.get("output_tokens") or 0)
+    # Le cache de prompt se compte À CÔTÉ, jamais dedans : `input_tokens` est le
+    # reste NON caché, donc les jetons lus en cache ne sont pas dans `jetons`.
+    # `usage_tokens` reste input+output — c'est la base des bornes de flotte
+    # (budget, rendement), et la déplacer les fausserait toutes d'un coup.
+    compte: dict = {}
+    for s in res.steps:
+        if s.ok:
+            compte[s.tool] = compte.get(s.tool, 0) + 1
+    return {
+        "usage_tokens": entree + sortie,
+        "usage_input": entree,
+        "usage_output": sortie,
+        "usage_cache_read": int(res.usage.get("cache_read_input_tokens") or 0),
+        "usage_cache_write": int(res.usage.get("cache_creation_input_tokens") or 0),
+        "stopped": res.stopped,
+        "steps": len(res.steps),
+        "tool_counts": compte,
+        # ⚠️ Repli SUR LE WORKER, pas seulement dans les transports : c'est ce qui
+        # ferme la classe. Un transport qui oublierait de poser l'estampille
+        # rendrait à nouveau `null` partout — et un `null` ne se distingue pas
+        # d'un job qui n'a pas tourné. Ici, au pire, on estampille ce qu'on a
+        # DEMANDÉ ; le transport, lui, sait ce qui a été SERVI et gagne.
+        "model": res.model or modele_par_defaut,
+    }
+
+
+def en_echec(journal_, tenu: RunEnCours, job: dict, file,
+             e: BaseException, modele_demande: str) -> None:
+    """Ce qu'un travail MORT doit encore faire : clore son run en `failed` (ce
+    qui libère la ligne qu'il tenait), le dire au journal (`resultat`), et rendre
+    le travail à sa file en échec.
+
+    L'événement `erreur` — la cause, avec sa pile — est écrit AVANT par
+    l'appelant : `resultat` ne le remplace pas, il dit ce qu'on a FAIT de la
+    mort. Un journal qui s'arrête sur `erreur` est un travail dont personne n'a
+    rien rendu, et c'est précisément ce qu'on ne veut plus."""
+    motif = f"{type(e).__name__} : {e}"
+    cloture = clore(tenu, "failed", note=f"travail interrompu — {motif}"[:_NOTE_MAX],
+                    job_id=job.get("id"))
+    if journal_ is not None:
+        journal_.ecrire("resultat", outcome="failed", run_id=tenu.run_id,
+                        run_finish=cloture,
+                        resultat={"stopped": "erreur", "type": type(e).__name__,
+                                  "erreur": str(e)},
+                        reponse=None, modele_demande=modele_demande,
+                        modele_servi=None)
+    try:
+        # ⚠️ Le `run_id` part AVEC l'échec : c'est lui qui relie ce travail à ses
+        # appels dans le journal d'org (le bilan attribue ses refus d'écriture
+        # par run). Sans lui, les refus d'un travail mort n'appartenaient à
+        # personne — et le bilan les comptait pour la flotte d'à côté.
+        file.complete(job["id"], ok=False, error=str(e)[:_NOTE_MAX],
+                      run_id=tenu.run_id)
+    except BackendError as e2:
+        # Bail déjà perdu (re-claimé ailleurs) : le job ne nous appartient plus,
+        # on n'insiste pas.
+        logger.warning("complete %s : %s", job.get("id"), e2)

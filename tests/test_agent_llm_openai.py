@@ -11,9 +11,10 @@ from __future__ import annotations
 import json
 
 import pytest
+import requests
 
 from oto_runner import agent_llm_openai as P
-from oto_runner.llm_types import Turn
+from oto_runner.llm_types import LlmUnavailable, Turn
 
 
 class _Resp:
@@ -106,6 +107,115 @@ def test_le_plafond_wall_clock_coupe_un_serveur_qui_goutte(monkeypatch):
     assert "wall-clock" in str(e.value)
 
 
+# ── La RETENTATIVE : un incident de transport ne tue plus un travail ────────
+
+def _sans_attente(monkeypatch):
+    """Les attentes de 5 s et 20 s, mesurées mais pas subies par le banc."""
+    dormi: list = []
+    monkeypatch.setattr(P.time, "sleep", lambda s: dormi.append(s))
+    return dormi
+
+
+def test_un_incident_de_transport_est_RETENTE_et_le_tour_aboutit(monkeypatch):
+    """⚠️ Nuit du 06/09 : deux travaux morts sur un `ReadTimeout` isolé — l'un
+    pendant l'envoi (10 s), l'autre après 300 s sans un octet. Aucune
+    retentative : en flotte le job se rejouait plus tard, en direct il était
+    PERDU. Un incident de transport n'est pas une réponse."""
+    dormi = _sans_attente(monkeypatch)
+    essais: list = []
+
+    def post(*a, **k):
+        essais.append(1)
+        if len(essais) < 3:
+            raise requests.exceptions.ReadTimeout(
+                "HTTPSConnectionPool(host='api.mistral.ai', port=443): "
+                "Read timed out. (read timeout=300)")
+        return _Resp(_reponse({"role": "assistant", "content": "enfin"}))
+
+    monkeypatch.setattr(P.requests, "post", post)
+    evs: list = []
+    turn = P.complete(system="s", messages=[], tools=[], api_key="k",
+                      on_event=lambda ev, champs: evs.append((ev, champs)))
+    assert turn.text == "enfin" and len(essais) == 3
+    assert dormi == [5, 20], "5 s puis 20 s"
+    assert [ev for ev, _ in evs] == ["systeme", "systeme"], (
+        "chaque retentative est DITE au journal du travail")
+    assert evs[0][1] == {"quoi": "retentative du tour de modèle", "essai": 1,
+                         "essais": 3, "sur": evs[0][1]["sur"], "attente_s": 5}
+    assert "ReadTimeout" in evs[0][1]["sur"] and "read timeout=300" in evs[0][1]["sur"]
+
+
+def test_apres_le_dernier_essai_c_est_LlmUnavailable_jamais_une_exception_requests(monkeypatch):
+    """La boucle a une classe pour « le substrat n'a pas répondu » ; le worker
+    en fait un échec propre (run clos, ligne rendue). Une `ConnectionError` nue
+    remonterait comme un mystère de plus."""
+    dormi = _sans_attente(monkeypatch)
+    essais: list = []
+
+    def post(*a, **k):
+        essais.append(1)
+        raise requests.exceptions.ConnectionError("connexion refusée")
+
+    monkeypatch.setattr(P.requests, "post", post)
+    with pytest.raises(LlmUnavailable) as e:
+        P.complete(system="s", messages=[], tools=[], api_key="k")
+    assert len(essais) == 3 and dormi == [5, 20]
+    assert "3 essais" in str(e.value) and "connexion refusée" in str(e.value)
+    assert not isinstance(e.value, requests.exceptions.RequestException)
+
+
+def test_un_429_ou_un_5xx_est_rejoue_un_4xx_est_une_reponse(monkeypatch):
+    """429 et 5xx : le fournisseur est débordé, c'est passager. Un 4xx est une
+    RÉPONSE — le rejouer rejouerait le même verdict, trois fois."""
+    dormi = _sans_attente(monkeypatch)
+    codes = [503, 429, 200]
+    vus: list = []
+
+    def post(*a, **k):
+        code = codes[len(vus)]
+        vus.append(code)
+        return _Resp(_reponse({"role": "assistant", "content": "ok"}), status=code)
+
+    monkeypatch.setattr(P.requests, "post", post)
+    assert P.complete(system="s", messages=[], tools=[], api_key="k").text == "ok"
+    assert vus == [503, 429, 200] and dormi == [5, 20]
+
+    vus.clear(); dormi.clear(); codes[:] = [400, 400, 400]
+    with pytest.raises(RuntimeError, match="400"):
+        P.complete(system="s", messages=[], tools=[], api_key="k")
+    assert vus == [400] and dormi == [], "un 4xx n'est jamais rejoué"
+
+
+def test_un_statut_rejouable_au_DERNIER_essai_rend_le_dire_du_serveur(monkeypatch):
+    """On ne remplace pas ce que le fournisseur explique par notre résumé : au
+    dernier essai, la réponse remonte et `complete` lève avec son texte."""
+    _sans_attente(monkeypatch)
+    monkeypatch.setattr(P.requests, "post", lambda *a, **k: _Resp(
+        {"message": "service overloaded, retry later"}, status=503))
+    with pytest.raises(RuntimeError) as e:
+        P.complete(system="s", messages=[], tools=[], api_key="k")
+    assert "503" in str(e.value) and "service overloaded" in str(e.value)
+    assert not isinstance(e.value, LlmUnavailable)
+
+
+def test_la_deadline_murale_n_est_PAS_rejouee(monkeypatch):
+    """Elle a déjà attendu sept minutes sur un serveur qui gouttait : la rejouer
+    paierait trois fois cette attente."""
+    import time as _t
+
+    essais: list = []
+    monkeypatch.setattr(P, "_WALL_TIMEOUT_S", 1)
+
+    def post(*a, **k):
+        essais.append(1)
+        _t.sleep(5)      # ⚠️ un vrai sommeil : c'est SIGALRM qui doit le couper
+
+    monkeypatch.setattr(P.requests, "post", post)
+    with pytest.raises(LlmUnavailable, match="wall-clock"):
+        P.complete(system="s", messages=[], tools=[], api_key="k")
+    assert essais == [1], "un seul essai — la deadline murale ne se rejoue pas"
+
+
 def test_un_contenu_en_liste_de_blocs_est_normalise(monkeypatch):
     """Mistral rend parfois `content` en LISTE de blocs typés au lieu d'une
     chaîne (vécu, job 52 : AttributeError au .strip() — déterministe au rejeu
@@ -123,7 +233,7 @@ def test_un_contenu_en_liste_de_blocs_est_normalise(monkeypatch):
                      "finish_reason": "stop"}],
                     "usage": {"prompt_tokens": 1, "completion_tokens": 2}}
 
-    monkeypatch.setattr(A, "_post_borne", lambda url, corps, entetes: _R)
+    monkeypatch.setattr(A, "_post_borne", lambda url, corps, entetes, **_: _R)
     t = A.complete(system="s", messages=[A.user_message("go")], tools=[],
                    api_key="k")
     assert t.text == "première partie\nseconde"

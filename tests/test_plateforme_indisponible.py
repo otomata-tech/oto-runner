@@ -57,7 +57,9 @@ class _PlateformeQuiBascule:
         self.restants -= 1
         return {"id": 200 + self.restants, "kind": "start"}
 
-    def complete(self, job_id, ok=True, error=None):
+    def complete(self, job_id, ok=True, error=None, run_id=None, result=None):
+        # La signature EST celle de `FileDeTravail` : un travail en échec rend
+        # aussi son `run_id` (c'est ce qui relie ses refus d'écriture au bilan).
         self.completes.append((job_id, ok))
 
 

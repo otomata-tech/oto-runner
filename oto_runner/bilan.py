@@ -65,8 +65,9 @@ import tempfile
 from datetime import datetime, timezone
 from typing import Optional
 
-from .bilan_postes import (REFUS_OUTIL as _REFUS_OUTIL, abouties_de,
-                           lignes_par_statut, refus_ecriture, valeur)
+from .bilan_ligne import journaliser_refus as _journaliser_refus, ligne as _ligne
+from .bilan_postes import (abouties_de, lignes_par_statut, refus_ecriture,
+                           valeur)
 
 __all__ = ["ecrire_bilan", "annoter_lignes_sorties", "controler_fiches",
            "extinction_sans_acte", "valeur", "chemin_json", "PERIODE_S"]
@@ -105,73 +106,6 @@ def _restantes(spec, backend) -> Optional[int]:
     except Exception as e:  # noqa: BLE001 — un compte illisible ≠ un compte faux
         logger.warning("bilan : lignes restantes illisibles : %s", e)
         return None
-
-
-def _jetons_lisibles(n: Optional[int]) -> str:
-    """Un ordre de grandeur qui se lit d'un coup d'œil : « 1,8 M », « 24,1 k »."""
-    if n is None:
-        return "—"
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f} M".replace(".", ",")
-    if n >= 1_000:
-        return f"{n / 1_000:.1f} k".replace(".", ",")
-    return str(n)
-
-
-_MOTIF_AFFICHE = 90   # sur la LIGNE de journal seulement : le JSON porte tout
-
-
-def _abrege(texte: str) -> str:
-    return texte if len(texte) <= _MOTIF_AFFICHE else texte[:_MOTIF_AFFICHE] + "…"
-
-
-def _ligne(bilan: dict, chemin: Optional[str]) -> str:
-    """La ligne de journal : des effectifs bruts AVEC leur dénominateur — un
-    pourcentage cacherait qu'il porte sur trois lignes — et chaque poste NOMME
-    ce qu'il compte : « sorties » (de la file), « abouties » (état terminal hors
-    abandon), jamais l'un pour l'autre. Compacte : les motifs y sont abrégés, et
-    la ligne pointe vers le JSON qui les porte entiers."""
-    lignes, jetons = bilan["lignes"], bilan["jetons"]
-    sorties = "?" if lignes["sorties"] is None else lignes["sorties"]
-    postes = [f"sorties {sorties}/{lignes['depart']}"]
-    if lignes["par_statut"]:
-        postes.append("statut final : " + " · ".join(
-            f"{k} {n}" for k, n in sorted(lignes["par_statut"].items(),
-                                           key=lambda kv: -kv[1])))
-    postes.append(f"abouties {lignes['abouties']}" if lignes["abouties"] is not None
-                  else f"abouties non mesurées ({lignes['abouties_omis']})")
-    postes.append(f"{_jetons_lisibles(jetons['total'])} jetons")
-    postes.append(f"{_jetons_lisibles(jetons['par_aboutie'])}/aboutie"
-                  if jetons["par_aboutie"] is not None
-                  else f"{_jetons_lisibles(jetons['par_sortie'])}/sortie"
-                  if jetons["par_sortie"] is not None
-                  else "pas de jetons/sortie (0 sortie)")
-    refus = bilan["refus_ecriture"]
-    if refus:
-        postes.append(f"{refus['outil']} {refus['appels']} appels, "
-                      f"{refus['refuses']} refusé{'s' if refus['refuses'] > 1 else ''}")
-        # Le motif qui compte le plus se dit sur la ligne : « 12 refusés » ne dit
-        # pas si les agents inventent des entreprises ou oublient un jeton.
-        for poste, n in sorted((refus.get("motifs") or {}).items(),
-                               key=lambda kv: -kv[1])[:2]:
-            postes.append(f"{_abrege(poste)} ×{n}")
-    else:
-        postes.append(f"{_REFUS_OUTIL} non mesuré "
-                      f"({bilan['refus_ecriture_omis']})")
-    if chemin:
-        postes.append(f"détail complet : {chemin}")
-    return f"bilan flotte {bilan['flotte']} : " + " · ".join(postes)
-
-
-def _journaliser_refus(refus: Optional[dict]) -> None:
-    """Au bilan de FIN : chaque refus ENTIER sur sa ligne, avec le travail et le
-    journal JSONL qui le portent — le journal de flotte peut rester compact à
-    condition de mener au détail."""
-    for r in (refus or {}).get("detail") or []:
-        logger.info("refus %s à %s UTC — job %s : %s — journal du job : %s",
-                    refus["outil"], r["quand"], r["job"] or "? (run %s, hors "
-                    "de cette flotte ou non conclu)" % r["run_id"], r["erreur"],
-                    r["journal"] or "—")
 
 
 def chemin_json(spec) -> Optional[str]:

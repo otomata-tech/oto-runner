@@ -74,12 +74,64 @@ def test_un_outil_hors_allowlist_nest_jamais_transporte():
     assert res.stopped == "end_turn"
 
 
-def test_une_sortie_geante_est_tronquee_avec_la_marque():
-    t = FauxTransport({"data_rows": ("x" * 50_000, False)})
+def _servi(sortie: str) -> str:
+    """Ce que le modèle a RÉELLEMENT reçu pour une sortie d'outil donnée."""
+    t = FauxTransport({"data_rows": (sortie, False)})
     p = FauxProvider([_turn(calls=[("data_rows", {})]), _turn(text="fini")])
     res = agent_runtime.run(SPEC, t, p, prompt="go")
-    contenu = res.messages[-2]["content"][0]["content"]
-    assert len(contenu) < 50_000 and "tronquée" in contenu
+    return res.messages[-2]["content"][0]["content"]
+
+
+def test_une_consigne_de_45k_passe_ENTIERE_au_modele():
+    """⚠️ LE défaut de la nuit du 06/09 : à 12 000 caractères, la consigne
+    métier (44 818) et le schéma du tableau (38 079) arrivaient coupés au
+    premier tiers — le modèle inventait des options, oubliait des colonnes, et
+    concluait « le schéma ne contient pas de colonne contacts » sur la partie
+    qu'il n'avait pas lue. Le défaut passe à 120 000 : ces deux-là entrent."""
+    procedure = "consigne " * 5_000            # ≈ 45 000 caractères
+    assert 44_000 < len(procedure) < 46_000
+    assert _servi(procedure) == procedure, "aucune coupe, aucun marqueur"
+
+
+def test_au_dela_du_plafond_la_coupe_est_DITE_avec_ce_qui_manque(monkeypatch):
+    """Une troncature muette est un bug à part entière : le modèle croit avoir
+    tout lu. La phrase de fin nomme ce qui manque, en caractères."""
+    monkeypatch.setenv("OTO_RUNNER_MAX_TOOL_OUTPUT", "1000")
+    contenu = _servi("x" * 4_500)
+    assert contenu.startswith("x" * 1_000)
+    assert "SORTIE TRONQUÉE" in contenu
+    assert "les 1000 premiers caractères sur 4500" in contenu
+    assert "il en manque 3500" in contenu
+    assert "n'existe pas" in contenu, "la conclusion par absence est interdite"
+
+
+def test_le_plafond_se_regle_par_l_environnement(monkeypatch):
+    monkeypatch.delenv("OTO_RUNNER_MAX_TOOL_OUTPUT", raising=False)
+    assert agent_runtime.max_tool_output() == 120_000 \
+        == agent_runtime.DEFAULT_MAX_TOOL_OUTPUT_CHARS
+    monkeypatch.setenv("OTO_RUNNER_MAX_TOOL_OUTPUT", "250000")
+    assert agent_runtime.max_tool_output() == 250_000
+    assert len(_servi("y" * 200_000)) == 200_000, "le réglage est SUIVI"
+    monkeypatch.setenv("OTO_RUNNER_MAX_TOOL_OUTPUT", "beaucoup")
+    with pytest.raises(ValueError, match="OTO_RUNNER_MAX_TOOL_OUTPUT"):
+        agent_runtime.max_tool_output()
+
+
+def test_chaque_tour_de_modele_est_CHRONOMETRE():
+    """Sans `duree_ms`, un journal ne dit pas si un tour a pris deux secondes ou
+    cinq minutes — la première question devant un travail mort sur un délai."""
+    import time as _t
+
+    class Lent(FauxProvider):
+        def complete(self, **kw):
+            _t.sleep(0.02)
+            return super().complete(**kw)
+
+    evs: list = []
+    agent_runtime.run(SPEC, FauxTransport(), Lent([_turn(text="fini")]),
+                      prompt="go", on_event=lambda ev, ch: evs.append((ev, ch)))
+    tours = [ch for ev, ch in evs if ev == "modele"]
+    assert len(tours) == 1 and tours[0]["duree_ms"] >= 20
 
 
 def test_le_plafond_de_tours_arrete_proprement():

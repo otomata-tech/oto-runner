@@ -39,9 +39,11 @@ class FauxMcp:
     def __init__(self, **kw):
         self.run_id = None
         self.outils = []
+        self.appels = []      # (nom, arguments) — la clôture se lit à ses ARGS
 
     def outil(self, name, args=None):
         self.outils.append(name)
+        self.appels.append((name, dict(args or {})))
         if name == "oto_procedure":
             return {"body_md": "la procédure"}
         if name == "run_start":
