@@ -181,14 +181,40 @@ le rejoue. Il n'existe pas d'issue légitime « conclu, rien écrit ».
 *« Soit prise par DB, soit direct. »* Le **même** travail — même instruction,
 mêmes outils, même boucle, même journal — se joue de deux façons :
 
-| | **par la file** (`python -m oto_runner.fleet flotte.yaml`) | **direct** (`python -m oto_runner.direct flotte.yaml [--lignes N] [--concurrence K]`) |
+| | **par la file** (`python -m oto_runner.fleet <flotte.yaml\|#id>`) | **direct** (`python -m oto_runner.direct <flotte.yaml\|#id> [--lignes N] [--concurrence K]`) |
 |---|---|---|
 | qui exécute | les workers (`oto-runner@{1,2,3}` sur la box), qui **réservent** des jobs | ce processus, ici, tout de suite |
+| combien en parallèle | **trois — le nombre d'unités systemd ACTIVÉES**, pas ce que la déclaration demande (⚠️ cf. plus bas) | `--concurrence K`, ou la `concurrency` de la déclaration : K **processus** forkés, sans borne d'unités |
 | la file de jobs | `POST /api/me/runner/jobs` : enfiler, réserver, lier, battre, conclure | **aucune** — jamais un appel à cette route |
 | le jeton | le jeton **délégué** remis avec chaque job (l'agent agit pour le demandeur) | `OTO_TOKEN` du poste, qui tient lieu de jeton délégué |
 | le modèle | celui de l'env des **workers** | celui de l'env de **ce processus** (`OTO_RUNNER_MODEL`) |
 | le journal JSONL | `passages/<flotte>/<job_id>.jsonl`, **là où le worker tourne** | `passages/<flotte>/direct-<horodatage>-<n>.jsonl`, ici |
 | le bilan | `<flotte>.bilan.json` | `<flotte>.direct-<horodatage>.bilan.json` — même forme |
+
+⚠️ **`workers` ne crée pas de workers — c'est une profondeur de file, pas un
+nombre d'exécutants.** Le champ que porte une flotte déclarée (`workers` côté
+plateforme, `concurrency` dans un YAML) règle **combien de travaux
+l'ordonnanceur garde en vol**. Ce qui les exécute, ce sont les unités systemd
+de la box, et **il y en a trois activées** (`oto-runner@{1,2,3}`, relevé le
+07/09/2026). Déclarer `workers: 10` enfile dix travaux et n'en fait traiter que
+trois à la fois : le dixième attend, il n'existe pas de dixième agent. Pour
+élargir la batterie, il faut activer des unités (`systemctl enable --now
+oto-runner@4`), et ça ne se décide pas depuis une déclaration.
+
+En mode **direct**, le même chiffre a un sens différent et littéral : chaque
+agent est un **processus forké sur le poste**, donc `--concurrence 4` fait bien
+quatre agents. C'est la seule des deux voies où le nombre déclaré est le nombre
+qui s'exécute.
+
+⚠️ Et ce nombre n'est pas le plafond utile. Le fournisseur de modèle borne, lui,
+le **débit de requêtes** : mesuré le 07/09/2026 sur le compte servi, 75 requêtes
+par minute contre un million de jetons par minute — donc quatorze fois plus de
+marge sur les jetons que sur les appels. Une fiche consommant de 31 à 47
+requêtes par minute selon la passe, le plafond réel se situe **entre 1,6 et 2,4
+agents**, très en dessous des trois unités de la box. Un dépassement ne se voit
+pas comme une lenteur : les 429 sont rejoués trois fois, puis le travail échoue,
+puis `max_claims` sort la ligne de la file — **des lignes manquent, sans erreur
+lisible**.
 
 **Quand utiliser lequel.** La file pour une campagne : plusieurs machines, reprise
 après une mort, baux, délégation d'identité, arrêt gracieux — tout ce que la
