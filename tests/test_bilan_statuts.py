@@ -351,3 +351,50 @@ def test_le_bilan_de_fin_sur_des_cellules_en_couches_ne_plante_pas_et_distingue_
     assert bilan["lignes"]["abouties"] == 1
     assert bilan["jetons"]["par_sortie"] == 1000 and bilan["jetons"]["par_aboutie"] == 3000
     assert bilan["controles"]["fiches"] == 1
+
+
+# ── Un zéro qui veut dire « je ne les vois plus » ────────────────────────────
+# 07/09/2026 : trois bilans de la même soirée ont rendu « abouties 0 » alors que
+# les fiches étaient écrites et vérifiées en base. Un passage à 90 sorties n'avait
+# que 4 lignes dans son périmètre. La session qui pilotait a failli refaire un
+# travail déjà fait.
+#
+# Cause : le périmètre vaut le filtre PRIVÉ de sa clause de statut. Quand une
+# passe écrit dans une colonne du filtre — `passe: "E"` pour donner la main à la
+# suivante — la ligne quitte le périmètre AU MOMENT où elle aboutit. Comptée
+# comme sortie, invisible à la ventilation.
+
+from oto_runner.bilan_postes import abouties_de
+
+
+def _statut(par_statut, perimetre={"passe": "F"}):
+    return {"colonne": "statut", "perimetre": perimetre, "abandon": "echec",
+            "terminaux": ["enrichi", "echec", "ecarte"], "par_statut": par_statut}
+
+
+def test_un_perimetre_qui_a_perdu_ses_lignes_ne_rend_PAS_zero():
+    """Le cas réel : 90 sorties, 4 lignes vues. Le compte n'est pas 0 — il n'est
+    pas mesurable, et la différence est tout."""
+    n, omis = abouties_de(_statut({"a_enrichir": 4}), sorties=90)
+    assert n is None, "un zéro ici se lit comme « rien n'a abouti », et c'est faux"
+    assert omis and "90" in omis and "4" in omis
+    assert "colonne du filtre" in omis, "le refus doit NOMMER la cause, pas juste refuser"
+
+
+def test_un_vrai_zero_reste_un_zero():
+    """Toutes les lignes sont là, aucune n'a abouti : c'est une mesure, pas un
+    trou. Le garde-fou ne doit pas avaler ce cas."""
+    n, omis = abouties_de(_statut({"a_enrichir": 5}), sorties=0)
+    assert (n, omis) == (0, None)
+
+
+def test_les_lignes_abouties_visibles_se_comptent_normalement():
+    n, omis = abouties_de(_statut({"enrichi": 3, "a_enrichir": 2}), sorties=3)
+    assert (n, omis) == (3, None)
+
+
+def test_un_abandon_visible_n_est_pas_une_aboutie_mais_reste_comptable():
+    """`echec` est l'abandon : il sort de la file sans aboutir. Tant qu'on le
+    VOIT, on sait le dire — le périmètre n'a rien perdu."""
+    n, omis = abouties_de(_statut({"echec": 2, "enrichi": 1}), sorties=3)
+    assert (n, omis) == (1, None)

@@ -121,6 +121,26 @@ def abouties_de(statut: dict, sorties: Optional[int]) -> tuple[Optional[int],
     if sorties is not None and n > sorties:
         return None, (f"{n} lignes terminales pour {sorties} sortie(s) : le périmètre "
                       "porte des lignes antérieures à ce passage")
+    # ⚠️ Le périmètre a-t-il PERDU des lignes ? Il vaut le filtre privé de sa
+    # clause de statut — donc si le travail écrit dans une colonne du filtre
+    # (une passe qui pose `passe: "E"` pour donner la main à la suivante), la
+    # ligne quitte le périmètre AU MOMENT où elle aboutit. On la compte alors
+    # comme sortie et on ne la voit plus dans la ventilation : le poste tombe à
+    # zéro alors que tout s'est bien passé.
+    #
+    # Mesuré le 07/09/2026 : un passage de 90 sorties a rendu « abouties 0 »
+    # avec quatre lignes seulement dans son périmètre. Trois fois dans la même
+    # soirée, et la session qui pilotait a failli refaire un travail déjà fait.
+    #
+    # Le garde-fou d'au-dessus attrape l'excès ; celui-ci attrape le manque. Un
+    # zéro qui veut dire « je ne les vois plus » est le pire des comptes rendus :
+    # il ressemble à une mesure.
+    vues = sum(statut["par_statut"].values())
+    if sorties is not None and sorties > 0 and vues < sorties:
+        return None, (f"{sorties} ligne(s) sortie(s) mais {vues} seulement dans le "
+                      f"périmètre {statut['perimetre']} : le passage écrit dans une "
+                      "colonne du filtre, les lignes abouties en sortent — elles ne "
+                      "sont pas perdues, elles ne sont plus comptables ici")
     return n, None
 
 
