@@ -348,7 +348,7 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
             # tourne, pas après. Tout le calcul vit dans bilan.py.
             if clock() - dernier_bilan >= spec.bilan_periode_s:
                 dernier_bilan = clock()
-                ecrire_bilan(spec, backend, conclus, secondes=clock() - t0,
+                ecrire_bilan(spec, backend, conclus, agents=spec.concurrency, secondes=clock() - t0,
                              lignes_initiales=bilan.lignes_initiales)
 
             # 2. Les bornes — chacune arrête l'ENFILEMENT ; les jobs en vol finissent.
@@ -495,7 +495,7 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
         # Le bilan de FIN tombe quelle que soit la borne — panne et interruption
         # comprises : un pilotage qui n'existe que sur une sortie propre n'existe
         # pas les jours où il sert.
-        ecrire_bilan(spec, backend, conclus, secondes=clock() - t0,
+        ecrire_bilan(spec, backend, conclus, agents=spec.concurrency, secondes=clock() - t0,
                      lignes_initiales=bilan.lignes_initiales,
                      arret=bilan.arret or "interrompu")
 

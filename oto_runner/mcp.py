@@ -191,9 +191,25 @@ class McpSession:
         declares = self._declares(name)
         if self.project is not None and "_project" in declares:
             args.setdefault("_project", self.project)
-        if self.org is not None and "_org" in declares and "_project" not in declares:
-            # L'org SEULEMENT quand le projet ne peut pas la porter : deux
-            # jetons redondants sur le même appel n'apportent rien.
+        if self.org is not None and "_org" in declares:
+            # ⚠️ L'org est posée dès que le tool la DÉCLARE, même s'il déclare
+            # aussi `_project`. La règle d'avant ne la posait que faute de
+            # projet, en supposant qu'un projet résout son org. Mesuré le
+            # 07/09/2026 sur 333 travaux : c'est FAUX pour `data_claim_next`.
+            # Le projet (219) était bien transmis, et l'appel se résolvait quand
+            # même dans l'org du jeton (2 « Otomata Admin ») au lieu de celle de
+            # la mission (226) — refus, puis le modèle relisait l'erreur et
+            # reposait `_org` lui-même au tour suivant. UN TOUR PERDU PAR FICHE,
+            # 333 fois sur 333, soit 13 % de tous les appels d'outil.
+            #
+            # Un jeton redondant coûte quelques octets ; le déduire coûtait un
+            # aller-retour de modèle complet, à chaque ligne.
+            #
+            # `setdefault` et non affectation : un appel qui vise EXPLICITEMENT
+            # une autre org garde la sienne. C'est un choix (07/09/2026) — une
+            # flotte est déclarée sur une organisation et ses agents y
+            # travaillent, mais viser ailleurs doit rester possible, à condition
+            # que ce soit écrit dans l'appel et non subi.
             args.setdefault("_org", self.org)
         if self.run_id is not None and "_run_id" in declares:
             args.setdefault("_run_id", self.run_id)

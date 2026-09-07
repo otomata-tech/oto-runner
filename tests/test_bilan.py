@@ -224,3 +224,27 @@ def test_une_accumulation_d_absences_ne_prouve_rien():
     """« Aucun dépôt depuis 2016 » date une ABSENCE, pas un acte."""
     assert _eteintes_sans_acte(
         "Aucun dépôt de comptes depuis 2016, aucun salarié, aucune trace web.") == 1
+
+
+# ── Combien d'agents ont tourné, et non combien étaient déclarés ─────────────
+
+def test_le_bilan_enregistre_la_concurrence_REELLE():
+    """Sans ce nombre, deux bilans ne sont pas comparables : durée, débit et
+    taux d'échec en dépendent tous.
+
+    Il a manqué le 07/09/2026 — il a fallu relire 72 journaux pour établir que
+    toutes les vagues avaient tourné à UN agent, alors que les déclarations en
+    annonçaient quatre. Le `concurrency` d'une déclaration n'est lu QUE par le
+    mode flotte ; le mode direct ne suit que son option de ligne de commande.
+    D'où la règle : on écrit ce qui a EU LIEU, jamais ce qui était demandé."""
+    bilan = ecrire_bilan(_spec(), BackendBilan(restantes=0), {1: _job()},
+                         lignes_initiales=1, secondes=10, agents=3)
+    assert bilan["agents"] == 3
+
+
+def test_un_bilan_sans_concurrence_connue_le_dit_au_lieu_de_supposer():
+    """`None`, pas 1 : un appelant qui ne renseigne rien ne prouve pas qu'un
+    seul agent a tourné — et un défaut plausible se lirait comme une mesure."""
+    bilan = ecrire_bilan(_spec(), BackendBilan(restantes=0), {1: _job()},
+                         lignes_initiales=1, secondes=10)
+    assert bilan["agents"] is None

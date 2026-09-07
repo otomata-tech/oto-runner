@@ -352,7 +352,7 @@ def controler_fiches(spec, backend, jobs: dict) -> dict:
 
 
 def ecrire_bilan(spec, backend, jobs: dict, *, lignes_initiales: int,
-                 secondes: float, arret: str = "") -> dict:
+                 secondes: float, arret: str = "", agents: int = None) -> dict:
     """Calcule le bilan de la flotte, le journalise et le pose en JSON.
 
     `jobs` = les jobs CONCLUS de la flotte (id → job), `lignes_initiales` = le
@@ -382,6 +382,15 @@ def ecrire_bilan(spec, backend, jobs: dict, *, lignes_initiales: int,
         "final": bool(arret),
         "arret": arret or None,
         "secondes": round(float(secondes), 1),
+        # ⚠️ Combien d'agents ont tourné EN PARALLÈLE. Sans ce nombre, deux
+        # bilans ne sont pas comparables : la durée, le débit et le taux
+        # d'échec dépendent tous de lui. Il a manqué le 07/09/2026, quand il a
+        # fallu relire 72 journaux pour établir que toutes les vagues avaient
+        # tourné à un seul agent — le `concurrency` des déclarations, lui,
+        # n'est lu QUE par le mode flotte, et le mode direct ne suit que son
+        # option de ligne de commande. Écrire ce qui a EU LIEU, pas ce qui
+        # était déclaré.
+        "agents": agents,
         "lignes": {"depart": lignes_initiales, "restantes": restantes,
                    "sorties": sorties,
                    # La valeur FINALE de la colonne de statut, sur le périmètre

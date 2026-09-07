@@ -202,7 +202,7 @@ def jouer(spec: FleetSpec, backend, provider, jeton: str, plafond: Optional[int]
         return_bilan = None
     finally:
         _relire_journaux(spec, conclus)
-        return_bilan = ecrire_bilan(spec_bilan, backend, conclus,
+        return_bilan = ecrire_bilan(spec_bilan, backend, conclus, agents=k,
                                     lignes_initiales=lignes_initiales,
                                     secondes=time.monotonic() - t0, arret=motif)
         logger.info("mode direct terminé : %s — %d travaux conclus · %s",

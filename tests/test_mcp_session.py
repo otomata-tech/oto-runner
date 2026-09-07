@@ -125,3 +125,40 @@ def test_un_tools_list_vide_echoue_net(monkeypatch):
     s = McpSession(url="http://x", token="t")
     with pytest.raises(RuntimeError, match="session dégradée"):
         s.schemas(frozenset())
+
+
+# ── L'org se pose même quand le tool déclare AUSSI `_project` ────────────────
+# Mesuré le 07/09/2026 sur 333 travaux de la campagne Audiens : `data_claim_next`
+# déclare les deux. La règle d'avant ne posait `_org` QUE si `_project` était
+# absent, en supposant qu'un projet résout son org. Le projet était bien
+# transmis, et l'appel se résolvait quand même dans l'org du jeton — refus, puis
+# le modèle relisait l'erreur et reposait `_org` lui-même au tour suivant.
+# UN TOUR PERDU PAR FICHE, 333 fois sur 333.
+
+def test_un_tool_qui_declare_les_deux_recoit_les_deux(monkeypatch):
+    s, vu = _session_org(monkeypatch, {
+        "data_claim_next": ["namespace", "worker", "filter", "_project", "_org", "_run_id"]})
+    s.call("data_claim_next", {"namespace": "t", "worker": "w"})
+    args = vu["appel"]["arguments"]
+    assert args.get("_project") == 248
+    assert args.get("_org") == 226, (
+        "l'org n'est pas posée alors que le tool la déclare : le projet ne la "
+        "résout pas pour tous les tools, et la déduire coûte un tour de modèle")
+
+
+def test_un_appel_qui_vise_une_AUTRE_org_garde_la_sienne(monkeypatch):
+    """C'est un choix, pas un effet de bord : une flotte est déclarée sur une
+    organisation et ses agents y travaillent — mais viser ailleurs reste
+    possible, à condition que ce soit écrit dans l'appel."""
+    s, vu = _session_org(monkeypatch, {
+        "data_rows": ["namespace", "_project", "_org"]})
+    s.call("data_rows", {"namespace": "t", "_org": 999})
+    assert vu["appel"]["arguments"]["_org"] == 999
+
+
+def test_un_tool_qui_ne_declare_PAS_l_org_ne_la_recoit_toujours_pas(monkeypatch):
+    """La sélectivité par schéma reste la règle — poser un jeton non déclaré
+    fait refuser l'appel entier (4 jobs perdus au premier vol de flotte)."""
+    s, vu = _session_org(monkeypatch, {"data_write": ["namespace", "_project"]})
+    s.call("data_write", {"namespace": "t"})
+    assert "_org" not in vu["appel"]["arguments"]
