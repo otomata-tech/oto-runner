@@ -315,7 +315,12 @@ def test_le_bilan_direct_tombe_meme_quand_un_travail_plante(monkeypatch, tmp_pat
 
 def test_les_arguments_de_la_commande():
     a = direct._arguments(["banc.yaml"])
-    assert (a.flotte, a.lignes, a.concurrence) == ("banc.yaml", None, 1)
+    # `None` des DEUX côtés : ni le volume ni la concurrence ne sont décidés
+    # ici. Ils retombent sur la déclaration, qui est leur domicile. Avant le
+    # 07/09/2026 la concurrence valait 1 — un défaut qui écrasait en silence
+    # ce que la déclaration disait, et les deux options du même parseur ne
+    # traitaient donc pas la déclaration de la même façon.
+    assert (a.flotte, a.lignes, a.concurrence) == ("banc.yaml", None, None)
     a = direct._arguments(["banc.yaml", "--lignes", "3", "--concurrence", "2"])
     assert (a.lignes, a.concurrence) == (3, 2)
     with pytest.raises(SystemExit):
@@ -328,3 +333,51 @@ def test_la_commande_refuse_de_partir_sans_jeton(monkeypatch, tmp_path):
     monkeypatch.delenv("OTO_TOKEN", raising=False)
     with pytest.raises(SystemExit, match="OTO_TOKEN"):
         direct.main([str(decl)])
+
+
+# ── La concurrence suit la DÉCLARATION, comme le volume ─────────────────────
+# `--concurrence` valait 1 par défaut et écrasait le `concurrency` du YAML sans
+# rien dire. Une flotte déclarée à 4 agents — y compris déclarée depuis le
+# dashboard, où le champ s'appelle `workers` et devient `spec.concurrency` —
+# tournait à 1. Mesuré le 07/09/2026 : 72 journaux, tous « 1 agent(s) ».
+
+def test_sans_option_la_concurrence_vient_de_la_declaration(monkeypatch, tmp_path):
+    from oto_runner import direct
+    vu = {}
+    yaml = tmp_path / "f.yaml"
+    yaml.write_text(
+        "procedure: p\nnamespace: n\ninput: i\ntools: [oto_procedure, data_write]\n"
+        "concurrency: 4\n")
+    monkeypatch.setenv("OTO_TOKEN", "t")
+    monkeypatch.setattr(direct, "get_provider", lambda: _Provider())
+    monkeypatch.setattr(direct, "Backend", lambda: object())
+    monkeypatch.setattr(direct.journal, "preparer", lambda: None)
+    monkeypatch.setattr(direct, "jouer",
+                        lambda *a, **k: vu.update(k) or {"ok": True})
+    direct.main([str(yaml)])
+    assert vu["k"] == 4, (
+        "la déclaration dit 4 agents et le passage en lance 1 : le réglage est "
+        "inerte, et il l'est en silence")
+
+
+def test_l_option_reste_prioritaire_sur_la_declaration(monkeypatch, tmp_path):
+    """Écraser reste possible — mais explicitement, pas par un défaut."""
+    from oto_runner import direct
+    vu = {}
+    yaml = tmp_path / "f.yaml"
+    yaml.write_text(
+        "procedure: p\nnamespace: n\ninput: i\ntools: [oto_procedure, data_write]\n"
+        "concurrency: 4\n")
+    monkeypatch.setenv("OTO_TOKEN", "t")
+    monkeypatch.setattr(direct, "get_provider", lambda: _Provider())
+    monkeypatch.setattr(direct, "Backend", lambda: object())
+    monkeypatch.setattr(direct.journal, "preparer", lambda: None)
+    monkeypatch.setattr(direct, "jouer",
+                        lambda *a, **k: vu.update(k) or {"ok": True})
+    direct.main([str(yaml), "--concurrence", "2"])
+    assert vu["k"] == 2
+
+
+class _Provider:
+    @staticmethod
+    def resolve_key(): return None

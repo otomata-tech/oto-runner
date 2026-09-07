@@ -221,12 +221,13 @@ def _arguments(argv=None) -> argparse.Namespace:
     p.add_argument("--lignes", type=int, default=None,
                    help="nombre de travaux (défaut : le `volume` de la déclaration ; "
                         "sans volume, jusqu'à la file vide)")
-    p.add_argument("--concurrence", type=int, default=1,
-                   help="agents en parallèle — des PROCESSUS (défaut 1)")
+    p.add_argument("--concurrence", type=int, default=None,
+                   help="agents en parallèle — des PROCESSUS (défaut : la "
+                        "`concurrency` de la déclaration)")
     args = p.parse_args(argv)
     if args.lignes is not None and args.lignes < 1:
         p.error("--lignes : un entier ≥ 1")
-    if args.concurrence < 1:
+    if args.concurrence is not None and args.concurrence < 1:
         p.error("--concurrence : un entier ≥ 1")
     return args
 
@@ -246,7 +247,17 @@ def main(argv=None) -> None:
     # de jobs : les trois verbes vont à `SansFile`.
     backend = Backend()
     plafond = args.lignes if args.lignes is not None else spec.volume
-    jouer(spec, backend, provider, jeton, plafond, k=args.concurrence)
+    # ⚠️ La concurrence suit la DÉCLARATION, comme le volume juste au-dessus.
+    # Elle ne le faisait pas : `--concurrence` valait 1 par défaut et écrasait
+    # le `concurrency` du YAML sans rien dire. Une flotte déclarée à 4 agents —
+    # y compris déclarée depuis le dashboard, où le champ s'appelle `workers` —
+    # tournait donc à 1. Mesuré le 07/09/2026 : les journaux de toutes les
+    # vagues portaient « 1 agent(s) », 72 fois, sans exception.
+    #
+    # Deux options du MÊME parseur ne peuvent pas traiter la déclaration
+    # différemment : `--lignes` s'y repliait déjà, `--concurrence` l'écrasait.
+    agents = args.concurrence if args.concurrence is not None else spec.concurrency
+    jouer(spec, backend, provider, jeton, plafond, k=agents)
 
 
 if __name__ == "__main__":
