@@ -117,6 +117,20 @@ silence du fournisseur. Et **un travail qui meurt clôt son run** (`run_finish`
 `failed`, ce qui libère la ligne qu'il tenait) avant de se conclure en échec :
 sans ça, la ligne réservée restait verrouillée tout son bail (quinze minutes).
 
+⚠️ **Tuer une vague, en revanche, n'est pas neutre — et le symptôme est muet.**
+Ce filet ne joue que si le travail MEURT ; un processus tué de l'extérieur
+n'exécute rien, donc ne clôt pas son run et ne libère pas sa ligne. Elle reste
+réservée jusqu'à l'expiration du bail. Mesuré le 07/09/2026 : une vague
+interrompue à la main a laissé une ligne verrouillée, et le banc de six qui a
+suivi n'en a traité que **cinq** — le sixième travail a réservé le vide (2
+appels, 484 jetons) et s'est conclu normalement. Aucune erreur, aucun message :
+juste une ligne absente du résultat.
+
+C'est le pendant de « demander l'arrêt n'arrête rien » : demander est sans
+effet immédiat, tuer a un effet différé qu'on ne voit pas. Après une vague tuée,
+attendre le bail avant de relancer, ou lire le compte de lignes plutôt que le
+nombre de travaux.
+
 Sur le chemin Conversations : `conversation` (la requête entière, sans la clé),
 `reponse` (les `outputs` bruts), `relance`. Une ligne :
 
@@ -207,14 +221,33 @@ quatre agents. C'est la seule des deux voies où le nombre déclaré est le nomb
 qui s'exécute.
 
 ⚠️ Et ce nombre n'est pas le plafond utile. Le fournisseur de modèle borne, lui,
-le **débit de requêtes** : mesuré le 07/09/2026 sur le compte servi, 75 requêtes
-par minute contre un million de jetons par minute — donc quatorze fois plus de
-marge sur les jetons que sur les appels. Une fiche consommant de 31 à 47
-requêtes par minute selon la passe, le plafond réel se situe **entre 1,6 et 2,4
-agents**, très en dessous des trois unités de la box. Un dépassement ne se voit
-pas comme une lenteur : les 429 sont rejoués trois fois, puis le travail échoue,
-puis `max_claims` sort la ligne de la file — **des lignes manquent, sans erreur
-lisible**.
+le **débit de requêtes** : mesuré le 07/09/2026 sur le compte servi, **75
+requêtes par minute** contre un million de jetons par minute — donc quatorze
+fois plus de marge sur les jetons que sur les appels. **Optimiser le poids des
+fiches ne débloque donc rien ; seul le nombre d'appels compte.**
+
+Un dépassement ne se voit pas comme une lenteur : les 429 sont rejoués trois
+fois, puis le travail échoue, puis `max_claims` sort la ligne de la file — **des
+lignes manquent, sans erreur lisible**.
+
+**Ce plafond ne se convertit pas en un nombre d'agents fixe** : il dépend du
+temps qu'une fiche passe AILLEURS que chez le modèle. Deux mesures du même jour
+le montrent :
+
+| profil de passe | requêtes/min par agent | agents avant 75/min |
+|---|---|---|
+| enrichissement dense, peu de web (06/09, avant le correctif d'org) | 31 à 47 | **1,6 à 2,4** |
+| passe à quatre ouvertures de page (07/09, après) | ~11 | **~7** |
+
+Une passe qui scrute le web est **douce** pour le quota : chaque page ouverte est
+du temps pendant lequel on ne demande rien au modèle. À l'inverse, une passe
+**sans aucun appel web enchaîne ses tours sans respirer** — c'est la plus courte
+en durée et la plus agressive par minute. Compter les agents sans regarder ce
+profil donne un chiffre qui ne vaut que pour la passe qui l'a produit.
+
+La bonne façon de le dire : diviser 75 par les requêtes/minute qu'UNE passe
+consomme réellement, relevé sur ses propres journaux (`ev: "modele"` par travail,
+divisé par la durée du bilan). C'est gratuit et ça ne casse aucune fiche.
 
 **Quand utiliser lequel.** La file pour une campagne : plusieurs machines, reprise
 après une mort, baux, délégation d'identité, arrêt gracieux — tout ce que la
