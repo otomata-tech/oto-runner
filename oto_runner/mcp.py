@@ -67,6 +67,33 @@ def _utf8(r) -> str:
             f"content-type « {r.headers.get('Content-Type', '?')} »") from e
 
 
+#: Ce qu'un agent ne choisit JAMAIS, même si le schéma l'accepte.
+#:
+#: ⚠️ Ces deux-là ne sont pas des options d'appel : ce sont des réglages de CYCLE
+#: DE VIE du tableau. Le paramètre passé à la réservation l'emporte sur ce que le
+#: schéma déclare **et s'applique à toute la table**, pas à la ligne réservée.
+#:
+#: Mesuré le 07/09/2026 sur nos journaux : le modèle les pose de lui-même —
+#: `lease_s` 812 fois, `max_claims` 209 fois — en lisant le schéma de l'outil et
+#: en choisissant. Il n'invente rien : la porte lui est ouverte. Côté plateforme,
+#: la mesure est pire encore : `max_claims` a ARMÉ une garde sur 322 tableaux qui
+#: n'en déclarent aucune, 219 fois, toujours à la même valeur — des lignes ont pu
+#: sortir de files où rien n'aurait dû les faire sortir.
+#:
+#: La plateforme a borné le dégât (le paramètre ne peut plus qu'assouplir). Ceci
+#: est l'autre couche, et c'est la bonne pour ce défaut : **un réglage
+#: irréversible ne doit pas être OFFERT au modèle**, pas seulement rendu
+#: inoffensif. Mesurer et empêcher se ressemblent dans un compte rendu, jamais
+#: dans les faits.
+#:
+#: Retiré, jamais réécrit : le serveur applique alors la déclaration du tableau,
+#: qui est son domicile. Et le retrait se DIT — un paramètre qu'on enlève en
+#: silence ferait chercher longtemps pourquoi la consigne semble ignorée.
+_JAMAIS_AU_MODELE = {
+    "data_claim_next": ("max_claims", "lease_s"),
+}
+
+
 class McpSession:
     """Une session MCP réutilisable — le transport d'outils de la boucle."""
 
@@ -188,6 +215,12 @@ class McpSession:
         """UN appel d'outil → (texte pour le fil, is_error). Les jetons de contexte
         sont posés ici — le modèle n'a pas à les connaître."""
         args = dict(arguments or {})
+        for interdit in _JAMAIS_AU_MODELE.get(name, ()):
+            if args.pop(interdit, None) is not None:
+                logger.warning(
+                    "%s : `%s` posé par le modèle a été RETIRÉ — le cycle de vie "
+                    "d'un tableau se déclare à son schéma, pas dans un appel",
+                    name, interdit)
         declares = self._declares(name)
         if self.project is not None and "_project" in declares:
             args.setdefault("_project", self.project)

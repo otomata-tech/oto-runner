@@ -162,3 +162,45 @@ def test_un_tool_qui_ne_declare_PAS_l_org_ne_la_recoit_toujours_pas(monkeypatch)
     s, vu = _session_org(monkeypatch, {"data_write": ["namespace", "_project"]})
     s.call("data_write", {"namespace": "t"})
     assert "_org" not in vu["appel"]["arguments"]
+
+
+# ── Ce qu'un agent ne choisit JAMAIS ─────────────────────────────────────────
+# `max_claims` et `lease_s` ne sont pas des options d'appel : ce sont des
+# réglages de CYCLE DE VIE du tableau. Le paramètre passé à la réservation
+# l'emporte sur la déclaration du schéma ET s'applique à toute la table.
+#
+# Mesuré le 07/09/2026 : le modèle les pose de lui-même — `lease_s` 812 fois,
+# `max_claims` 209 fois dans nos journaux. Il lit le schéma et choisit ; la
+# porte lui était ouverte. Côté plateforme : `max_claims` a ARMÉ une garde sur
+# 322 tableaux qui n'en déclarent aucune.
+
+def test_le_modele_ne_choisit_pas_le_cycle_de_vie_d_un_tableau(monkeypatch):
+    s, vu = _session_org(monkeypatch, {
+        "data_claim_next": ["namespace", "worker", "max_claims", "lease_s", "_org"]})
+    s.call("data_claim_next", {"namespace": "t", "worker": "w",
+                               "max_claims": 1, "lease_s": 3600})
+    args = vu["appel"]["arguments"]
+    assert "max_claims" not in args, (
+        "un plafond de reprises posé à l'appel s'applique à TOUTE la table et "
+        "l'emporte sur sa déclaration — ce n'est pas au modèle d'en décider")
+    assert "lease_s" not in args
+    assert args["namespace"] == "t", "le reste de l'appel passe intact"
+
+
+def test_le_retrait_se_DIT(monkeypatch, caplog):
+    """Un paramètre qu'on enlève en silence ferait chercher longtemps pourquoi la
+    consigne semble ignorée."""
+    s, _ = _session_org(monkeypatch, {
+        "data_claim_next": ["namespace", "max_claims", "_org"]})
+    with caplog.at_level("WARNING"):
+        s.call("data_claim_next", {"namespace": "t", "max_claims": 1})
+    assert any("max_claims" in r.message and "RETIRÉ" in r.message
+               for r in caplog.records)
+
+
+def test_un_autre_tool_garde_ses_arguments(monkeypatch):
+    """La liste est nominative, pas une règle de nommage : `data_write` qui
+    porterait un `lease_s` — il n'en porte pas — ne serait pas amputé."""
+    s, vu = _session_org(monkeypatch, {"data_write": ["namespace", "lease_s", "_org"]})
+    s.call("data_write", {"namespace": "t", "lease_s": 99})
+    assert vu["appel"]["arguments"]["lease_s"] == 99
