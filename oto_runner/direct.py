@@ -55,7 +55,7 @@ from typing import Optional
 from . import journal, worker
 from .backend import Backend
 from .bilan import ecrire_bilan
-from .declaration import FleetSpec, load_spec, payload
+from .declaration import FleetSpec, load_spec, payload, spec_depuis_flotte
 from .file_de_travail import SansFile
 from .llm_select import get_provider
 
@@ -217,7 +217,9 @@ def _arguments(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="python -m oto_runner.direct",
         description="Joue les travaux d'une flotte ICI, sans file de travaux serveur.")
-    p.add_argument("flotte", help="la déclaration YAML de la flotte")
+    p.add_argument("flotte",
+                   help="la déclaration : un fichier YAML, ou `#<id>` pour une "
+                        "flotte DÉCLARÉE en base (celle que le dashboard montre)")
     p.add_argument("--lignes", type=int, default=None,
                    help="nombre de travaux (défaut : le `volume` de la déclaration ; "
                         "sans volume, jusqu'à la file vide)")
@@ -235,7 +237,6 @@ def _arguments(argv=None) -> argparse.Namespace:
 def main(argv=None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     args = _arguments(argv)
-    spec = load_spec(args.flotte)
     jeton = os.environ.get("OTO_TOKEN", "").strip()
     if not jeton:
         raise SystemExit("OTO_TOKEN absent : le mode direct tourne sous le jeton du poste, "
@@ -246,6 +247,17 @@ def main(argv=None) -> None:
     # Le backend sert le FIL du run et les lectures du tableau — jamais la file
     # de jobs : les trois verbes vont à `SansFile`.
     backend = Backend()
+    # La MÊME source que l'ordonnanceur : un YAML, ou `#<id>` pour une flotte
+    # déclarée en base. Les deux modes lisaient la déclaration différemment —
+    # `fleet` acceptait les deux, `direct` exigeait un fichier. Une flotte créée
+    # depuis le dashboard n'était donc jouable QUE par la file de travaux, alors
+    # que c'est le mode direct qui sert aujourd'hui. Le fichier reste un moyen
+    # de déclarer, jamais la seule façon d'exister.
+    if args.flotte.startswith("#"):
+        spec = spec_depuis_flotte(backend.lire_flotte(int(args.flotte[1:])))
+        logger.info("flotte #%s chargée depuis la base : %s", args.flotte[1:], spec.name)
+    else:
+        spec = load_spec(args.flotte)
     plafond = args.lignes if args.lignes is not None else spec.volume
     # ⚠️ La concurrence suit la DÉCLARATION, comme le volume juste au-dessus.
     # Elle ne le faisait pas : `--concurrence` valait 1 par défaut et écrasait

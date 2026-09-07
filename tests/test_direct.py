@@ -381,3 +381,33 @@ def test_l_option_reste_prioritaire_sur_la_declaration(monkeypatch, tmp_path):
 class _Provider:
     @staticmethod
     def resolve_key(): return None
+
+
+# ── La même source de déclaration que l'ordonnanceur ─────────────────────────
+# `fleet` acceptait un YAML OU `#<id>` (une flotte déclarée en base, celle que
+# le dashboard montre) ; `direct` exigeait un fichier. Une flotte créée depuis
+# l'interface n'était donc jouable que par la file de travaux — alors que c'est
+# le mode direct qui sert. Deux modes du même runner ne peuvent pas lire la
+# déclaration différemment.
+
+def test_le_mode_direct_joue_une_flotte_DECLAREE_en_base(monkeypatch):
+    from oto_runner import direct
+    vu = {}
+    declaree = {"id": 42, "label": "campagne", "procedure": "p", "namespace": "n",
+                "tools": ["oto_procedure", "data_write"], "input": "fais ceci",
+                "workers": 3, "org_id": 226, "project_id": 219}
+
+    class _B:
+        @staticmethod
+        def lire_flotte(fid):
+            vu["lue"] = fid
+            return declaree
+
+    monkeypatch.setenv("OTO_TOKEN", "t")
+    monkeypatch.setattr(direct, "get_provider", lambda: _Provider())
+    monkeypatch.setattr(direct, "Backend", lambda: _B())
+    monkeypatch.setattr(direct.journal, "preparer", lambda: None)
+    monkeypatch.setattr(direct, "jouer", lambda *a, **k: vu.update(k) or {})
+    direct.main(["#42"])
+    assert vu["lue"] == 42, "le mode direct n'est pas allé chercher la flotte déclarée"
+    assert vu["k"] == 3, "les `workers` de la déclaration doivent piloter les agents"
