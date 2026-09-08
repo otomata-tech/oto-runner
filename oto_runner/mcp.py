@@ -94,6 +94,37 @@ _JAMAIS_AU_MODELE = {
 }
 
 
+#: Les jetons de CONTEXTE que le runner pose lui-même depuis le travail. Ils
+#: sont retirés du schéma servi au modèle : un paramètre tendu à un modèle est
+#: un paramètre qu'il remplit. Mesuré le 08/09/2026 — `_org` inventé quinze fois
+#: sur quatre-vingt-un appels d'outil, et, sur un autre banc, une organisation
+#: nommée de toutes pièces dans le compte rendu d'un agent (« l'organisation
+#: <nom> (org <n>) »), suivie d'une fiche qui a l'air d'en être une. Le modèle
+#: ne ment pas : il complète une forme qu'on lui a tendue. Ce qu'il ne voit pas,
+#: il ne peut pas l'inventer.
+#:
+#: ⚠️ Un jeton ajouté ici DOIT être posé par `call()` — sinon on retire une
+#: capacité au lieu d'une occasion de se tromper.
+_POSES_PAR_LE_RUNNER = ("_org", "_project", "_run_id")
+
+
+def _sans_jetons_de_contexte(schema: dict) -> dict:
+    """Le schéma d'un outil, privé des jetons que le runner pose lui-même.
+
+    Copie : le catalogue est mis en cache pour toute la session et `_declares`
+    le relit pour savoir QUOI poser — le muter aveuglerait le poseur."""
+    props = schema.get("properties") or {}
+    if not any(j in props for j in _POSES_PAR_LE_RUNNER):
+        return schema
+    net = dict(schema)
+    net["properties"] = {k: v for k, v in props.items()
+                         if k not in _POSES_PAR_LE_RUNNER}
+    if schema.get("required"):
+        net["required"] = [r for r in schema["required"]
+                           if r not in _POSES_PAR_LE_RUNNER]
+    return net
+
+
 class McpSession:
     """Une session MCP réutilisable — le transport d'outils de la boucle."""
 
@@ -186,8 +217,9 @@ class McpSession:
             if t.get("name") in names:
                 out.append({"name": t["name"],
                             "description": (t.get("description") or "")[:1024],
-                            "input_schema": t.get("inputSchema")
-                            or {"type": "object", "properties": {}}})
+                            "input_schema": _sans_jetons_de_contexte(
+                                t.get("inputSchema")
+                                or {"type": "object", "properties": {}})})
         return out
 
     def catalogue(self) -> frozenset:

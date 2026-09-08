@@ -214,3 +214,50 @@ def test_un_autre_tool_garde_ses_arguments(monkeypatch):
     s, vu = _session_org(monkeypatch, {"data_write": ["namespace", "lease_s", "_org"]})
     s.call("data_write", {"namespace": "t", "lease_s": 99})
     assert vu["appel"]["arguments"]["lease_s"] == 99
+
+
+# ── Ce que le modèle ne VOIT pas, il ne peut pas l'inventer ──────────────────
+# `_org`, `_project` et `_run_id` sont posés par le runner depuis le travail.
+# Tant qu'ils figuraient au schéma servi, le modèle les remplissait : `_org`
+# inventé quinze fois sur quatre-vingt-un appels le 08/09/2026, et sur un autre
+# banc une organisation nommée de toutes pièces dans un compte rendu. Retirer le
+# champ ferme la classe ; un `setdefault` ne fermait qu'un cas.
+
+def test_le_schema_servi_au_modele_ne_porte_AUCUN_jeton_de_contexte(monkeypatch):
+    s, _ = _session_org(monkeypatch, {
+        "data_rows": ["namespace", "_org", "_project", "_run_id"]})
+
+    servi = s.schemas(frozenset({"data_rows"}))[0]["input_schema"]["properties"]
+
+    assert "namespace" in servi, "les vrais paramètres restent servis"
+    for jeton in ("_org", "_project", "_run_id"):
+        assert jeton not in servi, (
+            f"`{jeton}` est tendu au modèle : il le remplira, avec une valeur "
+            "plausible et fausse")
+
+
+def test_le_runner_POSE_encore_ce_qu_il_a_retire_du_schema(monkeypatch):
+    """Le pendant, et il est vital : `_declares` lit le catalogue pour savoir
+    quoi poser. Si le nettoyage mutait le cache au lieu de le copier, le poseur
+    deviendrait aveugle — on aurait retiré une capacité au lieu d'une occasion
+    de se tromper."""
+    s, vu = _session_org(monkeypatch, {
+        "data_rows": ["namespace", "_org", "_project", "_run_id"]})
+    s.schemas(frozenset({"data_rows"}))          # le modèle a vu le schéma nettoyé
+
+    s.call("data_rows", {"namespace": "t"})
+
+    args = vu["appel"]["arguments"]
+    assert args["_org"] == 226 and args["_project"] == 248 and args["_run_id"] == "r-1"
+
+
+def test_un_jeton_de_contexte_REQUIS_sort_aussi_du_required(monkeypatch):
+    """Sinon le schéma servi exige un champ qu'il ne décrit plus — un contrat
+    qui se contredit, et le modèle n'a aucun moyen de le satisfaire."""
+    s, _ = _session_org(monkeypatch, {"data_rows": ["namespace", "_org"]})
+    s.schemas(frozenset())                    # peuple le catalogue de la session
+    s._outils[0]["inputSchema"]["required"] = ["namespace", "_org"]
+
+    servi = s.schemas(frozenset({"data_rows"}))[0]["input_schema"]
+
+    assert servi["required"] == ["namespace"]
