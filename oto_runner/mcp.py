@@ -238,12 +238,28 @@ class McpSession:
             # Un jeton redondant coûte quelques octets ; le déduire coûtait un
             # aller-retour de modèle complet, à chaque ligne.
             #
-            # `setdefault` et non affectation : un appel qui vise EXPLICITEMENT
-            # une autre org garde la sienne. C'est un choix (07/09/2026) — une
-            # flotte est déclarée sur une organisation et ses agents y
-            # travaillent, mais viser ailleurs doit rester possible, à condition
-            # que ce soit écrit dans l'appel et non subi.
-            args.setdefault("_org", self.org)
+            # ⚠️ IMPOSÉE, et non `setdefault` — renversement du 08/09/2026, sur
+            # mesure et non sur relecture. La règle d'avant laissait au modèle
+            # un `_org` explicite, au motif que « viser ailleurs doit rester
+            # possible ». C'était défendable tant que personne ne l'avait
+            # exercé. Le premier passage en mode file l'a exercé : le modèle a
+            # posé un `_org` INVENTÉ — une organisation dont il n'est membre
+            # d'aucune — quinze fois sur quatre-vingt-un appels d'outil, et le `setdefault`
+            # a respecté son invention. Il n'a pas visé une autre org : il a
+            # rempli un champ qu'on lui tendait, avec une valeur plausible.
+            #
+            # Un agent de flotte travaille dans l'org de sa flotte. Le besoin de
+            # viser ailleurs n'a jamais été exercé volontairement ; l'accident,
+            # lui, l'a été 15 fois au premier essai. Même traitement que
+            # `max_claims` et `lease_s` : ce que le runner sait, le modèle ne le
+            # choisit pas.
+            pose = args.get("_org")
+            if pose is not None and pose != self.org:
+                logger.warning(
+                    "%s : `_org`=%r posé par le modèle a été REMPLACÉ par %r — "
+                    "un agent de flotte travaille dans l'org de sa flotte",
+                    name, pose, self.org)
+            args["_org"] = self.org
         if self.run_id is not None and "_run_id" in declares:
             args.setdefault("_run_id", self.run_id)
         self._n += 1

@@ -146,14 +146,24 @@ def test_un_tool_qui_declare_les_deux_recoit_les_deux(monkeypatch):
         "résout pas pour tous les tools, et la déduire coûte un tour de modèle")
 
 
-def test_un_appel_qui_vise_une_AUTRE_org_garde_la_sienne(monkeypatch):
-    """C'est un choix, pas un effet de bord : une flotte est déclarée sur une
-    organisation et ses agents y travaillent — mais viser ailleurs reste
-    possible, à condition que ce soit écrit dans l'appel."""
+def test_un_org_INVENTE_par_le_modele_est_REMPLACE(monkeypatch):
+    """Renversement du 08/09/2026, sur mesure et non sur relecture.
+
+    Ce banc affirmait l'inverse : « viser une autre org reste possible, à
+    condition que ce soit écrit dans l'appel ». Défendable tant que personne ne
+    l'avait exercé. Le premier passage en mode file l'a exercé : le modèle a
+    posé un `_org` INVENTÉ — une organisation dont il n'est membre d'aucune —
+    quinze fois sur quatre-vingt-un appels, et le `setdefault` a respecté son invention.
+
+    Il n'a pas visé ailleurs : il a rempli un champ qu'on lui tendait, avec une
+    valeur plausible. Un `setdefault` fait confiance à ce que le modèle
+    fournit ; une valeur imposée ne lui laisse pas l'occasion d'inventer."""
     s, vu = _session_org(monkeypatch, {
         "data_rows": ["namespace", "_project", "_org"]})
     s.call("data_rows", {"namespace": "t", "_org": 999})
-    assert vu["appel"]["arguments"]["_org"] == 999
+    assert vu["appel"]["arguments"]["_org"] == 226, (
+        "l'org du runner s'impose : ce que le runner SAIT, le modèle ne le "
+        "choisit pas")
 
 
 def test_un_tool_qui_ne_declare_PAS_l_org_ne_la_recoit_toujours_pas(monkeypatch):
