@@ -384,3 +384,74 @@ def test_sans_borne_le_comportement_est_INCHANGÉ():
                       _fin(input_tokens=10_000_000)])
     res = agent_runtime.run(spec, FauxTransport(), p, prompt="go")
     assert res.stopped == "end_turn"
+
+
+# ── Le même refus, trois fois : on arrête ───────────────────────────────────
+# Mesuré le 08/09/2026 sur dix travaux : `data_claim_next` refusé HUIT fois par
+# travail sur une déclaration de tableau invalide — soixante refus sur
+# quatre-vingt-un appels, jusqu'au plafond de tours, et dix travaux conclus
+# « done » sans une écriture. Le modèle relit l'erreur et réessaie en variant sa
+# formulation ; elle n'y change rien quand le refus vient du schéma du tableau
+# et non de l'appel.
+#
+# ⚠️ Pas un jugement sur le travail — la plateforme n'a pas à décider si un
+# agent devait écrire. Un fait mécanique, et qu'un agent ne peut pas rédiger :
+# le compteur d'échecs de ses propres appels.
+
+REFUS = ("lifecycle.claimable doit être un objet non vide {col: val}", True)
+
+
+def _boucle_avec(reponses, tours):
+    t = FauxTransport(reponses)
+    spec = AgentSpec(system="s", tools=frozenset({"data_rows", "oto_procedure"}),
+                     max_steps=12)
+    return agent_runtime.run(spec, t, FauxProvider(tours), prompt="go"), t
+
+
+def test_trois_fois_le_MEME_refus_arrete_le_deroule():
+    res, t = _boucle_avec(
+        {"data_rows": REFUS},
+        [_turn(calls=[("data_rows", {"essai": i})]) for i in range(6)]
+        + [_turn(text="jamais atteint")])
+
+    assert res.stopped == "refus_repete"
+    assert len(t.appels) == agent_runtime.MAX_REFUS_IDENTIQUES, (
+        "on arrête AU seuil, pas au plafond de tours")
+    assert "lifecycle.claimable" in res.reply, (
+        "le compte rendu porte le texte servi — c'est ce qu'on cherchera")
+
+
+def test_des_refus_DIFFERENTS_ne_declenchent_rien():
+    """L'autre bord : trois erreurs distinctes peuvent être trois corrections
+    successives qui avancent. Ne couper que sur l'obstination, jamais sur
+    l'échec — sinon on arrête un agent qui apprend."""
+    class _Variable(FauxTransport):
+        def call(self, name, arguments):
+            self.appels.append((name, arguments))
+            return (f"erreur numero {len(self.appels)}", True)
+
+    t = _Variable()
+    spec = AgentSpec(system="s", tools=frozenset({"data_rows"}), max_steps=12)
+    tours = [_turn(calls=[("data_rows", {})]) for _ in range(4)] + [_turn(text="fini")]
+    res = agent_runtime.run(spec, t, FauxProvider(tours), prompt="go")
+
+    assert res.stopped == "end_turn"
+    assert len(t.appels) == 4, "aucune coupe : chaque refus est différent"
+
+
+def test_un_SUCCES_du_meme_outil_efface_ses_refus_passes():
+    """Un outil qui finit par réussir prouve que son refus n'était pas
+    déterministe. Garder le compte ferait couper un déroulé qui avance."""
+    class _DeuxPuisOk(FauxTransport):
+        def call(self, name, arguments):
+            self.appels.append((name, arguments))
+            return REFUS if len(self.appels) <= 2 else ("ok", False)
+
+    t = _DeuxPuisOk()
+    spec = AgentSpec(system="s", tools=frozenset({"data_rows"}), max_steps=12)
+    tours = [_turn(calls=[("data_rows", {})]) for _ in range(5)] + [_turn(text="fini")]
+    res = agent_runtime.run(spec, t, FauxProvider(tours), prompt="go")
+
+    assert res.stopped == "end_turn", (
+        "deux refus puis un succès, puis deux refus : le compteur est reparti "
+        "de zéro au succès")
