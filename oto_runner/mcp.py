@@ -105,7 +105,15 @@ _JAMAIS_AU_MODELE = {
 #:
 #: ⚠️ Un jeton ajouté ici DOIT être posé par `call()` — sinon on retire une
 #: capacité au lieu d'une occasion de se tromper.
-_POSES_PAR_LE_RUNNER = ("_org", "_project", "_run_id")
+_POSES_PAR_LE_RUNNER = ("_org", "_project", "_run_id", "_group")
+
+#: `_group` est un jeton de contexte que le runner ne pose JAMAIS : un agent de
+#: flotte travaille dans l'org de sa flotte, sans équipe. Il sort du schéma
+#: servi pour la même raison que `_org`, et s'il arrive quand même, il est
+#: RETIRÉ. Mesuré le 09/09/2026 (mode direct, jetable 634, passe D) : le modèle
+#: a posé `_group=226` — l'org, recopiée dans le champ voisin — et l'écriture
+#: de la fiche a été refusée (« groupe inconnu »), la ligne est restée en D.
+_RETIRES_SANS_ETRE_POSES = ("_group",)
 
 
 def _sans_jetons_de_contexte(schema: dict) -> dict:
@@ -253,6 +261,12 @@ class McpSession:
                     "%s : `%s` posé par le modèle a été RETIRÉ — le cycle de vie "
                     "d'un tableau se déclare à son schéma, pas dans un appel",
                     name, interdit)
+        for jeton in _RETIRES_SANS_ETRE_POSES:
+            if args.pop(jeton, None) is not None:
+                logger.warning(
+                    "%s : `%s` posé par le modèle a été RETIRÉ — un agent de "
+                    "flotte travaille dans l'org de sa flotte, sans équipe",
+                    name, jeton)
         declares = self._declares(name)
         if self.project is not None and "_project" in declares:
             args.setdefault("_project", self.project)

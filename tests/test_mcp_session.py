@@ -230,7 +230,7 @@ def test_le_schema_servi_au_modele_ne_porte_AUCUN_jeton_de_contexte(monkeypatch)
     servi = s.schemas(frozenset({"data_rows"}))[0]["input_schema"]["properties"]
 
     assert "namespace" in servi, "les vrais paramètres restent servis"
-    for jeton in ("_org", "_project", "_run_id"):
+    for jeton in ("_org", "_project", "_run_id", "_group"):
         assert jeton not in servi, (
             f"`{jeton}` est tendu au modèle : il le remplira, avec une valeur "
             "plausible et fausse")
@@ -261,3 +261,16 @@ def test_un_jeton_de_contexte_REQUIS_sort_aussi_du_required(monkeypatch):
     servi = s.schemas(frozenset({"data_rows"}))[0]["input_schema"]
 
     assert servi["required"] == ["namespace"]
+
+
+def test_un_group_INVENTE_par_le_modele_est_RETIRE(monkeypatch):
+    """Mesuré le 09/09/2026 en mode direct (jetable 634, passe D) : le modèle a
+    posé `_group=226` — l'org recopiée dans le champ voisin — et l'écriture a
+    été refusée (« groupe inconnu »). Le runner ne connaît aucune équipe : il
+    ne pose pas `_group`, et retire celui que le modèle invente."""
+    s, vu = _session_org(monkeypatch, {
+        "data_write": ["namespace", "row", "_project", "_org", "_group"]})
+    s.call("data_write", {"namespace": "t", "row": {}, "_group": 226})
+    args = vu["appel"]["arguments"]
+    assert "_group" not in args, "un `_group` inventé ne part pas vers la plateforme"
+    assert args["_org"] == 226, "l'org du runner reste posée"
