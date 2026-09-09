@@ -80,10 +80,19 @@ class Backend:
             raise BackendError(f"{chemin} → réseau : {type(e).__name__} "
                                f"{str(e)[:200]}", status=None)
 
-    def _post(self, chemin: str, corps: dict) -> dict:
+    def _post(self, chemin: str, corps: dict,
+              org: Optional[int] = None) -> dict:
+        """⚠️ `org` part en EN-TÊTE `X-Oto-Org`, jamais dans le corps. La face
+        REST lit l'org de contexte là, et son modèle d'entrée refuse les champs
+        qu'il ne déclare pas : un `_org` glissé dans le corps fait `400
+        unknown_fields` et la déclaration échoue en entier. `_patch` le faisait
+        déjà correctement quinze lignes plus bas — la réponse était dans ce
+        fichier avant que j'en invente une autre (09/09/2026)."""
+        entetes = {"Authorization": f"Bearer {self.token}"}
+        if org is not None:
+            entetes["X-Oto-Org"] = str(org)
         r = self._reseau(chemin, post_with_deadline, json=corps, timeout=_TIMEOUT,
-                         headers={"Authorization": f"Bearer {self.token}"},
-                         wall_s=120)
+                         headers=entetes, wall_s=120)
         if r.status_code >= 400:
             try:
                 detail = r.json().get("message") or r.json().get("error") or r.text
@@ -263,8 +272,6 @@ class Backend:
         Sans `org`, rien n'est posé : le comportement d'avant, l'org active."""
         corps = {"op": "create", "label": label, "procedure": procedure,
                  "tools": list(tools)}
-        if org is not None:
-            corps["_org"] = org
         for cle, val in (("namespace", namespace), ("row_filter", row_filter),
                          ("project_id", project_id), ("input", input),
                          ("max_steps", max_steps), ("provider", provider),
@@ -274,7 +281,7 @@ class Backend:
                          ("max_tokens_per_row", max_tokens_per_row)):
             if val is not None:
                 corps[cle] = val
-        return self._post("/api/me/runner/fleets", corps)["fleet"]
+        return self._post("/api/me/runner/fleets", corps, org=org)["fleet"]
 
     def get_job(self, job_id: int) -> dict:
         return self._post("/api/me/runner/jobs",
