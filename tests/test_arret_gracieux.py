@@ -26,6 +26,9 @@ class _BackendFactice:
         self.claims = 0
         self.base = "https://exemple.invalide"
 
+    def mes_orgs(self):
+        return [7]
+
     def claim(self, lease_seconds=600, **_):
         self.claims += 1
         if self.restants <= 0:
