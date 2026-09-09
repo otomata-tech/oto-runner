@@ -46,12 +46,6 @@ class _PlateformeQuiBascule:
         self.completes: list[tuple] = []
         self.base = "https://exemple.invalide"
 
-    def mes_orgs(self):
-        # ⚠️ La coupure de ces bancs porte sur la RÉSERVATION, pas sur la liste
-        # des organisations : ce qu'ils gardent est la survie de la boucle, et
-        # la panne de la liste a ses propres bancs.
-        return [7]
-
     def claim(self, lease_seconds=600, **_):
         self.claims += 1
         if self.echecs < self.coupures:

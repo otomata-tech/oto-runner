@@ -207,26 +207,8 @@ class Backend:
                           "erreur": str(c.get("error") or "")})
         return refus
 
-    def mes_orgs(self) -> list[int]:
-        """Les organisations dont le compte du worker est MEMBRE, dans l'ordre.
-
-        ⚠️ C'est la seule chose qui dit au worker sur quoi sonder, et c'est
-        voulu : le droit d'agir et la liste de ce sur quoi agir deviennent le
-        même fait. On ajoute un client en invitant ce compte dans son
-        organisation, on le retire en révoquant l'appartenance — aucun réglage,
-        aucun redéploiement, aucun privilège attaché à l'identité.
-
-        La capacité derrière (`org.list`, `authz=SUB_ONLY`) ne demande aucune org
-        de contexte et ne rend que `list_orgs_for_user(sub)` : elle ne peut pas
-        servir à en découvrir une à laquelle on n'appartient pas.
-        """
-        rendu = self._get("/api/me/orgs", {})
-        orgs = rendu.get("orgs") if isinstance(rendu, dict) else rendu
-        return [int(o["org_id" if "org_id" in o else "id"]) for o in (orgs or [])]
-
     # ── la file de jobs (runner.jobs, R2) ────────────────────────────────────
-    def claim(self, lease_seconds: int = 600, depot: str = "",
-              org: Optional[int] = None) -> Optional[dict]:
+    def claim(self, lease_seconds: int = 600, depot: str = "") -> Optional[dict]:
         """Réserve un travail — et NOMME le dépôt de clé qu'on sait consommer.
 
         Le backend y répond par `model_key` quand l'org du travail a déposé cette
@@ -249,7 +231,7 @@ class Backend:
         corps = {"op": "claim", "lease_seconds": lease_seconds}
         if depot:
             corps["provider"] = depot
-        return self._post("/api/me/runner/jobs", corps, org=org).get("job")
+        return self._post("/api/me/runner/jobs", corps).get("job")
 
     def enqueue(self, kind: str, payload: dict,
                 run_id: Optional[str] = None,

@@ -53,10 +53,7 @@ class _BackendQuiNote:
         self.base = "https://exemple.invalide"
         self.depots = []
 
-    def mes_orgs(self):
-        return [7]
-
-    def claim(self, lease_seconds=600, depot="", org=None):
+    def claim(self, lease_seconds=600, depot=""):
         self.depots.append(depot)
         worker._demander_arret(15, None)
         return None

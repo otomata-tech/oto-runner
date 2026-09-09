@@ -29,7 +29,7 @@ réel est gaté par une relecture d'architecture — ce cran rend la gate mécan
 ```
 OTO_BASE=https://mcp.oto.cx          # REST (fil + jobs)
 OTO_MCP_URL=https://mcp.oto.cx/mcp   # face MCP (outils)
-OTO_TOKEN=oto_…                      # jeton non porté du compte worker (cf. « Qui ce worker sert »)
+OTO_TOKEN=oto_…                      # jeton non porté du compte worker (une org)
 ANTHROPIC_API_KEY=…                  # la clé de modèle = qui paie
 OTO_RUNNER_MODEL=claude-sonnet-5     # défaut assumé (coût) ; Opus par flotte si justifié
 OTO_RUNNER_ARMED=1                   # cf. ci-dessus
@@ -43,39 +43,6 @@ OTO_RUNNER_PARALLEL_TOOLS=1          # 1 (défaut) = le modèle groupe ses appel
                                      # tour ; 0 = UN SEUL par tour (`parallel_tool_calls: false`)
 OTO_RUNNER_TEMPERATURE=0             # DERNIER RECOURS seulement : la campagne prime (cf. ci-dessous)
 ```
-
-## Qui ce worker sert
-
-**Toutes les organisations dont son compte est MEMBRE**, sondées à tour de rôle.
-La liste n'est pas configurée : elle est lue au démarrage puis rafraîchie toutes
-les cinq minutes (`GET /api/me/orgs`). Conséquence pratique, et c'est tout
-l'intérêt de cette forme :
-
-| pour… | on… |
-|---|---|
-| ajouter un client | **invite** le compte du worker dans son organisation |
-| retirer un client | **révoque** l'appartenance |
-
-Aucun réglage, aucun redéploiement, aucun privilège attaché à l'identité — le
-droit d'agir et la liste de ce sur quoi agir sont le même fait, vérifié par le
-serveur à chaque requête. Une invitation prend effet en cinq minutes au plus,
-sans relancer le processus.
-
-⚠️ **Ce qui se passait avant, et qui ne se voyait pas** : un worker qui ne
-nommait aucune organisation n'était pas refusé — le serveur se replie sur
-l'organisation **maison** du porteur du jeton. Il sondait donc une organisation
-sur N, et les campagnes des autres n'étaient jamais servies. La file paraissait
-vide parce qu'on regardait la mauvaise (mesuré le 09/09/2026).
-
-Le tour est **strict** : une organisation qui porte cinq cents lignes n'en prend
-qu'une par tour. Les N sondages d'un tour s'enchaînent sans pause — c'est la
-respiration de fin de tour (`_POLL_S`) qui est conservée, donc la rotation ne
-ralentit rien.
-
-Deux vides qui ne se traitent pas pareil : le compte **membre d'aucune**
-organisation fait sortir le worker (défaut de configuration permanent) ; une
-plateforme **injoignable** ne le fait pas sortir — il réessaie à chaque
-respiration, comme il le fait déjà pour la réservation.
 
 ⚠️ **La température se déclare sur la CAMPAGNE, pas sur le worker.** Elle est un
 choix de procédure et non d'hôte : deux campagnes servies par le même worker n'en

@@ -399,98 +399,6 @@ def _un_travail(backend: Backend, job: dict, provider, file=None) -> None:
                          journal.relu(j.chemin))
 
 
-class Rotation:
-    """Les organisations que ce worker sert, et l'ordre dans lequel il les sonde.
-
-    ⚠️ **La liste n'est pas configurée : elle est LUE de l'appartenance.** C'est
-    le cœur de ce mécanisme et la raison de l'avoir préféré aux deux autres
-    formes étudiées le 09/09/2026 :
-
-    - *une organisation par processus* — fige la capacité au nombre de processus,
-      gaspille un worker entier sur une organisation sans campagne, et demande un
-      redéploiement pour ajouter un client ;
-    - *celle du travail précédent* — n'amorce pas (le premier sondage n'a aucune
-      organisation à nommer) et s'enferme : celle qui a du travail garde le
-      worker tant qu'elle en a.
-
-    Ce que la rotation achète : on ajoute un client en INVITANT le compte du
-    worker dans son organisation, on le retire en révoquant l'appartenance. Le
-    droit d'agir et la liste de ce sur quoi agir deviennent le même fait, vérifié
-    par le serveur à chaque requête — aucun privilège attaché à l'identité, ce
-    qui est la conduite retenue en retirant `runner_worker` (oto-backend
-    v1.244.0).
-
-    Le tour est STRICT : une organisation qui porte cinq cents lignes n'en prend
-    qu'une par tour. Rembobiner sur celle qui vient de servir irait plus vite
-    pour elle et affamerait les autres.
-    """
-
-    #: Une invitation prend effet au plus tard dans ce délai, sans redémarrage.
-    TTL_S = 300
-
-    def __init__(self, backend: Backend) -> None:
-        self._backend = backend
-        self._orgs: list[int] = []
-        self._i = 0
-        self._lu_a = 0.0
-        #: A-t-on RÉUSSI à lire au moins une fois ? Distingue « aucune
-        #: organisation » de « je n'ai pas pu regarder » — la confusion qui a
-        #: coûté des jours de sondage muet côté serveur (07/09/2026).
-        self._lu_ok = False
-
-    def amorcer(self) -> None:
-        """Au boot. **Deux vides qui ne se traitent pas pareil**, et les
-        confondre serait le défaut :
-
-        - *lu, et vide* — le compte n'appartient à aucune organisation. C'est un
-          défaut de configuration permanent : on sort, comme `resolve_key` sort
-          sur une clé absente. Un worker qui entre dans sa boucle pour y sonder
-          le vide est un worker dont personne ne verra qu'il ne sert à rien.
-        - *pas lu* — la plateforme est injoignable. C'est transitoire, et un
-          redémarrage pendant une coupure ne doit PAS faire sortir l'agent : la
-          boucle réessaiera à chaque respiration.
-        """
-        self._relire()
-        if self._lu_ok and not self._orgs:
-            raise SystemExit(
-                "le compte de ce worker n'est membre d'AUCUNE organisation : il "
-                "n'a rien à sonder. Invite-le dans l'organisation à servir "
-                "(oto_admin_org_member), puis relance-le.")
-        if self._orgs:
-            logger.info("worker au service de %d organisation(s) : %s",
-                        len(self._orgs), ", ".join(str(o) for o in self._orgs))
-
-    def _relire(self) -> None:
-        try:
-            vues = self._backend.mes_orgs()
-        except BackendError as e:
-            # ⚠️ Garder la liste précédente n'est pas masquer une panne : elle est
-            # DITE, et jeter un état valide sur un hoquet réseau mettrait le
-            # worker hors service pour une raison qui n'est pas la sienne.
-            logger.warning("liste des organisations non relue (%s) — %s", e,
-                           f"on garde les {len(self._orgs)} connues"
-                           if self._orgs else "aucune connue, on réessaiera")
-            return
-        self._lu_ok = True
-        self._lu_a = time.monotonic()
-        if vues != self._orgs:
-            logger.info("organisations servies : %s → %s",
-                        self._orgs or "(aucune)", vues or "(aucune)")
-            self._orgs, self._i = vues, 0
-
-    def taille(self) -> int:
-        # Liste vide = on n'a encore rien pu lire : on retente à chaque tour,
-        # c'est ce qui fait reprendre l'agent tout seul après une coupure.
-        if not self._orgs or time.monotonic() - self._lu_a >= self.TTL_S:
-            self._relire()
-        return len(self._orgs)
-
-    def suivante(self) -> int:
-        org = self._orgs[self._i % len(self._orgs)]
-        self._i = (self._i + 1) % max(len(self._orgs), 1)
-        return org
-
-
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     if os.environ.get("OTO_RUNNER_ARMED") != "1":
@@ -523,38 +431,18 @@ def main() -> None:
                 f" (= {resolu})" if resolu and resolu != nom_modele else "",
                 f"de l'org quand elle en dépose une ({depot})" if depot
                 else "de la plateforme (aucun dépôt pour cet hôte)", passages)
-    rotation = Rotation(backend)
-    rotation.amorcer()
     signal.signal(signal.SIGTERM, _demander_arret)
     signal.signal(signal.SIGINT, _demander_arret)
     while not _arret_demande:
-        # UN tour d'organisations, puis on respire. Sonder les N sans dormir
-        # entre elles est ce qui rend la rotation gratuite : une file vide coûte
-        # un aller-retour, et la respiration reste celle d'avant.
-        job, org_du_job = None, None
-        for _ in range(rotation.taille()):
-            if _arret_demande:
-                break
-            org = rotation.suivante()
-            try:
-                job = backend.claim(lease_seconds=lease_s, depot=depot, org=org)
-            except BackendError as e:
-                # Une organisation qui refuse n'arrête pas les autres : elle a pu
-                # révoquer l'appartenance entre deux relectures de la liste.
-                logger.warning("claim org %s : %s", org, e)
-                continue
-            if job:
-                org_du_job = org
-                break
+        try:
+            job = backend.claim(lease_seconds=lease_s, depot=depot)
+        except BackendError as e:
+            logger.warning("claim : %s", e)
+            time.sleep(_POLL_S)
+            continue
         if not job:
             time.sleep(_POLL_S)
             continue
-        # ⚠️ Le reste du travail — conclusion, prolongation du bail, fil — passe
-        # par le MÊME client. Sans cette ligne, il repartirait sur l'organisation
-        # maison du jeton et ne retrouverait pas le travail qu'on vient de
-        # réserver ailleurs. C'est le geste que `run_fleet` fait déjà pour un
-        # passage déclaré.
-        backend.org = org_du_job
         # ⚠️ Testé APRÈS le claim : entre la décision de réserver et le retour du
         # backend, le signal a pu arriver. Rendre la ligne tout de suite vaut
         # mieux que la garder sous bail pendant que l'agent s'éteint.
