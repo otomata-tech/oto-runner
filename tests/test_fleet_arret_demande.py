@@ -168,11 +168,17 @@ def test_sans_flotte_l_ordonnanceur_ne_bat_ni_n_accuse():
     le journal noierait les vraies.
 
     Une spec sans `fleet_id` en DÉCLARE une : le seul cas réellement sans flotte
-    est celui où la déclaration échoue. Le passage tourne quand même — le
-    rattachement sert à LIRE, il ne conditionne pas le travail."""
+    est celui où la déclaration échoue.
+
+    ⚠️ Depuis le 09/09/2026, ce cas n'existe plus en vol : une déclaration qui
+    échoue ABANDONNE le passage. L'intention du banc tient — aucun geste sans
+    destinataire — mais elle est désormais obtenue par la cause la plus simple :
+    on n'est jamais parti. Le rattachement ne servait plus seulement à lire, il
+    est ce qui rend le passage arrêtable."""
+    import pytest
     b = _DeclarationRefusee(counts=[3, 3, 0, 0])
-    bilan = _run(_spec(fleet_id=None), b)
-    assert bilan.arret, "le passage se conclut normalement"
+    with pytest.raises(RuntimeError):
+        _run(_spec(fleet_id=None), b)
     assert not getattr(b, "prises", []), "rien à prendre"
     assert not getattr(b, "battements", 0), "rien à qui demander"
     assert not getattr(b, "accuses", []), "rien à accuser"

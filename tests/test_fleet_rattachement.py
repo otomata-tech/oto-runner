@@ -52,22 +52,33 @@ class _DeclarationRefusee(FauxBackend):
 
 # ── ① le passage tourne même si la déclaration échoue ────────────────────────
 
-def test_une_declaration_qui_echoue_n_arrete_pas_le_passage():
-    """⚠️ LA garde qui compte, et elle va à contre-courant de l'intuition.
+def test_une_declaration_qui_echoue_ABANDONNE_le_passage():
+    """⚠️ Renversement du 09/09/2026, et il faut dire ce qu'il défait.
 
-    On pourrait vouloir refuser de partir sans rattachement — « pas de passage
-    illisible ». Ce serait faire dépendre le TRAVAIL d'un dispositif qui ne sert
-    qu'à le LIRE : une campagne bloquée parce que l'observabilité est en panne.
-    Le passage part, les jobs sont enfilés sans rattachement, et le journal le
-    DIT au lieu de le taire."""
+    Ce banc affirmait l'inverse, avec un argument sérieux : refuser de partir
+    ferait dépendre le TRAVAIL d'un dispositif qui ne sert qu'à le LIRE — une
+    campagne bloquée parce que l'observabilité est en panne. C'était juste tant
+    qu'un ordonnanceur LOCAL tenait le passage : on pouvait toujours le tuer.
+
+    Le renversement a périmé cet argument. La déclaration n'est plus ce qui
+    permet de lire le passage, c'est ce qui permet de L'ARRÊTER : sans elle,
+    `op=stop` n'a aucune prise, et les travaux vont à leur terme quoi qu'il
+    arrive. Ce n'est plus de l'observabilité, c'est du contrôle.
+
+    Vécu le 09/09/2026 : cinq travaux partis sans rattachement, aboutis, et
+    personne ne pouvait les arrêter. La règle de la maison le disait déjà —
+    « pas de fallback qui masque un problème, lever une erreur »."""
+    import pytest
     b = _DeclarationRefusee(counts=[3, 3, 0, 0])
-    bilan = _run(_spec(), b)
+    with pytest.raises(RuntimeError) as e:
+        _run(_spec(), b)
     assert getattr(b, "declarations", []), "la déclaration a bien été TENTÉE"
-    assert b.enfiles >= 1, "le passage a enfilé malgré l'échec de la déclaration"
-    assert set(b.rattachements) == {None}, (
-        "sans identifiant les jobs partent orphelins — comportement CORRECT : "
-        "mieux vaut un passage illisible qu'un passage qui ne part pas")
-    assert bilan.arret, "et le passage se conclut normalement"
+    assert not getattr(b, "enfiles", 0), (
+        "et RIEN n'a été enfilé : on abandonne avant, pas après — sinon on "
+        "laisse derrière soi exactement ce qu'on refuse")
+    assert "ABANDONNÉ" in str(e.value) and "op=stop" in str(e.value), (
+        "le refus dit ce qui a été fait et pourquoi, sans quoi il fait relancer "
+        "le même passage à l'identique")
 
 
 # ── ② chaque travail porte l'identifiant obtenu ──────────────────────────────
