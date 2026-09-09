@@ -13,6 +13,7 @@ qu'elle fait enfiler vivent dans `declaration.py`, partagés avec le mode direct
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -45,6 +46,12 @@ _MAX_ERREURS_BACKEND = 10   # ~3-4 min de panne DENSE (reset au 1er succès)
 # le compteur à zéro : la remise à zéro rendrait la borne contournable par
 # alternance (un vrai faux départ, un claim à vide, indéfiniment).
 _MAX_FAUX_DEPARTS_CONSECUTIFS = 5
+
+#: Le temps laissé pour interrompre un passage qui va partir sans rattachement.
+#: Assez pour lire l'avertissement et frapper Ctrl-C. ⚠️ Seulement quand la
+#: sortie EST un terminal : ailleurs, la pause ne retarderait qu'un automate que
+#: personne ne regarde — l'avertissement, lui, part toujours.
+_FENETRE_SANS_RATTACHEMENT = 10
 # ⚠️ DEUX suffisent, et le seuil est bas exprès. Un relâchement qui échoue laisse
 # la ligne sous bail : le travail suivant ne la prend pas, la file paraît avancer
 # alors qu'elle se vide en laissant des lignes derrière, et le passage MENT SUR SON
@@ -187,8 +194,31 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                         fleet_id, fleet_id)
         except BackendError as e:
             muet += 1
-            logger.warning("flotte non déclarée (%s) — les jobs partiront sans "
-                           "rattachement, `op=state` restera muet sur ce passage", e)
+            # ⚠️ Ce repli laisse partir le passage SANS RATTACHEMENT : les
+            # travaux tournent, dépensent, et sont hors de portée d'`op=stop` —
+            # personne ne peut les arrêter avant qu'ils finissent d'eux-mêmes.
+            # Le 09/09/2026, cinq d'entre eux ont abouti et la ligne de journal
+            # n'a été lue qu'après coup.
+            #
+            # On ne retire pas le repli — un passage qui ne bloque pas quand la
+            # base tousse a sa raison d'être. Mais il cesse d'être discret :
+            # niveau ERREUR, cadre visible, et une FENÊTRE pour interrompre.
+            # Un avertissement qu'on ne peut pas manquer vaut mieux qu'un refus
+            # dur posé à chaud, et laisse la décision de fond à qui la porte.
+            logger.error(
+                "\n" + "=" * 72
+                + "\n  FLOTTE NON DÉCLARÉE — le passage va partir SANS RATTACHEMENT."
+                + f"\n  Cause : {e}"
+                + "\n  Conséquence : ses travaux seront invisibles à `op=state` et"
+                + "\n  IMPOSSIBLES À ARRÊTER avec `op=stop`. Ils iront à leur terme."
+                + f"\n  Interrompre maintenant (Ctrl-C) — {_FENETRE_SANS_RATTACHEMENT} s"
+                + "\n" + "=" * 72)
+            # ⚠️ La fenêtre n'a de sens que si quelqu'un LIT : hors terminal
+            # (CI, banc, lancement détaché), elle ne ferait que retarder un
+            # automate que personne ne regarde. L'avertissement, lui, reste —
+            # il part en ERREUR dans tous les cas.
+            if sys.stdout.isatty():
+                time.sleep(_FENETRE_SANS_RATTACHEMENT)
     # ⚠️ PRENDRE la flotte : `armed` → `running`. C'est l'ordonnanceur qui pose ce
     # FAIT, jamais l'opérateur — `armed` veut dire « on a demandé », `running`
     # veut dire « quelqu'un l'a prise et donne signe ». Un refus n'est pas une
