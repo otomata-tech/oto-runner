@@ -125,6 +125,16 @@ class AgentSpec:
     # le cumul en temps réel. Posée sur l'ordonnanceur, elle arrive après coup :
     # elle empêche le PROCHAIN travail, jamais celui qui dérive.
     max_tokens: Optional[int] = None
+    # La température du déroulé, DÉCLARÉE par le passage. `None` = on n'envoie
+    # rien et le fournisseur applique son défaut — le comportement d'avant.
+    #
+    # ⚠️ Elle vit ici, et pas dans l'environnement du worker, parce qu'elle est
+    # un choix de PROCÉDURE et non d'hôte : deux campagnes servies par le même
+    # worker n'en veulent pas la même. Mesuré le 06/09/2026 : sans valeur posée,
+    # deux passages de la même procédure sur le même banc de trois lignes vont
+    # de 11 à 18 sur 18 — un écart qui avale entièrement celui qu'on cherchait
+    # à mesurer entre deux versions du texte.
+    temperature: Optional[float] = None
     label: str = "run"
 
 
@@ -333,6 +343,7 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
         debut_tour = time.monotonic()
         turn = provider.complete(system=spec.system, messages=messages,
                                  tools=schemas, api_key=api_key,
+                                 temperature=spec.temperature,
                                  on_event=on_event)
         duree_tour_ms = int((time.monotonic() - debut_tour) * 1000)
         for k in USAGE_KEYS:

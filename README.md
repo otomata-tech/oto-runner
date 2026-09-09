@@ -41,7 +41,25 @@ OTO_RUNNER_MAX_TOKENS=8192           # plafond de COMPLÉTION d'un tour (les deu
 OTO_RUNNER_MAX_TOOL_OUTPUT=120000    # plafond, en CARACTÈRES, d'une sortie d'outil servie au modèle
 OTO_RUNNER_PARALLEL_TOOLS=1          # 1 (défaut) = le modèle groupe ses appels d'outils dans un
                                      # tour ; 0 = UN SEUL par tour (`parallel_tool_calls: false`)
+OTO_RUNNER_TEMPERATURE=0             # DERNIER RECOURS seulement : la campagne prime (cf. ci-dessous)
 ```
+
+⚠️ **La température se déclare sur la CAMPAGNE, pas sur le worker.** Elle est un
+choix de procédure et non d'hôte : deux campagnes servies par le même worker n'en
+veulent pas la même. Le backend la sert dans le travail depuis `v1.244.0`
+(colonne `temperature` de la flotte), et l'ordre est **le passage, puis l'hôte
+(`OTO_RUNNER_TEMPERATURE`), puis le fournisseur** — du plus proche du métier au
+plus lointain. Ne rien déclarer nulle part n'envoie **rien**, et le fournisseur
+applique son défaut : ce n'est pas la même chose qu'envoyer une valeur, parce que
+ce défaut bouge sans prévenir. Mesuré le 06/09/2026 : sans température posée,
+deux passages de la MÊME procédure sur le MÊME banc de trois lignes vont de 11 à
+18 sur 18 — un bruit qui avalait entièrement l'écart qu'on croyait mesurer entre
+deux versions du texte. Poser `0` rend les passages comparables.
+
+⚠️ Le provider `anthropic` **refuse** une campagne qui en déclare une, avec un
+message qui le dit : il règle la profondeur par `output_config.effort`. Un
+réglage offert qui n'agit sur rien coûte plus cher qu'un réglage absent — on
+l'ajuste des heures en croyant mesurer.
 
 ⚠️ **Le plafond de sortie d'outil se règle, et son défaut a changé.** À 12 000
 caractères, la consigne métier rendue par `oto_procedure` (44 818 caractères) et

@@ -221,6 +221,7 @@ def fil_cache(messages: list) -> list:
 
 def complete(*, system: str, messages: list, tools: list[dict],
              api_key: Optional[str] = None,
+             temperature: Optional[float] = None,
              on_event: Optional[Callable[[str, dict], None]] = None) -> Turn:
     """UN tour de modèle — synchrone : le worker est un process dédié, pas un
     serveur mono-loop, il a le droit d'attendre.
@@ -233,6 +234,21 @@ def complete(*, system: str, messages: list, tools: list[dict],
     contrat aux deux adaptateurs. Ici il ne reçoit rien : le SDK Anthropic
     retente lui-même les incidents de transport, et ce qu'il retente ne remonte
     pas jusqu'ici. Côté OpenAI-compatible, la retentative est à nous et se dit."""
+    if temperature is not None:
+        # REFUS FRANC, et c'est délibéré. Ce provider règle la profondeur par
+        # `output_config.effort` (cf. l'en-tête du module) ; la température n'y a
+        # pas sa place. Les deux autres conduites étaient pires :
+        #   — la poser quand même : le fournisseur rend un 400 opaque, et qui a
+        #     déclaré la campagne cherche la faute dans sa procédure ;
+        #   — l'ignorer en silence : un réglage offert qui ne fait rien est plus
+        #     coûteux qu'un réglage absent, parce qu'on l'ajuste pendant des
+        #     heures en croyant mesurer quelque chose.
+        # Le travail échoue avec CE texte, lisible depuis la fiche du passage.
+        raise ValueError(
+            f"la campagne déclare temperature={temperature}, mais le provider "
+            "anthropic règle la profondeur par `output_config.effort` et "
+            "n'accepte pas de température. Retire-la de la campagne, ou sers-la "
+            "par un worker OTO_RUNNER_PROVIDER=openai.")
     anthropic = _sdk()
     if anthropic is None:
         raise LlmUnavailable("le paquet `anthropic` n'est pas installé")

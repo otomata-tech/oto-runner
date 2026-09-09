@@ -112,6 +112,11 @@ def _spec_du_job(job: dict) -> AgentSpec:
         # coûte, et une ligne mesurée à 65 571 jetons le 01/09 tenait largement
         # sous ses 40 pas.
         max_tokens=(int(p["max_tokens"]) if p.get("max_tokens") else None),
+        # ⚠️ `is not None` et non la véracité : `temperature: 0` est LA valeur
+        # qu'on déclare pour rendre deux passages comparables, et un test de
+        # véracité la jetterait comme si elle n'avait pas été posée.
+        temperature=(float(p["temperature"])
+                     if p.get("temperature") is not None else None),
         label=f"job:{job.get('id')}")
 
 

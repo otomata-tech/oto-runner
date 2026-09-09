@@ -160,9 +160,16 @@ def max_tokens() -> int:
     return int(brut)
 
 
-def temperature() -> Optional[float]:
-    """`OTO_RUNNER_TEMPERATURE` — envoyé en `temperature` quand il est posé ;
-    absent = on n'envoie RIEN et le fournisseur applique son défaut.
+def temperature_hote() -> Optional[float]:
+    """`OTO_RUNNER_TEMPERATURE` — le défaut de CET hôte, quand le travail n'en
+    déclare aucune ; absent aussi = on n'envoie RIEN et le fournisseur applique
+    le sien.
+
+    ⚠️ Elle ne prime jamais sur ce que le passage déclare (`AgentSpec.temperature`,
+    servi par la campagne depuis oto-backend v1.244.0). L'ordre est : le passage,
+    puis l'hôte, puis le fournisseur — du plus proche du métier au plus lointain.
+    C'est la raison du renommage : un `temperature()` nu se lisait comme LA
+    température, alors qu'il n'en est que le dernier recours.
 
     ⚠️ Mesuré le 06/09/2026 : sans cette clé, Mistral échantillonne à son défaut,
     et deux passages de la MÊME procédure sur le MÊME banc de trois lignes vont
@@ -278,6 +285,7 @@ def format_tools(schemas: list[dict]) -> list[dict]:
 
 def complete(*, system: str, messages: list, tools: list[dict],
              api_key: Optional[str] = None,
+             temperature: Optional[float] = None,
              on_event: Optional[Callable[[str, dict], None]] = None) -> Turn:
     """UN tour de modèle — synchrone, le worker a le droit d'attendre.
 
@@ -303,8 +311,11 @@ def complete(*, system: str, messages: list, tools: list[dict],
         corps["tools"] = tools
     if effort():
         corps["reasoning_effort"] = effort()
-    if temperature() is not None:
-        corps["temperature"] = temperature()
+    # Le passage d'abord, l'hôte à défaut, rien sinon. Le calcul est fait UNE
+    # fois : appeler deux fois relisait l'environnement entre le test et l'usage.
+    retenue = temperature if temperature is not None else temperature_hote()
+    if retenue is not None:
+        corps["temperature"] = retenue
     if not parallel_tools():
         # ⚠️ Le serveur peut TOUT DE MÊME rendre plusieurs appels dans un tour :
         # la boucle les exécutera comme d'habitude. Aucune garde ici — ce serait
