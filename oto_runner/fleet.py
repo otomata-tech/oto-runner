@@ -187,6 +187,7 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                 max_steps=spec.max_steps, workers=spec.concurrency,
                 max_rows=spec.volume, max_tokens=spec.budget_tokens,
                 max_tokens_per_row=spec.max_tokens_per_row,
+                temperature=spec.temperature,
                 # L'org DÉCLARÉE, celle-là même que la session pose déjà sur les
                 # appels d'outils. Sans elle, la campagne naît ailleurs que là
                 # où sa déclaration la met, et ses travaux cherchent leur

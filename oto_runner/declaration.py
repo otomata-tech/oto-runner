@@ -103,6 +103,13 @@ class FleetSpec:
     # dont l'un des deux finirait par mentir. Ici on ne dit pas ce qui est
     # PERMIS : on dit ce dont la panne rend le résultat FAUX.
     critical_tools: tuple = ()
+    # La température du passage, DÉCLARÉE, jamais déduite de l'hôte : `0` est
+    # la valeur qu'on pose pour rendre deux passages comparables, et elle
+    # descend dans chaque travail (`payload`) comme dans la campagne déclarée.
+    # Absente ⟹ l'hôte décide (`OTO_RUNNER_TEMPERATURE`), et une grille ne
+    # peut plus dire d'où vient la valeur. Décision d'Alexis du 09/09/2026 :
+    # « je ne veux pas poser ce paramètre en env, il doit être paramétrable ».
+    temperature: Optional[float] = None
     # Le plafond de jetons D'UNE LIGNE, descendu dans CHAQUE travail enfilé —
     # donc appliqué par l'agent lui-même, quel que soit le chemin qui l'a mis en
     # file. Absent ⟹ aucune borne par ligne : 65 571 jetons sur une seule ligne,
@@ -226,6 +233,7 @@ def load_spec(path: str) -> FleetSpec:
         max_tokens_per_row=raw.get("max_tokens_per_row"),
         input=raw.get("input") or "",
         critical_tools=tuple(raw.get("critical_tools") or ()),
+        temperature=(float(raw["temperature"]) if raw.get("temperature") is not None else None),
         bilan_periode_s=int(raw.get("bilan_periode_s") or _BILAN_PERIODE_S),
         source=path,
         name=os.path.splitext(os.path.basename(path))[0])
@@ -276,6 +284,7 @@ def spec_depuis_flotte(f: dict) -> FleetSpec:
         max_steps=int(f.get("max_steps") or 40),
         max_tokens_per_row=f.get("max_tokens_per_row"),
         max_consecutive_failures=f.get("max_consecutive_failures"),
+        temperature=(float(f["temperature"]) if f.get("temperature") is not None else None),
         input=f.get("input") or "",
         # La flotte EXISTE déjà : on la reprend, on n'en déclare pas une seconde.
         fleet_id=int(f["id"]),
@@ -301,5 +310,7 @@ def payload(spec: FleetSpec) -> dict:
             # passage tourne sans lui. Portée par le travail, elle s'applique
             # quel que soit le chemin qui l'a enfilé.
             "max_tokens": spec.max_tokens_per_row,
+            # `is not None` : `temperature: 0` est une valeur, pas une absence.
+            "temperature": spec.temperature,
             "input": message,
             "label": f"flotte {spec.namespace} — {spec.procedure}"}

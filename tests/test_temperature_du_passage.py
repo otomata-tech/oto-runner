@@ -167,3 +167,17 @@ def test_la_boucle_transmet_ZERO_et_non_None():
     assert vus["temperature"] == 0, (
         "un `or None` quelque part sur le trajet rendrait la campagne muette "
         "en affichant `0` — c'est la valeur la plus utile du réglage")
+
+
+def test_la_temperature_DECLAREE_descend_dans_chaque_travail(tmp_path):
+    """Décision d'Alexis du 09/09/2026 : « je ne veux pas poser ce paramètre en
+    env, il doit être paramétrable ». Le YAML la déclare, `payload` la porte,
+    et `0` reste `0` — une valeur, pas une absence."""
+    from oto_runner.declaration import load_spec, payload
+    y = tmp_path / "f.yaml"
+    y.write_text("procedure: p\nnamespace: t\ntools: [oto_procedure]\ninput: x\ntemperature: 0\n")
+    spec = load_spec(str(y))
+    assert spec.temperature == 0.0
+    assert payload(spec)["temperature"] == 0.0
+    y.write_text("procedure: p\nnamespace: t\ntools: [oto_procedure]\ninput: x\n")
+    assert payload(load_spec(str(y)))["temperature"] is None, "absente = l'hôte décide"

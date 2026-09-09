@@ -282,6 +282,7 @@ class Backend:
                         max_tokens: Optional[int] = None,
                         max_consecutive_failures: Optional[int] = None,
                         max_tokens_per_row: Optional[int] = None,
+                        temperature: Optional[float] = None,
                         org: Optional[int] = None) -> dict:
         """Déclare la flotte EN BASE et rend la ligne créée.
 
@@ -312,7 +313,8 @@ class Backend:
                          ("model", model), ("workers", workers),
                          ("max_rows", max_rows), ("max_tokens", max_tokens),
                          ("max_consecutive_failures", max_consecutive_failures),
-                         ("max_tokens_per_row", max_tokens_per_row)):
+                         ("max_tokens_per_row", max_tokens_per_row),
+                         ("temperature", temperature)):
             if val is not None:
                 corps[cle] = val
         return self._post("/api/me/runner/fleets", corps, org=org)["fleet"]
