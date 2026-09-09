@@ -33,6 +33,10 @@ class Turn:
     # estampille, « quelles lignes viennent de quel modèle » n'a plus de réponse
     # dès que la question se pose à froid — et elle s'est posée le 02/09.
     model: Optional[str] = None
+    # La température EFFECTIVEMENT envoyée au fournisseur sur ce tour — celle du
+    # passage, ou celle de l'hôte à défaut, ou rien. Portée par le tour pour que
+    # le journal la LISE au lieu de la déduire d'un `.env` relu après coup.
+    temperature: Optional[float] = None
 
     @property
     def wants_tools(self) -> bool:

@@ -351,7 +351,7 @@ def complete(*, system: str, messages: list, tools: list[dict],
 
     if fin == "content_filter":
         return Turn(text="", tool_calls=(), stop_reason="refusal",
-                    raw_content=msg, usage=usage, model=servi)
+                    raw_content=msg, usage=usage, model=servi, temperature=retenue)
 
     calls = []
     for tc in (msg.get("tool_calls") or []):
@@ -372,4 +372,4 @@ def complete(*, system: str, messages: list, tools: list[dict],
     return Turn(text=contenu.strip(),
                 tool_calls=tuple(calls),
                 stop_reason="end_turn" if fin in ("stop", "tool_calls") else fin,
-                raw_content=msg, usage=usage, model=servi)
+                raw_content=msg, usage=usage, model=servi, temperature=retenue)

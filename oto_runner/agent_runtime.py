@@ -355,6 +355,7 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
              appels=[{"id": c.id, "nom": c.name, "arguments": c.arguments}
                      for c in turn.tool_calls],
              usage=dict(turn.usage or {}), modele=turn.model,
+             temperature=turn.temperature,
              duree_ms=duree_tour_ms, brut=turn.raw_content)
 
         # ⚠️ La borne se vérifie APRÈS le tour, jamais avant : on ne connaît le

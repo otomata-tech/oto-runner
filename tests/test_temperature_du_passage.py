@@ -181,3 +181,12 @@ def test_la_temperature_DECLAREE_descend_dans_chaque_travail(tmp_path):
     assert payload(spec)["temperature"] == 0.0
     y.write_text("procedure: p\nnamespace: t\ntools: [oto_procedure]\ninput: x\n")
     assert payload(load_spec(str(y)))["temperature"] is None, "absente = l'hôte décide"
+
+
+def test_le_tour_porte_la_temperature_ENVOYEE(corps_poste):
+    """Le journal la lit sur le tour au lieu de la déduire d'un `.env` relu
+    après coup : sans ça, « à quelle température a tourné cette fiche ? » n'a
+    de réponse que par supposition."""
+    turn = P.complete(system="s", messages=[], tools=[], api_key="k", temperature=0.2)
+    assert turn.temperature == 0.2
+    assert corps_poste["temperature"] == 0.2
