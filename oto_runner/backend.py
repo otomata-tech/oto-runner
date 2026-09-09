@@ -60,9 +60,23 @@ class BackendError(RuntimeError):
 
 
 class Backend:
-    def __init__(self, base: Optional[str] = None, token: Optional[str] = None):
+    def __init__(self, base: Optional[str] = None, token: Optional[str] = None,
+                 org: Optional[int] = None):
+        """⚠️ `org` est porté par le CLIENT, pas passé appel par appel.
+
+        La première version le posait sur trois appels seulement : `create` la
+        portait, `launch`, le battement et l'enfilage non. La campagne naissait
+        donc sous la bonne organisation et devenait introuvable au geste suivant
+        — `404 fleet_not_found` toutes les vingt secondes, jusqu'au délai, sans
+        qu'un seul travail parte (mesuré le 09/09/2026, campagne restée `draft`
+        560 secondes).
+
+        Un contexte qu'il faut penser à joindre à chaque appel finit par être
+        oublié à l'un d'eux, et c'est exactement ce qui est arrivé. Il vit ici :
+        aucun appel ne peut plus l'omettre."""
         self.base = (base or os.environ.get("OTO_BASE", "https://mcp.oto.cx")).rstrip("/")
         self.token = (token or os.environ.get("OTO_TOKEN", "")).strip()
+        self.org = org
         if not self.token:
             raise BackendError("OTO_TOKEN absent de l'environnement du worker")
 
@@ -89,8 +103,9 @@ class Backend:
         déjà correctement quinze lignes plus bas — la réponse était dans ce
         fichier avant que j'en invente une autre (09/09/2026)."""
         entetes = {"Authorization": f"Bearer {self.token}"}
-        if org is not None:
-            entetes["X-Oto-Org"] = str(org)
+        cible = org if org is not None else self.org
+        if cible is not None:
+            entetes["X-Oto-Org"] = str(cible)
         r = self._reseau(chemin, post_with_deadline, json=corps, timeout=_TIMEOUT,
                          headers=entetes, wall_s=120)
         if r.status_code >= 400:
@@ -105,8 +120,9 @@ class Backend:
     def _patch(self, chemin: str, corps: dict,
                org: Optional[int] = None) -> dict:
         entetes = {"Authorization": f"Bearer {self.token}"}
-        if org is not None:
-            entetes["X-Oto-Org"] = str(org)
+        cible = org if org is not None else self.org
+        if cible is not None:
+            entetes["X-Oto-Org"] = str(cible)
         r = self._reseau(chemin, lambda u, **kw: requests.patch(u, **kw),
                          json=corps, timeout=_TIMEOUT, headers=entetes)
         if r.status_code >= 400:

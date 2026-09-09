@@ -48,3 +48,50 @@ def test_sans_org_declaree_rien_nest_pose():
     b = _Espion()
     b.declarer_flotte(label="p", procedure="pr", tools=["data_rows"])
     assert b.org is None
+
+
+# ── L'organisation vit sur le CLIENT, pas sur chaque appel ───────────────────
+
+def test_le_client_pose_l_entete_sur_TOUS_les_appels():
+    """⚠️ La première version la posait appel par appel : `create` la portait,
+    `launch`, le battement et l'enfilage non. La campagne naissait donc sous la
+    bonne organisation et devenait introuvable au geste suivant — `404
+    fleet_not_found` toutes les vingt secondes pendant 560 s, sans qu'un seul
+    travail parte (09/09/2026).
+
+    Un contexte qu'il faut penser à joindre à chaque appel finit par être oublié
+    à l'un d'eux. Porté par le client, aucun appel ne peut plus l'omettre."""
+    vus = []
+
+    class _Tous(Backend):
+        def _reseau(self, chemin, fn, **kw):
+            vus.append(kw.get("headers", {}).get("X-Oto-Org"))
+            class _R:
+                status_code, content = 200, b"{}"
+                def json(self): return {"fleet": {}, "job": {}, "ok": True}
+            return _R()
+
+    b = _Tous(base="http://x", token="t", org=226)
+    b.declarer_flotte(label="p", procedure="pr", tools=["data_rows"])
+    b._post("/api/me/runner/jobs", {"op": "enqueue"})
+    b._post("/api/me/runner/fleets", {"op": "launch", "fleet_id": 1})
+
+    assert vus == ["226", "226", "226"], (
+        "l'en-tête part sur TOUS les appels, y compris ceux qui n'ont pas pensé "
+        "à la passer eux-mêmes")
+
+
+def test_sans_org_sur_le_client_aucun_entete():
+    """Le bord d'avant : un client sans organisation n'en invente pas une."""
+    vus = []
+
+    class _Tous(Backend):
+        def _reseau(self, chemin, fn, **kw):
+            vus.append("X-Oto-Org" in kw.get("headers", {}))
+            class _R:
+                status_code, content = 200, b"{}"
+                def json(self): return {"fleet": {}}
+            return _R()
+
+    _Tous(base="http://x", token="t")._post("/api/me/runner/fleets", {"op": "list"})
+    assert vus == [False]

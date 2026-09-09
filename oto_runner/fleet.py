@@ -167,6 +167,15 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
     # pour qu'elle soit lisible au démarrage plutôt que devinée à la lecture du
     # code : une garde dont on ne sait pas quelle valeur elle applique n'est pas
     # une garde, c'est une intention.
+    # ⚠️ L'organisation du passage, posée sur le CLIENT une fois pour toutes :
+    # tous les appels qui nomment une `fleet_id` la porteront. La poser appel par
+    # appel avait laissé `launch`, le battement et l'enfilage chercher la campagne
+    # sous une autre organisation — créée au bon endroit, introuvable au geste
+    # suivant, et 560 secondes de `404` toutes les vingt secondes sans qu'un seul
+    # travail parte. Un contexte qu'il faut penser à joindre finit par être oublié
+    # à l'un des appels.
+    if spec.org is not None:
+        backend.org = spec.org
     plafond_echecs = spec.max_consecutive_failures or _MAX_FAILED_CONSECUTIFS
     fleet_id = spec.fleet_id
     if fleet_id is None:
@@ -497,6 +506,19 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                                           fleet_id=fleet_id)
                     departs += 1
                 except BackendError as e:
+                    # ⚠️ Un `404` n'est pas un incident de transport : c'est
+                    # une ADRESSE FAUSSE, et la retenter ne la rendra pas vraie.
+                    # Le 09/09/2026, une campagne créée sous une organisation et
+                    # cherchée sous une autre a produit ce refus toutes les
+                    # vingt secondes jusqu'au délai, « toléré » à chaque fois,
+                    # sans qu'un seul travail parte. Tolérer ce qui ne se
+                    # résoudra jamais fait perdre le passage entier au lieu
+                    # d'une seconde.
+                    if getattr(e, "status", None) == 404:
+                        bilan.arret = f"cible introuvable — {e}"
+                        logger.error("flotte ABANDONNÉE : %s — %d done, %d failed",
+                                     bilan.arret, bilan.done, bilan.failed)
+                        return bilan
                     erreurs_backend += 1
                     if erreurs_backend >= _MAX_ERREURS_BACKEND:
                         bilan.arret = (f"backend indisponible ({erreurs_backend} "
