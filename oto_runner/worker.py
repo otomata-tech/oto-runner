@@ -81,11 +81,28 @@ def _spec_du_job(job: dict) -> AgentSpec:
     worker : un concept OTO dans le transport. Le worker héberge une boucle
     agentique : il injecte l'instruction reçue et laisse tourner. Si le travail
     suppose de lire un objet, c'est l'INSTRUCTION qui le dit et l'AGENT qui le lit.
+
+    ⚠️ Ce qui a changé le 09/09/2026, et ce qui n'a PAS changé. Le travail peut
+    désormais porter un `system` — du texte que la plateforme y a joint à la
+    réservation, au même titre qu'une clé de modèle ou un jeton délégué. Le
+    worker le pose dans le cadre et ne sait pas ce que c'est : il ne va toujours
+    RIEN chercher, et la règle ci-dessus tient entière. Ce qui serait interdit,
+    c'est qu'il lise un objet d'Oto ; recevoir du texte n'est pas le lire.
+
+    Pourquoi : une consigne que l'agent charge au premier tour est facturée
+    plein tarif au deuxième — la moitié du coût d'un déroulé mesuré, cache à
+    zéro sur ce tour. Dans le cadre, elle entre dans le préfixe stable.
     """
     p = job.get("payload") or {}
     outils = frozenset(p.get("tools") or ())
+    joint = (job.get("system") or "").strip()
+    cadre = _SYSTEM_FRAME if not joint else (
+        f"{_SYSTEM_FRAME}\n\n--- LA PROCÉDURE QUI FAIT AUTORITÉ ---\n{joint}\n"
+        "--- fin ---\n\nElle t'est servie ci-dessus, ENTIÈRE : ne la recharge "
+        "pas, même si ton instruction te dit de la lire — ce serait payer deux "
+        "fois le même texte.")
     return AgentSpec(
-        system=_SYSTEM_FRAME,
+        system=cadre,
         tools=outils,
         max_steps=int(p.get("max_steps") or agent_runtime.DEFAULT_MAX_STEPS),
         # ⚠️ Le plafond de JETONS du déroulé, posé par qui enfile. Absent = pas de
