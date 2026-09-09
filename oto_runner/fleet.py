@@ -175,7 +175,12 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                 project_id=spec.project, input=spec.input,
                 max_steps=spec.max_steps, workers=spec.concurrency,
                 max_rows=spec.volume, max_tokens=spec.budget_tokens,
-                max_tokens_per_row=spec.max_tokens_per_row)
+                max_tokens_per_row=spec.max_tokens_per_row,
+                # L'org DÉCLARÉE, celle-là même que la session pose déjà sur les
+                # appels d'outils. Sans elle, la campagne naît ailleurs que là
+                # où sa déclaration la met, et ses travaux cherchent leur
+                # procédure au mauvais endroit.
+                org=spec.org)
             fleet_id = f.get("id")
             logger.info("flotte déclarée en base : id=%s — remettre `fleet_id: %s` "
                         "dans la déclaration pour REPRENDRE ce passage",

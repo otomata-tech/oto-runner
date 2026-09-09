@@ -238,16 +238,33 @@ class Backend:
                         max_rows: Optional[int] = None,
                         max_tokens: Optional[int] = None,
                         max_consecutive_failures: Optional[int] = None,
-                        max_tokens_per_row: Optional[int] = None) -> dict:
+                        max_tokens_per_row: Optional[int] = None,
+                        org: Optional[int] = None) -> dict:
         """Déclare la flotte EN BASE et rend la ligne créée.
 
         Une flotte vivait dans un fichier YAML sur la machine : rien n'en était
         visible du dashboard ni atteignable par un agent. La déclarer donne un
         domicile à sa cible, à son périmètre et à ses bornes — et un identifiant
         que chaque job portera.
-        """
+
+        ⚠️ `org` part en `_org`, comme sur les appels d'outils de l'agent. La
+        déclaration porte DEUX organisations et le runner n'en propageait qu'une :
+        celle du contexte d'exécution. La campagne naissait donc sous l'org
+        ACTIVE du jeton, et ses travaux résolvaient leur procédure là — pas où
+        la déclaration l'avait écrite. Mesuré le 09/09/2026 : 848 refus « guide
+        introuvable » en 78 minutes, sans un seul trou, sur six slugs qui
+        existaient parfaitement dans l'organisation déclarée.
+
+        ⚠️ Ce n'est PAS une org qu'on s'attribue : `_org` est un jeton de
+        contexte, vérifié par le serveur — un porteur qui n'est pas membre reçoit
+        un refus nommé. La propriété reste posée par la règle d'autorisation, et
+        c'est ce qui empêche de créer une ressource chez autrui.
+
+        Sans `org`, rien n'est posé : le comportement d'avant, l'org active."""
         corps = {"op": "create", "label": label, "procedure": procedure,
                  "tools": list(tools)}
+        if org is not None:
+            corps["_org"] = org
         for cle, val in (("namespace", namespace), ("row_filter", row_filter),
                          ("project_id", project_id), ("input", input),
                          ("max_steps", max_steps), ("provider", provider),
