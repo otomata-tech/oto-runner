@@ -160,6 +160,26 @@ def max_tokens() -> int:
     return int(brut)
 
 
+def temperature() -> Optional[float]:
+    """`OTO_RUNNER_TEMPERATURE` — envoyé en `temperature` quand il est posé ;
+    absent = on n'envoie RIEN et le fournisseur applique son défaut.
+
+    ⚠️ Mesuré le 06/09/2026 : sans cette clé, Mistral échantillonne à son défaut,
+    et deux passages de la MÊME procédure sur le MÊME banc de trois lignes vont
+    de 11 à 18 sur 18. Une journée d'itérations a comparé des versions de texte
+    dont l'écart était entièrement dans ce bruit. Poser `0` rend les passages
+    comparables ; ne rien poser garde le comportement d'avant, celui de la
+    production."""
+    v = os.environ.get("OTO_RUNNER_TEMPERATURE", "").strip()
+    if not v:
+        return None
+    try:
+        return float(v)
+    except ValueError:
+        raise ValueError(
+            f"OTO_RUNNER_TEMPERATURE={v!r} : un nombre est attendu (par ex. 0)")
+
+
 def effort() -> Optional[str]:
     """`OTO_RUNNER_EFFORT`, envoyé en `reasoning_effort` (le nom OpenAI-compatible)
     quand il est posé ; absent = on n'envoie RIEN et le fournisseur applique son
@@ -283,6 +303,8 @@ def complete(*, system: str, messages: list, tools: list[dict],
         corps["tools"] = tools
     if effort():
         corps["reasoning_effort"] = effort()
+    if temperature() is not None:
+        corps["temperature"] = temperature()
     if not parallel_tools():
         # ⚠️ Le serveur peut TOUT DE MÊME rendre plusieurs appels dans un tour :
         # la boucle les exécutera comme d'habitude. Aucune garde ici — ce serait
