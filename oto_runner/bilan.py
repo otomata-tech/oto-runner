@@ -58,6 +58,7 @@ pas refaire ici.
 from __future__ import annotations
 
 import json
+from . import ecriture_attendue as _ecriture_attendue
 import logging
 import os
 import re
@@ -86,7 +87,9 @@ def _postes_jobs(jobs: dict) -> dict:
     # devinait le métier à partir des NOMS d'outils. Un exécuteur d'agents ne
     # sait pas ce qu'écrire veut dire — c'est à qui commande le travail de le
     # juger, sur les comptes d'appels que chaque travail déclare.
-    postes = {"termines": 0, "echoues": 0, "jetons": 0}
+    # Il lit en revanche l'issue que la DÉCLARATION a fait juger : un travail
+    # conclu qui a tenu une ligne sans y écrire (cf. `ecriture_attendue`).
+    postes = {"termines": 0, "echoues": 0, "sans_ecriture": 0, "jetons": 0}
     for jid, job in sorted(jobs.items()):
         statut = job.get("status")
         if statut not in ("done", "failed"):
@@ -94,7 +97,10 @@ def _postes_jobs(jobs: dict) -> dict:
                              f"{statut!r}) — le bilan ne compte que des jobs conclus")
         resultat = job.get("result") or {}
         postes["jetons"] += int(resultat.get("usage_tokens") or 0)
-        postes["termines" if statut == "done" else "echoues"] += 1
+        if statut == "done" and resultat.get("issue") == _ecriture_attendue.ISSUE:
+            postes["sans_ecriture"] += 1     # À PART, jamais dans « termines »
+        else:
+            postes["termines" if statut == "done" else "echoues"] += 1
     return postes
 
 
@@ -366,7 +372,7 @@ def ecrire_bilan(spec, backend, jobs: dict, *, lignes_initiales: int,
     sorties = None if restantes is None else max(0, lignes_initiales - restantes)
     statut = lignes_par_statut(spec, backend)
     abouties, abouties_omis = abouties_de(statut, sorties)
-    conclus = postes["termines"] + postes["echoues"]
+    conclus = postes["termines"] + postes["echoues"] + postes["sans_ecriture"]
     refus, refus_omis = refus_ecriture(spec, backend, secondes, jobs)
     # Seulement au bilan de FIN : une ligne peut encore sortir pendant la flotte,
     # et l'annoter à chaque tour ferait du bruit sans rien apprendre.
@@ -401,7 +407,11 @@ def ecrire_bilan(spec, backend, jobs: dict, *, lignes_initiales: int,
                               if k in statut},
                    # Terminales hors abandon — null AVEC sa raison sinon.
                    "abouties": abouties, "abouties_omis": abouties_omis},
-        "jobs": {"termines": postes["termines"], "echoues": postes["echoues"],},
+        # `sans_ecriture` n'y figure que s'il compte : un passage qui ne déclare
+        # pas `ecriture_attendue` garde le bilan qu'il avait, à la clé près.
+        "jobs": {"termines": postes["termines"], "echoues": postes["echoues"],
+                 **({"sans_ecriture": postes["sans_ecriture"]}
+                    if postes["sans_ecriture"] else {})},
         # ⚠️ Compté À PART, jamais fondu dans « abouties » : un bilan qui rend
         # « 98 traitées » sans dire que 2 sont sorties muettes rend un
         # dénominateur amputé qui a l'air complet.

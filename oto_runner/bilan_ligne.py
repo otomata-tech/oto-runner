@@ -56,6 +56,11 @@ def ligne(bilan: dict, chemin: Optional[str]) -> str:
                                            key=lambda kv: -kv[1])))
     postes.append(f"abouties {lignes['abouties']}" if lignes["abouties"] is not None
                   else f"abouties non mesurées ({lignes['abouties_omis']})")
+    sans = (bilan.get("jobs") or {}).get("sans_ecriture")
+    if sans:
+        # Des travaux conclus qui ont tenu une ligne sans y écrire (cf.
+        # `ecriture_attendue`) : ils se lisent ICI, pas au fond du JSON.
+        postes.append(f"{sans} {'travaux' if sans > 1 else 'travail'} sans écriture")
     postes.append(f"{_jetons_lisibles(jetons['total'])} jetons")
     postes.append(f"{_jetons_lisibles(jetons['par_aboutie'])}/aboutie"
                   if jetons["par_aboutie"] is not None

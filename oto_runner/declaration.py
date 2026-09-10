@@ -24,6 +24,7 @@ from typing import Optional
 import yaml
 
 from .bilan import PERIODE_S as _BILAN_PERIODE_S
+from . import ecriture_attendue as _ecriture_attendue
 
 # Le même journal que l'ordonnanceur : une déclaration se lit au moment où la
 # flotte se charge, et c'est là qu'on cherche son avertissement.
@@ -110,6 +111,9 @@ class FleetSpec:
     # peut plus dire d'où vient la valeur. Décision d'Alexis du 09/09/2026 :
     # « je ne veux pas poser ce paramètre en env, il doit être paramétrable ».
     temperature: Optional[float] = None
+    # Ce qu'un travail DOIT avoir écrit s'il a tenu une ligne — déclaré, jamais
+    # deviné par le worker (cf. `ecriture_attendue`). Absent ⟹ rien n'est jugé.
+    ecriture_attendue: Optional[dict] = None
     # Le plafond de jetons D'UNE LIGNE, descendu dans CHAQUE travail enfilé —
     # donc appliqué par l'agent lui-même, quel que soit le chemin qui l'a mis en
     # file. Absent ⟹ aucune borne par ligne : 65 571 jetons sur une seule ligne,
@@ -234,6 +238,7 @@ def load_spec(path: str) -> FleetSpec:
         input=raw.get("input") or "",
         critical_tools=tuple(raw.get("critical_tools") or ()),
         temperature=(float(raw["temperature"]) if raw.get("temperature") is not None else None),
+        ecriture_attendue=_ecriture_attendue.lire(raw.get("ecriture_attendue")),
         bilan_periode_s=int(raw.get("bilan_periode_s") or _BILAN_PERIODE_S),
         source=path,
         name=os.path.splitext(os.path.basename(path))[0])
@@ -312,5 +317,9 @@ def payload(spec: FleetSpec) -> dict:
             "max_tokens": spec.max_tokens_per_row,
             # `is not None` : `temperature: 0` est une valeur, pas une absence.
             "temperature": spec.temperature,
+            # Seulement quand le passage la déclare : un travail sans elle reste
+            # identique, octet pour octet, à ce qu'il était.
+            **({"ecriture_attendue": spec.ecriture_attendue}
+               if spec.ecriture_attendue else {}),
             "input": message,
             "label": f"flotte {spec.namespace} — {spec.procedure}"}
