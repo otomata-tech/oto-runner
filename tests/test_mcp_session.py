@@ -230,7 +230,7 @@ def test_le_schema_servi_au_modele_ne_porte_AUCUN_jeton_de_contexte(monkeypatch)
     servi = s.schemas(frozenset({"data_rows"}))[0]["input_schema"]["properties"]
 
     assert "namespace" in servi, "les vrais paramètres restent servis"
-    for jeton in ("_org", "_project", "_run_id", "_group"):
+    for jeton in ("_org", "_project", "_run_id", "_group", "_instance"):
         assert jeton not in servi, (
             f"`{jeton}` est tendu au modèle : il le remplira, avec une valeur "
             "plausible et fausse")
@@ -273,4 +273,16 @@ def test_un_group_INVENTE_par_le_modele_est_RETIRE(monkeypatch):
     s.call("data_write", {"namespace": "t", "row": {}, "_group": 226})
     args = vu["appel"]["arguments"]
     assert "_group" not in args, "un `_group` inventé ne part pas vers la plateforme"
+    assert args["_org"] == 226, "l'org du runner reste posée"
+
+
+def test_une_instance_INVENTEE_par_le_modele_est_RETIREE(monkeypatch):
+    """29 appels d'une passe E (11/09/2026) portaient un `_instance` inventé,
+    tous refusés par la plateforme. Même geste que pour `_group` : le runner
+    ne le pose pas, ne le sert pas au modèle, et retire celui qu'il invente."""
+    s, vu = _session_org(monkeypatch, {
+        "data_write": ["namespace", "row", "_project", "_org", "_instance"]})
+    s.call("data_write", {"namespace": "t", "row": {}, "_instance": "x"})
+    args = vu["appel"]["arguments"]
+    assert "_instance" not in args, "un `_instance` inventé ne part pas vers la plateforme"
     assert args["_org"] == 226, "l'org du runner reste posée"

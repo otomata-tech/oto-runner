@@ -106,7 +106,7 @@ _JAMAIS_AU_MODELE = {
 #:
 #: ⚠️ Un jeton ajouté ici DOIT être posé par `call()` — sinon on retire une
 #: capacité au lieu d'une occasion de se tromper.
-_POSES_PAR_LE_RUNNER = ("_org", "_project", "_run_id", "_group")
+_POSES_PAR_LE_RUNNER = ("_org", "_project", "_run_id", "_group", "_instance")
 
 #: `_group` est un jeton de contexte que le runner ne pose JAMAIS : un agent de
 #: flotte travaille dans l'org de sa flotte, sans équipe. Il sort du schéma
@@ -114,7 +114,11 @@ _POSES_PAR_LE_RUNNER = ("_org", "_project", "_run_id", "_group")
 #: RETIRÉ. Mesuré le 09/09/2026 (mode direct, jetable 634, passe D) : le modèle
 #: a posé `_group=226` — l'org, recopiée dans le champ voisin — et l'écriture
 #: de la fiche a été refusée (« groupe inconnu »), la ligne est restée en D.
-_RETIRES_SANS_ETRE_POSES = ("_group",)
+#:
+#: `_instance` pareil, le 11/09/2026 : 29 appels d'une passe E portaient un
+#: `_instance` inventé, tous refusés. Un agent de flotte n'a pas d'instance à
+#: nommer — le contexte est celui du travail, et le runner le pose.
+_RETIRES_SANS_ETRE_POSES = ("_group", "_instance")
 
 
 def _sans_jetons_de_contexte(schema: dict) -> dict:
