@@ -48,12 +48,18 @@ lancer)
   # vivent dans le fichier d'environnement ; un script appelé directement ne les
   # a pas. Deux crans ont échoué au même départ pour cette seule raison — l'un
   # en concluant « périmètre absent », l'autre en abandonnant sur la sonde.
-  if [ -f "$RACINE/.env" ]; then
-    set -a
-    # shellcheck disable=SC1091
-    . "$RACINE/.env"
-    set +a
-  fi
+  # ⚠️ Deux fichiers depuis le 11/09/2026. `.env` est celui des WORKERS : il ne
+  # porte plus de jeton de compte — un worker n'en a pas, il possède un secret
+  # de machine (`OTO_WORKER_SECRET`). Déclarer une flotte est un geste de COMPTE
+  # : son jeton vit dans `.env.fleet`, que les unités des workers ne lisent pas.
+  for _f in "$RACINE/.env" "$RACINE/.env.fleet"; do
+    if [ -f "$_f" ]; then
+      set -a
+      # shellcheck disable=SC1091
+      . "$_f"
+      set +a
+    fi
+  done
   for _v in OTO_TOKEN OTO_RUNNER_CONNECTOR_ID; do
     if [ -z "$(eval echo "\$$_v")" ]; then
       echo "⛔ REFUS DE LANCER — $_v absent de l'environnement ET de $RACINE/.env."
@@ -179,13 +185,16 @@ ns = sys.argv[1]
 # ⚠️ Le jeton n'est pas dans l'environnement d'un heredoc : sans ce chargement,
 # le lecteur lève, rend du vide, et le vide se lit « aucun périmètre ».
 if not os.environ.get("OTO_TOKEN"):
-    try:
-        for _l in open("/opt/oto-runner/.env", encoding="utf-8"):
+    # Le jeton de COMPTE vit dans `.env.fleet` (11/09/2026) ; `.env` est celui
+    # des workers et n'en porte plus. On lit les deux, le premier gagne — et un
+    # fichier absent n'empêche pas de lire l'autre.
+    for _f in ("/opt/oto-runner/.env.fleet", "/opt/oto-runner/.env"):
+        if not os.path.exists(_f):
+            continue
+        for _l in open(_f, encoding="utf-8"):
             if "=" in _l and not _l.strip().startswith("#"):
                 _k, _v = _l.split("=", 1)
                 os.environ.setdefault(_k.strip(), _v.strip().strip('"'))
-    except OSError:
-        pass
 if not os.environ.get("OTO_TOKEN"):
     print("ILLISIBLE:pas de jeton")
     raise SystemExit(0)
