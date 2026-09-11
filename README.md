@@ -43,6 +43,15 @@ ce pli qui était faux. Le worker refuse donc de démarrer avec un `oto_…` dan
 Le fil du run se lit et s'écrit avec le jeton **délégué** du travail : il vit
 dans l'organisation du déclarant, où le secret du worker n'a aucun droit.
 
+Sur la box, deux fichiers d'environnement, et la séparation est le point :
+`/opt/oto-runner/.env` (600) est celui des **unités des workers** — il porte
+`OTO_WORKER_SECRET` et aucun jeton de compte ; `/opt/oto-runner/.env.fleet` (600)
+porte `OTO_TOKEN` pour **déclarer** une flotte (`scripts/flotte.sh`, unité
+`oto-fleet-campagne`), un geste de compte que les workers ne font pas. Le
+critère de preuve n'est pas le fichier mais l'environnement des processus :
+`/proc/<pid>/environ` d'un worker ne contient pas `OTO_TOKEN` (vérifié le
+11/09/2026).
+
 ## ⚠️ Cran d'armement
 
 Sans `OTO_RUNNER_ARMED=1`, le worker refuse de démarrer. Le premier run hébergé
