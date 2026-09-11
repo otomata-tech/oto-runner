@@ -32,6 +32,7 @@ import requests  # noqa: F401 — la forme des kwargs
 
 from .agent_runtime import serialize
 from .deadline import post_with_deadline
+from .descriptions import borne as _borne, reglage as _reglage_descriptions
 
 logger = logging.getLogger("oto_runner")
 
@@ -133,22 +134,11 @@ def _sans_jetons_de_contexte(schema: dict) -> dict:
     return net
 
 
-#: Borne de la description d'un outil servie au modèle. Mesuré le 11/09/2026 : l'API Mistral accepte
-#: au moins 65 536 caractères (1 k, 4 k, 8 k, 16 k, 64 k : tous en 200). L'ancienne coupe à 1 024,
-#: reprise du prototype et jamais mesurée, masquait EN SILENCE des règles de la plateforme : pour
-#: `data_write` (7 865 caractères), « @keep seul dans la couche », `@empty`, l'écriture par `id`, les
-#: `notices`. Une description encore coupée est DITE au journal du travail (`descriptions_outils`).
-_ENV_DESC_MAX = "OTO_RUNNER_TOOL_DESC_MAX"
-DEFAULT_DESC_MAX = 8192
-
-
-def desc_max() -> int:
-    brut = os.environ.get(_ENV_DESC_MAX, "").strip()
-    if not brut:
-        return DEFAULT_DESC_MAX
-    if not brut.isdigit() or int(brut) < 1:
-        raise ValueError(f"{_ENV_DESC_MAX} = {brut!r} : un entier ≥ 1 est attendu")
-    return int(brut)
+#: La description d'un outil servie au modèle est bornée outil par outil, par le réglage du travail
+#: (`descriptions.py` : `data_write` entière, les autres à 1 024 quand la déclaration se tait).
+#: Mesuré le 11/09/2026 : l'API Mistral accepte au moins 65 536 caractères ; l'ancienne coupe muette
+#: à 1 024 masquait les règles de `data_write`. Une description coupée est DITE au journal du travail
+#: (`descriptions_outils`).
 
 
 class McpSession:
@@ -156,7 +146,9 @@ class McpSession:
 
     def __init__(self, url: Optional[str] = None, token: Optional[str] = None,
                  project: Optional[int] = None, run_id: Optional[str] = None,
-                 org: Optional[int] = None):
+                 org: Optional[int] = None, descriptions: Optional[dict] = None):
+        # La borne des descriptions servies, réglée par le travail ; une forme fausse lève ICI.
+        self._descriptions = _reglage_descriptions(descriptions)
         self.url = url or os.environ.get("OTO_MCP_URL", "https://mcp.oto.cx/mcp")
         self.token = (token or os.environ.get("OTO_TOKEN", "")).strip()
         # Les jetons de contexte d'appel (ADR 0038) : posés sur CHAQUE appel de
@@ -237,17 +229,17 @@ class McpSession:
             self._outils = list(outils)
         out = []
         self._props = {}
-        borne = desc_max()
         self.descriptions_servies = []
         for t in self._outils:
             props = ((t.get("inputSchema") or {}).get("properties") or {})
             self._props[t.get("name") or ""] = frozenset(props)
             if t.get("name") in names:
                 desc = t.get("description") or ""
+                servie = _borne(t["name"], self._descriptions, len(desc))
                 self.descriptions_servies.append(
-                    {"outil": t["name"], "longueur": len(desc), "servie": min(len(desc), borne)})
+                    {"outil": t["name"], "longueur": len(desc), "servie": servie})
                 out.append({"name": t["name"],
-                            "description": desc[:borne],
+                            "description": desc[:servie],
                             "input_schema": _sans_jetons_de_contexte(
                                 t.get("inputSchema")
                                 or {"type": "object", "properties": {}})})

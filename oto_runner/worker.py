@@ -205,7 +205,9 @@ def _traiter(backend: Backend, job: dict, provider,
             f"le travail {job.get('id')} n'a pas de jeton délégué : personne à "
             "impersonner. Le worker n'a pas d'identité métier à prêter — "
             "reprogramme-le, il partira au nom de qui le demande.")
-    mcp = McpSession(project=projet, org=p.get("org_id"), token=jeton)
+    # La borne des descriptions d'outils : celle que le passage déclare, sinon les défauts.
+    mcp = McpSession(project=projet, org=p.get("org_id"), token=jeton,
+                     descriptions=p.get("descriptions_outils"))
     tenu.mcp = mcp
     # Ce que l'instruction NOMME sans que l'allowlist l'autorise — confronté au
     # catalogue RÉEL de la session (cf. `journal.ecart_instruction`) : l'événement

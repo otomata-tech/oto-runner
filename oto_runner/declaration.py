@@ -26,6 +26,7 @@ import yaml
 
 from .bilan import PERIODE_S as _BILAN_PERIODE_S
 from . import ecriture_attendue as _ecriture_attendue
+from . import descriptions as _descriptions_outils
 
 # Le même journal que l'ordonnanceur : une déclaration se lit au moment où la
 # flotte se charge, et c'est là qu'on cherche son avertissement.
@@ -112,6 +113,11 @@ class FleetSpec:
     # peut plus dire d'où vient la valeur. Décision d'Alexis du 09/09/2026 :
     # « je ne veux pas poser ce paramètre en env, il doit être paramétrable ».
     temperature: Optional[float] = None
+    # La borne des descriptions d'outils servies au modèle, outil par outil, DÉCLARÉE comme la
+    # température et pour la même raison : un choix de passage, pas d'hôte. Absente ⟹ les défauts de
+    # `descriptions.py` (`data_write` entière, les autres à 1 024). Forme : {defaut: <entier>,
+    # entieres: [<outil>, …]}, validée à la lecture de la déclaration.
+    descriptions_outils: Optional[dict] = None
     # Ce qu'un travail DOIT avoir écrit s'il a tenu une ligne — déclaré, jamais
     # deviné par le worker (cf. `ecriture_attendue`). Absent ⟹ rien n'est jugé.
     ecriture_attendue: Optional[dict] = None
@@ -208,6 +214,14 @@ def verifier_outils(spec: FleetSpec) -> None:
             f"(vécu du 04 au 06/09/2026). Ajouter `{OUTIL_PROCEDURE}` à `tools`.")
 
 
+def _reglage_declare(brut) -> Optional[dict]:
+    """Le réglage des descriptions tel que le passage le déclare, validé ; None s'il se tait."""
+    if brut is None:
+        return None
+    r = _descriptions_outils.reglage(brut)
+    return {"defaut": r["defaut"], "entieres": list(r["entieres"])}
+
+
 def load_spec(path: str) -> FleetSpec:
     with open(path) as f:
         raw = yaml.safe_load(f) or {}
@@ -239,6 +253,7 @@ def load_spec(path: str) -> FleetSpec:
         input=raw.get("input") or "",
         critical_tools=tuple(raw.get("critical_tools") or ()),
         temperature=(float(raw["temperature"]) if raw.get("temperature") is not None else None),
+        descriptions_outils=_reglage_declare(raw.get("descriptions_outils")),
         ecriture_attendue=_ecriture_attendue.lire(raw.get("ecriture_attendue")),
         bilan_periode_s=int(raw.get("bilan_periode_s") or _BILAN_PERIODE_S),
         source=path,
@@ -325,5 +340,8 @@ def payload(spec: FleetSpec) -> dict:
             # identique, octet pour octet, à ce qu'il était.
             **({"ecriture_attendue": spec.ecriture_attendue}
                if spec.ecriture_attendue else {}),
+            # Idem : sans réglage déclaré, la session sert les défauts de `descriptions.py`.
+            **({"descriptions_outils": spec.descriptions_outils}
+               if spec.descriptions_outils else {}),
             "input": message,
             "label": f"flotte {spec.namespace} — {spec.procedure}"}
