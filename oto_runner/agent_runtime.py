@@ -325,6 +325,12 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
             on_turn("user", {"text": prompt}, um)
 
     schemas = provider.format_tools(transport.schemas(spec.tools))
+    # Ce que le modèle lit de chaque outil : la longueur servie, et toute coupe DITE (11/09/2026 :
+    # la coupe muette à 1 024 caractères masquait des règles de `data_write`).
+    servies = getattr(transport, "descriptions_servies", None)
+    if servies:
+        note("descriptions_outils", outils=list(servies),
+             coupees=[d["outil"] for d in servies if d["servie"] < d["longueur"]])
     steps: list[AgentStep] = []
     usage = dict.fromkeys(USAGE_KEYS, 0)
     stopped = "end_turn"

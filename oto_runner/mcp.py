@@ -133,6 +133,24 @@ def _sans_jetons_de_contexte(schema: dict) -> dict:
     return net
 
 
+#: Borne de la description d'un outil servie au modèle. Mesuré le 11/09/2026 : l'API Mistral accepte
+#: au moins 65 536 caractères (1 k, 4 k, 8 k, 16 k, 64 k : tous en 200). L'ancienne coupe à 1 024,
+#: reprise du prototype et jamais mesurée, masquait EN SILENCE des règles de la plateforme : pour
+#: `data_write` (7 865 caractères), « @keep seul dans la couche », `@empty`, l'écriture par `id`, les
+#: `notices`. Une description encore coupée est DITE au journal du travail (`descriptions_outils`).
+_ENV_DESC_MAX = "OTO_RUNNER_TOOL_DESC_MAX"
+DEFAULT_DESC_MAX = 8192
+
+
+def desc_max() -> int:
+    brut = os.environ.get(_ENV_DESC_MAX, "").strip()
+    if not brut:
+        return DEFAULT_DESC_MAX
+    if not brut.isdigit() or int(brut) < 1:
+        raise ValueError(f"{_ENV_DESC_MAX} = {brut!r} : un entier ≥ 1 est attendu")
+    return int(brut)
+
+
 class McpSession:
     """Une session MCP réutilisable — le transport d'outils de la boucle."""
 
@@ -219,12 +237,17 @@ class McpSession:
             self._outils = list(outils)
         out = []
         self._props = {}
+        borne = desc_max()
+        self.descriptions_servies = []
         for t in self._outils:
             props = ((t.get("inputSchema") or {}).get("properties") or {})
             self._props[t.get("name") or ""] = frozenset(props)
             if t.get("name") in names:
+                desc = t.get("description") or ""
+                self.descriptions_servies.append(
+                    {"outil": t["name"], "longueur": len(desc), "servie": min(len(desc), borne)})
                 out.append({"name": t["name"],
-                            "description": (t.get("description") or "")[:1024],
+                            "description": desc[:borne],
                             "input_schema": _sans_jetons_de_contexte(
                                 t.get("inputSchema")
                                 or {"type": "object", "properties": {}})})
