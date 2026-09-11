@@ -78,6 +78,7 @@ class _Provider:
 
 def _lancer(monkeypatch, backend, traites, sur_traitement=None):
     monkeypatch.setenv("OTO_RUNNER_ARMED", "1")
+    monkeypatch.setenv("OTO_WORKER_SECRET", "otow_banc")
     monkeypatch.setattr(worker, "Backend", lambda *a, **kw: backend)
     monkeypatch.setattr(worker, "get_provider", lambda: _Provider)
     monkeypatch.setattr(worker, "_POLL_S", 0)

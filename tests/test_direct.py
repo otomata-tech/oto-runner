@@ -183,7 +183,7 @@ def test_le_mode_direct_n_appelle_JAMAIS_la_file_de_jobs(monkeypatch):
         def __init__(self):
             self.base, self.token, self.chemins = "http://x", "t", []
 
-        def _post(self, chemin, corps):
+        def _post(self, chemin, corps, token=None):
             self.chemins.append(chemin)
             return {"seq": 1}
 

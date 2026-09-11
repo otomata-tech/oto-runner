@@ -95,14 +95,18 @@ class Backend:
                                f"{str(e)[:200]}", status=None)
 
     def _post(self, chemin: str, corps: dict,
-              org: Optional[int] = None) -> dict:
+              org: Optional[int] = None, token: Optional[str] = None) -> dict:
         """⚠️ `org` part en EN-TÊTE `X-Oto-Org`, jamais dans le corps. La face
         REST lit l'org de contexte là, et son modèle d'entrée refuse les champs
         qu'il ne déclare pas : un `_org` glissé dans le corps fait `400
         unknown_fields` et la déclaration échoue en entier. `_patch` le faisait
         déjà correctement quinze lignes plus bas — la réponse était dans ce
         fichier avant que j'en invente une autre (09/09/2026)."""
-        entetes = {"Authorization": f"Bearer {self.token}"}
+        # `token` : parler POUR un travail, avec le jeton DÉLÉGUÉ que le backend a
+        # remis à la réservation — au nom de qui a déclaré la campagne. Le fil du
+        # run vit dans l'org de ce déclarant ; le secret du worker, lui, n'a
+        # aucune org et ne peut pas y écrire. Sans surcharge : le secret.
+        entetes = {"Authorization": f"Bearer {token if token is not None else self.token}"}
         cible = org if org is not None else self.org
         if cible is not None:
             entetes["X-Oto-Org"] = str(cible)
@@ -479,15 +483,18 @@ class Backend:
         return rep
 
     def thread_append(self, run_id: str, role: str, content: dict,
-                      provider_raw: Optional[dict] = None) -> int:
+                      provider_raw: Optional[dict] = None,
+                      token: Optional[str] = None) -> int:
         out = self._post("/api/me/runs/thread",
                          {"op": "append", "run_id": run_id, "role": role,
-                          "content": content, "provider_raw": provider_raw})
+                          "content": content, "provider_raw": provider_raw},
+                         token=token)
         return int(out.get("seq") or 0)
 
     def thread_read(self, run_id: str, include_raw: bool = False,
-                    limit: int = 500) -> list[dict[str, Any]]:
+                    limit: int = 500, token: Optional[str] = None) -> list[dict[str, Any]]:
         out = self._post("/api/me/runs/thread",
                          {"op": "read", "run_id": run_id,
-                          "include_raw": include_raw, "limit": limit})
+                          "include_raw": include_raw, "limit": limit},
+                         token=token)
         return out.get("messages") or []

@@ -19,6 +19,30 @@ Si ces contrats tiennent, le worker est remplaçable. La mort d'un worker n'est
 jamais un événement : le bail du job expire, un pair re-claime, **recharge le fil**
 (`provider_raw` rejoués verbatim) et continue.
 
+## Ce que le worker possède
+
+**Deux choses : l'adresse du backend et un secret de machine.** Rien d'autre —
+ni compte, ni organisation, ni appartenance. Le secret (`otow_…`) se déclare côté
+backend par `oto_admin_runner_worker op=create` (il est montré une fois, le
+backend n'en garde que le haché) et se révoque de même. Tout ce que le worker
+fait ensuite lui est **commandé par le backend avec chaque travail** :
+l'organisation, le jeton **délégué** émis au nom de qui a déclaré la campagne
+(borné au bail), la clé de modèle de l'organisation, la procédure, la
+température. Le worker ne nomme rien et ne déduit rien.
+
+⚠️ **Ce que ça remplace, et pourquoi c'est écrit ici.** Jusqu'au 09/09/2026 les
+trois agents tournaient sous le **jeton personnel d'un compte** admin de quatorze
+organisations. Un worker qui porte un jeton de compte sonde l'org **active** de
+ce compte — silencieusement : rien ne refuse, la file paraît vide parce qu'on
+regarde la mauvaise. Trois conceptions se sont succédé en deux jours (un compte
+marqué worker, puis un compte qui nomme son org, puis un compte qui lit ses
+orgs) ; chacune faisait *porter* ou *déduire* quelque chose au worker, et c'est
+ce pli qui était faux. Le worker refuse donc de démarrer avec un `oto_…` dans
+`OTO_WORKER_SECRET`, en le disant.
+
+Le fil du run se lit et s'écrit avec le jeton **délégué** du travail : il vit
+dans l'organisation du déclarant, où le secret du worker n'a aucun droit.
+
 ## ⚠️ Cran d'armement
 
 Sans `OTO_RUNNER_ARMED=1`, le worker refuse de démarrer. Le premier run hébergé
@@ -29,7 +53,7 @@ réel est gaté par une relecture d'architecture — ce cran rend la gate mécan
 ```
 OTO_BASE=https://mcp.oto.cx          # REST (fil + jobs)
 OTO_MCP_URL=https://mcp.oto.cx/mcp   # face MCP (outils)
-OTO_TOKEN=oto_…                      # jeton non porté du compte worker (une org)
+OTO_WORKER_SECRET=otow_…             # le secret de MACHINE du worker — pas un jeton de compte (cf. « Ce que le worker possède »)
 ANTHROPIC_API_KEY=…                  # la clé de modèle = qui paie
 OTO_RUNNER_MODEL=claude-sonnet-5     # défaut assumé (coût) ; Opus par flotte si justifié
 OTO_RUNNER_ARMED=1                   # cf. ci-dessus

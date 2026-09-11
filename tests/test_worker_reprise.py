@@ -18,11 +18,11 @@ class FauxBackend:
     def bind_run(self, job_id, run_id):
         self.appels.append(("bind_run", run_id))
 
-    def thread_read(self, run_id, include_raw=False):
+    def thread_read(self, run_id, include_raw=False, token=None):
         self.appels.append(("thread_read", run_id))
         return self.fil
 
-    def thread_append(self, run_id, role, content, provider_raw=None):
+    def thread_append(self, run_id, role, content, provider_raw=None, token=None):
         self.appels.append(("append", role))
         return 1
 
@@ -200,7 +200,7 @@ def test_lappose_du_fil_est_rejouee_avant_de_tuer(monkeypatch):
     class BackendAppendFragile(FauxBackend):
         rates = 0
 
-        def thread_append(self, run_id, role, content, provider_raw=None):
+        def thread_append(self, run_id, role, content, provider_raw=None, token=None):
             if self.rates < 2:
                 self.rates += 1
                 raise BackendError("/api → 502 : bad gateway", status=502)

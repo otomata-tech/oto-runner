@@ -83,6 +83,7 @@ def test_le_worker_nomme_son_depot_a_chaque_reservation(monkeypatch):
     worker._arret_demande = False
     bk = _BackendQuiNote()
     monkeypatch.setenv("OTO_RUNNER_ARMED", "1")
+    monkeypatch.setenv("OTO_WORKER_SECRET", "otow_banc")
     monkeypatch.setattr(worker, "Backend", lambda *a, **kw: bk)
     monkeypatch.setattr(worker, "get_provider", lambda: _Provider)
     monkeypatch.setattr(worker, "_POLL_S", 0)
@@ -100,6 +101,7 @@ def test_un_provider_sans_depot_ne_fait_pas_tomber_le_worker(monkeypatch):
         depot = None
 
     monkeypatch.setenv("OTO_RUNNER_ARMED", "1")
+    monkeypatch.setenv("OTO_WORKER_SECRET", "otow_banc")
     monkeypatch.setattr(worker, "Backend", lambda *a, **kw: bk)
     monkeypatch.setattr(worker, "get_provider", lambda: type(
         "P", (), {"ONE_SHOT": True, "__name__": "agent_llm",

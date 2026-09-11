@@ -244,7 +244,8 @@ def _traiter(backend: Backend, job: dict, provider,
         note("run", run_id=run_id, repris=False)
     else:  # continue — OU start re-claimé : reprise du fil existant
         run_id = tenu.run_id = job["run_id"]
-        tours = backend.thread_read(run_id, include_raw=True)
+        # Le fil vit dans l'org du DÉCLARANT : on le lit avec son jeton délégué.
+        tours = backend.thread_read(run_id, include_raw=True, token=jeton)
         historique = _assainir_pour_transport(
             [t["provider_raw"] for t in tours if t.get("provider_raw")])
         # Un `continue` porte son message user ; un start repris n'ajoute RIEN :
@@ -262,7 +263,8 @@ def _traiter(backend: Backend, job: dict, provider,
         # 15/08 — la rafale des « balles perdues » du pool Caddy).
         for essai in range(3):
             try:
-                backend.thread_append(run_id, role, neutre, provider_raw=brut)
+                backend.thread_append(run_id, role, neutre, provider_raw=brut,
+                                      token=jeton)
                 break
             except BackendError as e:
                 if essai == 2:
@@ -410,6 +412,30 @@ def _un_travail(backend: Backend, job: dict, provider, file=None) -> None:
                          journal.relu(j.chemin))
 
 
+def _secret_du_worker() -> str:
+    """Ce que le worker POSSÈDE, et c'est tout : un secret de machine déclaré en
+    base (`oto_admin_runner_worker op=create`), qui n'est le jeton de personne.
+
+    ⚠️ Un jeton de COMPTE (`oto_…`) est refusé ici, nommément. Les trois agents
+    ont tourné sous le jeton personnel d'un compte admin de quatorze
+    organisations sans que rien ne le dise (09/09/2026) : la flotte sondait
+    l'org active de ce compte, et les campagnes des autres n'étaient jamais
+    servies. Un worker n'a pas d'identité ; tout ce qu'il fait — org, jeton
+    délégué, clé, procédure, température — lui est commandé par le backend."""
+    secret = os.environ.get("OTO_WORKER_SECRET", "").strip()
+    if not secret:
+        raise SystemExit(
+            "OTO_WORKER_SECRET absent : un worker s'authentifie par un secret de "
+            "machine (`otow_…`), déclaré côté backend par "
+            "`oto_admin_runner_worker op=create`. Pas de jeton de compte.")
+    if not secret.startswith("otow_"):
+        raise SystemExit(
+            "OTO_WORKER_SECRET n'est pas un secret de worker (`otow_…`) : un jeton "
+            "de compte ferait sonder l'org active de CE compte, et rien ne le "
+            "dirait. Déclare un worker (`oto_admin_runner_worker op=create`).")
+    return secret
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     if os.environ.get("OTO_RUNNER_ARMED") != "1":
@@ -417,7 +443,7 @@ def main() -> None:
             "oto-runner n'est PAS armé (OTO_RUNNER_ARMED≠1) : le premier run hébergé "
             "réel est gaté par la relecture d'architecture du chantier R2. Ce cran "
             "existe pour qu'un worker lancé par accident ne consomme rien.")
-    backend = Backend()
+    backend = Backend(token=_secret_du_worker())
     provider = get_provider()
     provider.resolve_key()    # échoue FORT au boot si la clé manque, pas au 1er job
     # Le journal par travail est le contrat « conserver tout » : un répertoire
