@@ -64,7 +64,7 @@ OTO_BASE=https://mcp.oto.cx          # REST (fil + jobs)
 OTO_MCP_URL=https://mcp.oto.cx/mcp   # face MCP (outils)
 OTO_WORKER_SECRET=otow_…             # le secret de MACHINE du worker — pas un jeton de compte (cf. « Ce que le worker possède »)
 ANTHROPIC_API_KEY=…                  # la clé de modèle = qui paie
-OTO_RUNNER_MODEL=claude-sonnet-5     # défaut assumé (coût) ; Opus par flotte si justifié
+OTO_RUNNER_MODEL=claude-sonnet-5     # le DÉFAUT du worker — un agent qui déclare son modèle le remplace (cf. « Le modèle »)
 OTO_RUNNER_ARMED=1                   # cf. ci-dessus
 OTO_RUNNER_PASSAGES_DIR=passages     # où le worker écrit le JOURNAL de chaque travail
 OTO_RUNNER_RELANCES_MAX=0            # relances d'un fil qui rend un appel au client
@@ -219,7 +219,7 @@ juge est `usage_cache_read` au résultat du job.
 
 ## Un job
 
-`start` : `{procedure, project_id, tools: […], input?, label?, max_steps?}` —
+`start` : `{procedure, project_id, tools: […], input?, label?, max_steps?, model?, model_family?}` —
 le worker ouvre le run, le lie au job, charge la procédure d'oto (jamais copiée),
 joue la boucle sur un fil neuf. `continue` : `{run_id, input?}` — il recharge le
 fil et continue ; `input` absent = reprise pure après une mort en plein tour.
@@ -241,6 +241,40 @@ exécuté, le rejeu ne peut pas doubler une écriture. Si la réouverture échou
 une ligne, n'a rien écrit, et porte des appels morts au transport : le backend
 le rejoue. Il n'existe pas d'issue légitime « conclu, rien écrit ».
 
+## Le modèle : déclaré par l'agent, servi par le worker
+
+Jusqu'au 12/09/2026 le modèle était épinglé par worker (`OTO_RUNNER_MODEL`), et
+lui seul. Un agent pouvait en déclarer un — le serveur le stockait, le validait,
+et le runner le **jetait** : `tests/test_champs_servis_et_lus.py` inscrivait
+`model` dans `_NON_LUS` en toutes lettres. Un champ inerte est une dette ; un
+champ qui PROMET une attribution qui n'arrive pas coûte plus cher, parce que la
+promesse se lit dans les relevés.
+
+```
+payload.model         le modèle DEMANDÉ pour ce travail    → AgentSpec.model → le fournisseur
+payload.model_family  la famille (= le dépôt de clé)       → refusée si ce n'est pas la sienne
+absent                le modèle du worker, comme avant     (tout agent déclaré sans modèle)
+```
+
+⚠️ **Le worker ne valide pas le NOM.** Il ne connaît pas le catalogue — qui vit
+côté serveur — et deviner ferait refuser ici un modèle que le fournisseur sert
+très bien. Un nom inconnu remonte comme l'erreur du fournisseur, qui le nomme.
+
+⚠️ **Il valide la FAMILLE, et c'est un refus franc.** Le serveur filtre déjà la
+file (un worker ne réserve que les travaux de son dépôt, plus ceux qui n'en
+déclarent aucun) ; ce second verrou existe pour la mauvaise CONFIGURATION — un
+`OTO_RUNNER_OPENAI_BASE` changé sans la clé ferait réserver des travaux qu'on
+servirait chez le mauvais fournisseur, sans rien casser de visible. Servir le
+modèle du worker à la place de celui qu'on demande est exactement ce que ce lot
+retire : un agent qui déclare Opus et reçoit Sonnet en silence est un mensonge
+qui ne se lit que sur une facture.
+
+⚠️ **Ce que ça coûte, dit franchement** : le cache de prompt est indexé par
+modèle. Deux passages de modèles différents sur le même worker ne partagent plus
+de préfixe — chacun garde le sien, aucun n'invalide l'autre, mais le premier
+tour de chacun se paie plein tarif. Le pool reste homogène par FAMILLE ; c'est
+la variation À L'INTÉRIEUR d'une famille qui segmente le cache.
+
 ## Deux modes : par la file, ou direct
 
 *« Soit prise par DB, soit direct. »* Le **même** travail — même instruction,
@@ -252,7 +286,7 @@ mêmes outils, même boucle, même journal — se joue de deux façons :
 | combien en parallèle | **trois — le nombre d'unités systemd ACTIVÉES**, pas ce que la déclaration demande (⚠️ cf. plus bas) | `--concurrence K`, ou la `concurrency` de la déclaration : K **processus** forkés, sans borne d'unités |
 | la file de jobs | `POST /api/me/runner/jobs` : enfiler, réserver, lier, battre, conclure | **aucune** — jamais un appel à cette route |
 | le jeton | le jeton **délégué** remis avec chaque job (l'agent agit pour le demandeur) | `OTO_TOKEN` du poste, qui tient lieu de jeton délégué |
-| le modèle | celui de l'env des **workers** | celui de l'env de **ce processus** (`OTO_RUNNER_MODEL`) |
+| le modèle | celui que l'agent DÉCLARE, à défaut celui de l'env des **workers** | idem, sur l'env de **ce processus** (`OTO_RUNNER_MODEL`) |
 | le journal JSONL | `passages/<flotte>/<job_id>.jsonl`, **là où le worker tourne** | `passages/<flotte>/direct-<horodatage>-<n>.jsonl`, ici |
 | le bilan | `<flotte>.bilan.json` | `<flotte>.direct-<horodatage>.bilan.json` — même forme |
 

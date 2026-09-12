@@ -117,6 +117,16 @@ def _spec_du_job(job: dict) -> AgentSpec:
         # véracité la jetterait comme si elle n'avait pas été posée.
         temperature=(float(p["temperature"])
                      if p.get("temperature") is not None else None),
+        # ⚠️ Le modèle DÉCLARÉ par l'agent (oto-backend #939). Absent = celui du
+        # worker : c'est le cas de tout agent déclaré avant que le champ existe,
+        # et le seul comportement qui ne change rien pour eux.
+        #
+        # Le worker ne VALIDE pas ce nom — il ne connaît pas le catalogue, et
+        # deviner ferait refuser ici un modèle que le fournisseur sert très
+        # bien. Ce qu'il vérifie, c'est la FAMILLE (`_famille_servie` ci-dessus) :
+        # un nom inconnu de son fournisseur remonte alors comme l'erreur du
+        # fournisseur, qui nomme le modèle — un diagnostic, pas une devinette.
+        model=(str(p["model"]).strip() or None) if p.get("model") else None,
         label=f"job:{job.get('id')}")
 
 
@@ -154,6 +164,53 @@ class SansPorteur(RuntimeError):
 class IdentiteInvalide(RuntimeError):
     """Le porteur du travail ne peut plus agir — le serveur l'a dit et a arrêté
     le travail. ⚠️ **Ne pas retenter** : réessayer rejouerait le même verdict."""
+
+
+class FamilleEtrangere(RuntimeError):
+    """Ce travail demande une famille de modèles que ce worker ne sert pas.
+
+    Le backend filtre déjà la file par famille (oto-backend#939 : un worker ne
+    réserve que les travaux de son dépôt, et ceux qui n'en déclarent aucun).
+    Cette garde est le SECOND verrou, et elle a une raison d'exister qui n'est
+    pas la méfiance : le filtre serveur vaut ce que vaut le dépôt que ce worker
+    a nommé au claim, et ce nom vient de SON environnement. Une erreur de
+    configuration — un `OTO_RUNNER_OPENAI_BASE` changé sans changer la clé —
+    ferait réserver des travaux Mistral par un worker qui appellerait Anthropic
+    avec, sans rien casser de visible : le modèle demandé serait simplement
+    ignoré, et la facture partirait chez le mauvais fournisseur.
+
+    ⚠️ Elle échoue FRANCHEMENT plutôt que de tourner sur le modèle du worker.
+    Servir « autre chose que ce qui est demandé » est exactement ce que ce lot
+    retire : un agent qui déclare Opus et reçoit Sonnet en silence est un
+    mensonge qui ne se lit que sur une facture.
+    """
+
+
+def _exiger_ma_famille(p: dict, provider) -> None:
+    """Lève `FamilleEtrangere` si le travail demande une famille qui n'est pas
+    celle de ce worker. Sans famille déclarée : rien à vérifier — le travail
+    tourne sur le modèle du worker, comme avant.
+
+    ⚠️ Un worker qui ne nomme AUCUN dépôt (`depot() == ""` — l'hôte n'est pas
+    reconnu, cf. `agent_llm_openai`) ne sert que les travaux sans famille. Le
+    backend l'applique déjà au claim ; ici la même règle se relit en une ligne
+    plutôt qu'en creux."""
+    famille = (p.get("model_family") or "").strip()
+    if not famille:
+        return
+    mien = ""
+    try:
+        mien = (getattr(provider, "depot", lambda: "")() or "").strip()
+    except Exception:  # noqa: BLE001 — un provider sans dépôt lisible n'en sert aucun
+        logger.warning("dépôt du provider illisible — le travail est refusé "
+                       "plutôt que servi sur le mauvais modèle", exc_info=True)
+    if famille != mien:
+        raise FamilleEtrangere(
+            f"ce travail demande un modèle `{famille}` et ce worker sert "
+            f"`{mien or 'aucun dépôt'}`. Il n'est pas exécuté : le servir sur le "
+            "modèle du worker facturerait le mauvais fournisseur et rendrait un "
+            "modèle que personne n'a demandé. Vérifie OTO_RUNNER_PROVIDER / "
+            "OTO_RUNNER_OPENAI_BASE de ce worker.")
 
 
 def _instruction_du(job: dict) -> str:
@@ -199,6 +256,10 @@ def _traiter(backend: Backend, job: dict, provider,
         # Le serveur a DÉJÀ marqué le travail en échec avec sa raison. On la
         # remonte au journal et on passe : la retenter serait rejouer le refus.
         raise IdentiteInvalide(refus)
+    # La famille demandée vs celle que ce worker sert — AVANT d'ouvrir une
+    # session MCP ou un run : un travail qu'on ne peut pas exécuter ne doit rien
+    # coûter, et surtout ne rien laisser derrière lui.
+    _exiger_ma_famille(p, provider)
     jeton = job.get("delegated_token")
     if not jeton:
         raise SansPorteur(
@@ -296,7 +357,7 @@ def _traiter(backend: Backend, job: dict, provider,
         ordre = prompt or _instruction_du(job)
         res = provider.run_once(instructions=spec.system, inputs=ordre,
                                 tools=p.get("tools") or (), api_key=cle,
-                                on_event=on_event)
+                                modele=spec.model, on_event=on_event)
         # Le fil garde l'ORDRE et la SYNTHÈSE (l'observabilité au grain run) — le
         # verbatim des tours vit et meurt chez Mistral (store=False, conformité).
         releve = ", ".join(f"{s.tool}{'' if s.ok else ' (non exécuté)'}"

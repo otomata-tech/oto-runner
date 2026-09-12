@@ -113,6 +113,21 @@ class FleetSpec:
     # peut plus dire d'où vient la valeur. Décision d'Alexis du 09/09/2026 :
     # « je ne veux pas poser ce paramètre en env, il doit être paramétrable ».
     temperature: Optional[float] = None
+    # Le MODÈLE du passage — déclaré, et désormais SERVI : il descend dans chaque
+    # travail (`payload["model"]`) et l'agent tourne dessus (oto-backend#939).
+    #
+    # ⚠️ Il était servi par le serveur, validé à la déclaration, et IGNORÉ ici —
+    # `tests/test_champs_servis_et_lus.py` l'inscrivait en toutes lettres. Un
+    # champ inerte est une dette ; un champ qui PROMET une attribution qui
+    # n'arrive pas en est une plus chère, parce qu'on lit la promesse dans les
+    # relevés. Absent ⟹ le modèle du worker, comme avant.
+    #
+    # ⚠️ Ce qu'il coûte : le cache de prompt est indexé par modèle. Deux
+    # passages de modèles différents sur le même worker ne partagent plus de
+    # préfixe. Le pool reste homogène par FAMILLE (le serveur ne sert un travail
+    # qu'à un worker du bon dépôt) ; c'est la variation à l'intérieur d'une
+    # famille qui segmente le cache.
+    model: Optional[str] = None
     # La borne des descriptions d'outils servies au modèle, outil par outil, DÉCLARÉE comme la
     # température et pour la même raison : un choix de passage, pas d'hôte. Absente ⟹ les défauts de
     # `descriptions.py` (`data_write` entière, les autres à 1 024). Forme : {defaut: <entier>,
@@ -253,6 +268,7 @@ def load_spec(path: str) -> FleetSpec:
         input=raw.get("input") or "",
         critical_tools=tuple(raw.get("critical_tools") or ()),
         temperature=(float(raw["temperature"]) if raw.get("temperature") is not None else None),
+        model=(str(raw["model"]).strip() or None) if raw.get("model") else None,
         descriptions_outils=_reglage_declare(raw.get("descriptions_outils")),
         ecriture_attendue=_ecriture_attendue.lire(raw.get("ecriture_attendue")),
         bilan_periode_s=int(raw.get("bilan_periode_s") or _BILAN_PERIODE_S),
@@ -306,6 +322,7 @@ def spec_depuis_flotte(f: dict) -> FleetSpec:
         max_tokens_per_row=f.get("max_tokens_per_row"),
         max_consecutive_failures=f.get("max_consecutive_failures"),
         temperature=(float(f["temperature"]) if f.get("temperature") is not None else None),
+        model=(str(f["model"]).strip() or None) if f.get("model") else None,
         input=f.get("input") or "",
         # La flotte EXISTE déjà : on la reprend, on n'en déclare pas une seconde.
         fleet_id=int(f["id"]),
@@ -336,6 +353,14 @@ def payload(spec: FleetSpec) -> dict:
             "max_tokens": spec.max_tokens_per_row,
             # `is not None` : `temperature: 0` est une valeur, pas une absence.
             "temperature": spec.temperature,
+            # Le modèle DESCEND avec le travail, comme la borne et la
+            # température : c'est ce qui le rend réel. Seulement quand il est
+            # déclaré — un travail sans lui reste identique, octet pour octet.
+            # ⚠️ Pas de `model_family` ici : elle se déduit du catalogue, qui
+            # vit côté serveur. Le worker n'en a pas besoin pour lui-même (il
+            # sert ce qu'il réserve), et un runner qui la devinerait ferait
+            # diverger deux définitions de la même chose.
+            **({"model": spec.model} if spec.model else {}),
             # Seulement quand le passage la déclare : un travail sans elle reste
             # identique, octet pour octet, à ce qu'il était.
             **({"ecriture_attendue": spec.ecriture_attendue}

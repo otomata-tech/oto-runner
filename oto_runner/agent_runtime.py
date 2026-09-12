@@ -135,6 +135,25 @@ class AgentSpec:
     # de 11 à 18 sur 18 — un écart qui avale entièrement celui qu'on cherchait
     # à mesurer entre deux versions du texte.
     temperature: Optional[float] = None
+    # Le MODÈLE de ce déroulé, déclaré par l'agent qui l'a demandé (oto-backend
+    # #939 : le travail porte `payload.model`). `None` = celui du worker, pris
+    # dans son environnement — le comportement d'avant, et celui de tout agent
+    # déclaré sans modèle.
+    #
+    # ⚠️ Il vit ici, à côté de la température, pour la même raison : c'est un
+    # choix de CE QU'ON DEMANDE, pas de l'hôte qui sert. Jusqu'ici il n'y avait
+    # aucun endroit où le poser — `runner_fleets.model` était servi, validé à la
+    # déclaration, et ignoré ; un champ qui PROMET une attribution qui n'arrive
+    # pas coûte plus cher qu'un champ absent.
+    #
+    # ⚠️ Ce qu'il coûte, dit franchement : le cache de prompt est indexé par
+    # modèle. Deux passages de modèles différents sur le même worker ne
+    # partagent plus de préfixe — chacun garde le sien, aucun n'invalide
+    # l'autre, mais le premier tour de chacun se paie plein tarif. Le pool reste
+    # homogène par FAMILLE (le backend ne sert un travail qu'à un worker du
+    # dépôt correspondant) ; c'est la variation À L'INTÉRIEUR d'une famille qui
+    # segmente le cache.
+    model: Optional[str] = None
     label: str = "run"
 
 
@@ -350,6 +369,7 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
         turn = provider.complete(system=spec.system, messages=messages,
                                  tools=schemas, api_key=api_key,
                                  temperature=spec.temperature,
+                                 modele=spec.model,
                                  on_event=on_event)
         duree_tour_ms = int((time.monotonic() - debut_tour) * 1000)
         for k in USAGE_KEYS:
