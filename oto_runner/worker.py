@@ -25,7 +25,7 @@ import signal
 import time
 from typing import Optional
 
-from . import agent_runtime, conclusion, ecriture_attendue, journal
+from . import agent_runtime, conclusion, journal
 from .llm_select import get_provider
 from .agent_runtime import AgentSpec
 from .backend import Backend, BackendError
@@ -280,9 +280,6 @@ def _traiter(backend: Backend, job: dict, provider,
             # re-claim par un pair reprend le fil — c'est le design.
             logger.warning("extend %s toléré : %s", job["id"], e)
 
-    # Ce qu'un travail doit avoir écrit s'il a tenu une ligne : DÉCLARÉ par le
-    # passage (cf. `ecriture_attendue`), jamais deviné ici. Absent ⟹ rien jugé.
-    attendu = ecriture_attendue.lire(p.get("ecriture_attendue"))
     one_shot = bool(getattr(provider, "ONE_SHOT", False))
     if one_shot:
         # Chemin CONVERSATIONS (décision Alexis 19/08) : la boucle d'outils tourne
@@ -308,7 +305,6 @@ def _traiter(backend: Backend, job: dict, provider,
     else:
         res = agent_runtime.run(spec, mcp, provider, prompt=prompt,
                                 history=historique, on_turn=apposer, api_key=cle,
-                                a_vide=ecriture_attendue.verdict_vide(attendu),
                                 on_event=on_event)
 
     # ⚠️ Le worker ne juge PAS ce que l'agent a produit. Il ne sait pas ce
@@ -327,21 +323,17 @@ def _traiter(backend: Backend, job: dict, provider,
     jetons, lus_en_cache = resultat["usage_tokens"], resultat["usage_cache_read"]
     outcome = "done" if res.stopped == "end_turn" else "blocked"
     cloture = conclusion.clore(tenu, outcome, job_id=job["id"])
-    # La plateforme reçoit l'issue de la BOUCLE ; le journal et le bilan, celle
-    # que la déclaration fait juger (`sans_ecriture`). Le chemin Conversations
-    # ne voit pas les sorties d'outils : il ne peut rien juger, il ne juge rien.
-    issue = ecriture_attendue.issue(outcome, res.steps, None if one_shot else attendu)
     # L'état final et la raison d'arrêt, tels que DÉCLARÉS — la dernière ligne
     # d'un travail qui a conclu. Le modèle DEMANDÉ et le modèle SERVI, tous deux :
     # l'étiquette d'une flotte a trompé deux heures de mesures (06/09) ; quand ils
     # diffèrent, les deux se voient.
-    note("resultat", outcome=issue, run_id=run_id, run_finish=cloture,
+    note("resultat", outcome=outcome, run_id=run_id, run_finish=cloture,
          resultat=resultat, reponse=res.reply, modele_demande=demande,
          modele_servi=res.model)
     file.complete(job["id"], ok=True, run_id=run_id,
-                  result=resultat if issue == outcome else dict(resultat, issue=issue))
+                  result=resultat)
     logger.info("job %s : %s (%s · %d appels · %d jetons (+ %d lus en cache) · "
-                "modèle servi %s%s)", job["id"], issue, res.stopped, len(res.steps),
+                "modèle servi %s%s)", job["id"], outcome, res.stopped, len(res.steps),
                 jetons, lus_en_cache, res.model or "non rapporté",
                 f", demandé {demande}" if res.model and res.model != demande else "")
 

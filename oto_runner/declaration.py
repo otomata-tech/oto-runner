@@ -25,7 +25,6 @@ from typing import Optional
 import yaml
 
 from .bilan import PERIODE_S as _BILAN_PERIODE_S
-from . import ecriture_attendue as _ecriture_attendue
 from . import descriptions as _descriptions_outils
 
 # Le même journal que l'ordonnanceur : une déclaration se lit au moment où la
@@ -118,9 +117,6 @@ class FleetSpec:
     # `descriptions.py` (`data_write` entière, les autres à 1 024). Forme : {defaut: <entier>,
     # entieres: [<outil>, …]}, validée à la lecture de la déclaration.
     descriptions_outils: Optional[dict] = None
-    # Ce qu'un travail DOIT avoir écrit s'il a tenu une ligne — déclaré, jamais
-    # deviné par le worker (cf. `ecriture_attendue`). Absent ⟹ rien n'est jugé.
-    ecriture_attendue: Optional[dict] = None
     # Le plafond de jetons D'UNE LIGNE, descendu dans CHAQUE travail enfilé —
     # donc appliqué par l'agent lui-même, quel que soit le chemin qui l'a mis en
     # file. Absent ⟹ aucune borne par ligne : 65 571 jetons sur une seule ligne,
@@ -254,7 +250,6 @@ def load_spec(path: str) -> FleetSpec:
         critical_tools=tuple(raw.get("critical_tools") or ()),
         temperature=(float(raw["temperature"]) if raw.get("temperature") is not None else None),
         descriptions_outils=_reglage_declare(raw.get("descriptions_outils")),
-        ecriture_attendue=_ecriture_attendue.lire(raw.get("ecriture_attendue")),
         bilan_periode_s=int(raw.get("bilan_periode_s") or _BILAN_PERIODE_S),
         source=path,
         name=os.path.splitext(os.path.basename(path))[0])
@@ -336,11 +331,8 @@ def payload(spec: FleetSpec) -> dict:
             "max_tokens": spec.max_tokens_per_row,
             # `is not None` : `temperature: 0` est une valeur, pas une absence.
             "temperature": spec.temperature,
-            # Seulement quand le passage la déclare : un travail sans elle reste
-            # identique, octet pour octet, à ce qu'il était.
-            **({"ecriture_attendue": spec.ecriture_attendue}
-               if spec.ecriture_attendue else {}),
-            # Idem : sans réglage déclaré, la session sert les défauts de `descriptions.py`.
+            # Seulement quand le passage le déclare : sans réglage, la session sert les
+            # défauts de `descriptions.py`.
             **({"descriptions_outils": spec.descriptions_outils}
                if spec.descriptions_outils else {}),
             "input": message,

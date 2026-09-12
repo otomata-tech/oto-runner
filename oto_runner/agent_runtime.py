@@ -57,23 +57,6 @@ _ENV_MAX_TOOL_OUTPUT = "OTO_RUNNER_MAX_TOOL_OUTPUT"
 # plutôt qu'à le retenter. Une erreur MÉTIER (not_found, 400) n'est jamais
 # rejouée — elle est une réponse.
 _TRANSIENT_RE = None  # compilé au premier usage (module importable sans re)
-#: Combien de fois le MÊME outil peut rendre le MÊME refus avant qu'on arrête.
-#:
-#: Ce n'est pas un jugement sur le travail — la plateforme n'a pas à décider si
-#: un agent « devait » écrire. C'est un fait mécanique : un outil qui refuse
-#: trois fois le même appel de la même façon refusera le quatrième. Le modèle,
-#: lui, relit l'erreur et réessaie en variant sa formulation, indéfiniment.
-#:
-#: Mesuré le 08/09/2026 sur dix travaux : `data_claim_next` refusé HUIT fois par
-#: travail sur une déclaration de tableau invalide — soixante refus sur
-#: quatre-vingt-un appels, jusqu'au plafond de tours, chaque tour renvoyant tout
-#: le contexte. Les dix travaux se sont conclus « done » sans une écriture.
-#:
-#: Trois, parce qu'il faut laisser une correction possible : le premier refus
-#: instruit, le second confirme, le troisième prouve que le refus ne dépend pas
-#: de la formulation.
-MAX_REFUS_IDENTIQUES = 3
-
 DEFAULT_MAX_STEPS = 24
 HARD_MAX_STEPS = 64
 MAX_HISTORY_MESSAGES = 60   # tours provider transportés au modèle (le fil complet
@@ -144,11 +127,6 @@ class AgentStep:
     ok: bool
     duration_ms: int
     error: Optional[str] = None
-    # Un appel qui ABOUTIT sans rien rendre — une réservation de ligne qui ne
-    # rend AUCUNE ligne, par exemple. `ok` ne le distingue pas d'un appel
-    # fécond : la boucle ne connaît pas la sémantique des outils, elle pose ici
-    # le verdict que l'appelant lui rend (`a_vide`).
-    vide: bool = False
     # L'échec vient du TRANSPORT (session MCP perdue, réseau, protocole), pas de
     # l'outil : l'appel n'a jamais été exécuté. Un tel échec ne se lit pas comme
     # une réponse métier — un job qui en porte n'a pas « fait le travail ».
@@ -158,8 +136,6 @@ class AgentStep:
         out = {"tool": self.tool, "ok": self.ok, "duration_ms": self.duration_ms}
         if self.error:
             out["error"] = self.error
-        if self.vide:
-            out["vide"] = True
         if self.transport_ko:
             out["transport_ko"] = True
         return out
@@ -286,17 +262,12 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
         prompt: Optional[str] = None,
         history: Optional[list] = None, on_turn: Optional[OnTurn] = None,
         api_key: Optional[str] = None,
-        a_vide: Optional[Callable[[str, str], bool]] = None,
         on_event: Optional[OnEvent] = None) -> AgentResult:
-    """La boucle : tours de modèle et d'outils jusqu'à conclusion, plafond, ou refus.
+    """La boucle : tours de modèle et d'outils jusqu'à conclusion ou plafond.
 
     `history` = les `provider_raw` du fil, rejoués dans l'ordre (continuation d'un
     run) ; `prompt` = le nouveau tour user (None = reprendre sans rien ajouter,
     ex. après un kill en plein tour). `on_turn` appose chaque tour au fil backend.
-
-    `a_vide(nom, sortie)` → « cet appel a abouti SANS RIEN RENDRE » : la boucle
-    voit les sorties d'outils, mais leur SENS appartient au domaine (le worker).
-    Elle lui pose la question et marque le pas ; absent, aucun pas n'est vide.
 
     `on_event(type, champs)` reçoit le journal ENTIER du déroulé : `systeme`,
     `historique` (le fil rechargé, tel que transporté), `utilisateur`, `modele`
@@ -336,11 +307,6 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
     stopped = "end_turn"
     reply = ""
     servi: Optional[str] = None
-
-    # (outil, empreinte du refus) -> combien de fois d'affilée. Voir
-    # `MAX_REFUS_IDENTIQUES` : on compte par COUPLE et non globalement, parce
-    # qu'un autre appel intercalé ne rend pas le refus moins déterministe.
-    refus_repetes: dict = {}
 
     for _ in range(plafond + 1):
         # ⚠️ Le tour est CHRONOMÉTRÉ : sans ça, un journal ne dit pas si un tour a
@@ -411,18 +377,7 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
                  servi_chars=len(pour_le_modele))
             steps.append(AgentStep(tool=call.name, ok=not is_error, duration_ms=ms,
                                    error=text[:200] if is_error else None,
-                                   vide=bool(a_vide and not is_error
-                                             and a_vide(call.name, text)),
                                    transport_ko=transport_ko))
-            if is_error:
-                cle = (call.name, (text or "")[:200])
-                refus_repetes[cle] = refus_repetes.get(cle, 0) + 1
-            else:
-                # Cet outil vient de RÉUSSIR : son refus n'était donc pas
-                # déterministe, et compter ses échecs passés vers un arrêt
-                # ferait couper un déroulé qui avance. On oublie.
-                for k in [k for k in refus_repetes if k[0] == call.name]:
-                    del refus_repetes[k]
             neutre.append({"name": call.name, "ok": not is_error, "duration_ms": ms})
             results.append({"id": call.id, "text": pour_le_modele,
                             "is_error": is_error})
@@ -436,20 +391,6 @@ def run(spec: AgentSpec, transport: ToolTransport, provider,
         if turn.text:
             reply = turn.text
 
-        # Le même outil, le même refus, trois fois : il n'y a plus rien à
-        # corriger dans l'appel. On arrête ici plutôt que de laisser le modèle
-        # varier sa formulation jusqu'au plafond de tours — chaque tour renvoie
-        # tout le contexte, donc l'obstination se paie au prix fort et le
-        # travail se conclut quand même « done », sans rien avoir écrit.
-        bloque = next(((nom, err) for (nom, err), n in refus_repetes.items()
-                       if n >= MAX_REFUS_IDENTIQUES), None)
-        if bloque is not None:
-            nom, err = bloque
-            stopped = "refus_repete"
-            reply = (f"Arrêt : `{nom}` a rendu {MAX_REFUS_IDENTIQUES} fois le "
-                     f"même refus, la reformulation n'y change rien. Dernier "
-                     f"texte servi : {err}")
-            break
     else:
         stopped = "max_steps"
 
