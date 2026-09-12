@@ -264,7 +264,8 @@ def modele_resolu(nom: str) -> Optional[str]:
 
 
 def run_once(*, instructions: str, inputs: str, tools,
-             api_key: Optional[str] = None, on_event=None) -> AgentResult:
+             api_key: Optional[str] = None, modele: Optional[str] = None,
+             on_event=None) -> AgentResult:
     """UNE conversation complète (outils compris, côté Mistral) → AgentResult.
 
     `on_event(type, champs)` : le journal du travail — `conversation` (la requête
@@ -282,7 +283,10 @@ def run_once(*, instructions: str, inputs: str, tools,
 
     Le bilan porte la version CONCRÈTE que l'alias résolvait au moment de
     l'appel : sans elle, une bascule d'alias ne se date pas après coup."""
-    nom = model()
+    # `modele` = celui que l'agent DÉCLARE (oto-backend #939) ; à défaut celui du
+    # worker. Il traverse `modele_resolu` comme l'autre : c'est l'alias servi qui
+    # est relevé, et un alias déclaré par un agent en a autant besoin.
+    nom = modele or model()
     corps = {
         "model": nom,
         "inputs": inputs,
@@ -311,7 +315,7 @@ def run_once(*, instructions: str, inputs: str, tools,
         d = _poster(url, corps, entetes)
         note("reponse", outputs=d.get("outputs"), usage=d.get("usage"),
              modele=d.get("model"), relance=relance)
-        cumul = _cumuler(cumul, _parse(d, tools))
+        cumul = _cumuler(cumul, _parse(d, tools, demande=nom))
         renvoyes = _appels_renvoyes(d)
         if not renvoyes or relance == maxi:
             break
@@ -319,6 +323,15 @@ def run_once(*, instructions: str, inputs: str, tools,
                     relance + 1, maxi, str(renvoyes[0].get("name") or "?")[:60])
         corps = dict(corps, inputs=_entrees_de_relance(inputs, d, renvoyes))
         note("relance", numero=relance + 1, renvoyes=renvoyes)
+    # ⚠️ NON CHANGÉ, et la question mérite d'être posée ailleurs : quand la
+    # version concrète ne se résout pas (catalogue muet, panne réseau), ce champ
+    # tombe à `null` — décision explicite, tenue par un banc
+    # (`test_un_job_survit_a_une_resolution_impossible`). Tant que le modèle
+    # venait de l'environnement du worker, ce null coûtait peu : on savait
+    # lequel c'était. Depuis que l'agent le DÉCLARE, il efface aussi la trace de
+    # SON choix. Le repli naturel serait `resolu or nom` ; il renverse un
+    # arbitrage tenu par un test, et ce lot n'est pas le bon endroit pour le
+    # faire en passant.
     cumul.model = resolu
     return cumul
 
@@ -457,8 +470,13 @@ def _nom_outil(name: str, tools) -> str:
     return name
 
 
-def _parse(d: dict, tools=()) -> AgentResult:
+def _parse(d: dict, tools=(), demande: Optional[str] = None) -> AgentResult:
     """Les `outputs` d'une conversation → le contrat AgentResult du worker.
+
+    `demande` = le modèle DEMANDÉ pour ce travail — l'estampille de repli quand
+    la réponse n'en porte pas. Passé en argument et non relu de l'environnement :
+    depuis oto-backend#939 le modèle peut venir du travail, et `model()` rendrait
+    alors celui du worker — une estampille fausse, ce qui est pire qu'aucune.
 
     Défensif sur la forme (chunks texte ou chaîne nue) — le banc fige ce qui est
     parsé, l'essai réel des 20 fiches valide contre le service."""
@@ -493,4 +511,4 @@ def _parse(d: dict, tools=()) -> AgentResult:
     return AgentResult(reply="\n".join(textes).strip(), steps=steps,
                        stopped="end_turn", usage=usage,
                        raw_outputs=d.get("outputs"),
-                       model=d.get("model") or model())
+                       model=d.get("model") or demande or model())

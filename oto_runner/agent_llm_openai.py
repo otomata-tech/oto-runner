@@ -286,6 +286,7 @@ def format_tools(schemas: list[dict]) -> list[dict]:
 def complete(*, system: str, messages: list, tools: list[dict],
              api_key: Optional[str] = None,
              temperature: Optional[float] = None,
+             modele: Optional[str] = None,
              on_event: Optional[Callable[[str, dict], None]] = None) -> Turn:
     """UN tour de modèle — synchrone, le worker a le droit d'attendre.
 
@@ -295,8 +296,9 @@ def complete(*, system: str, messages: list, tools: list[dict],
 
     `on_event(type, champs)` : le journal du travail, quand la boucle en tient
     un — il reçoit chaque retentative de transport (cf. `_post_borne`)."""
+    nom = modele or model()
     corps = {
-        "model": model(),
+        "model": nom,
         "max_tokens": max_tokens(),
         "messages": [{"role": "system", "content": system}, *messages],
         # ⚠️ SANS cette cle, le fournisseur ne met rien en cache — mesure du
@@ -347,7 +349,7 @@ def complete(*, system: str, messages: list, tools: list[dict],
              "cache_read_input_tokens": _caches}
 
     # Ce que le fournisseur DIT avoir servi, à défaut ce qu'on a demandé.
-    servi = d.get("model") or model()
+    servi = d.get("model") or nom
 
     if fin == "content_filter":
         return Turn(text="", tool_calls=(), stop_reason="refusal",

@@ -41,10 +41,6 @@ _NON_LUS = {
         "un fournisseur ne se continue pas chez un autre — les formats de "
         "messages diffèrent. Le rendre variable par campagne demanderait que le "
         "fil porte son fournisseur."),
-    "model": (
-        "Même raison : le modèle est épinglé par worker, et le cache de prompt "
-        "en dépend. Le faire varier par campagne invaliderait le cache d'un "
-        "worker partagé entre plusieurs campagnes."),
 }
 
 

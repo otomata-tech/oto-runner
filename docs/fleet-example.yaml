@@ -3,8 +3,13 @@
 # jeton oto (OTO_TOKEN) et la clé de modèle viennent de l'environnement.
 #
 # Lancer : python -m oto_runner.fleet flotte.yaml
-# Le modèle vient de l'env du WORKER (OTO_RUNNER_MODEL) — un champ `model`
-# ici serait logué puis ignoré : le pool de workers est homogène.
+# `model` (facultatif) : le modèle sur lequel CETTE campagne tourne. Il descend
+# avec chaque travail et l'agent tourne dessus (oto-backend#939). Absent ⟹ le
+# modèle du worker (OTO_RUNNER_MODEL), comme avant.
+# ⚠️ Il doit être de la FAMILLE que servent les workers de la file (le dépôt
+# qu'ils nomment en réservant) : le serveur ne sert un travail qu'à un worker de
+# la bonne famille, et un worker qui en reçoit une autre le refuse au lieu de le
+# servir sur le sien. Un modèle d'une famille que personne ne sert attendrait.
 # Le NOM DU FICHIER sans son extension est le nom de la flotte : il est apposé
 # à chaque job (`fleet`), et c'est par lui qu'on retrouve une campagne.
 

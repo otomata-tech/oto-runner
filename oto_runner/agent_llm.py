@@ -222,6 +222,7 @@ def fil_cache(messages: list) -> list:
 def complete(*, system: str, messages: list, tools: list[dict],
              api_key: Optional[str] = None,
              temperature: Optional[float] = None,
+             modele: Optional[str] = None,
              on_event: Optional[Callable[[str, dict], None]] = None) -> Turn:
     """UN tour de modèle — synchrone : le worker est un process dédié, pas un
     serveur mono-loop, il a le droit d'attendre.
@@ -233,7 +234,12 @@ def complete(*, system: str, messages: list, tools: list[dict],
     `on_event(type, champs)` : le journal du travail — le seam en sert UN seul
     contrat aux deux adaptateurs. Ici il ne reçoit rien : le SDK Anthropic
     retente lui-même les incidents de transport, et ce qu'il retente ne remonte
-    pas jusqu'ici. Côté OpenAI-compatible, la retentative est à nous et se dit."""
+    pas jusqu'ici. Côté OpenAI-compatible, la retentative est à nous et se dit.
+
+    ⚠️ `modele` (et non `model`) : le paramètre porterait sinon le nom de la
+    fonction du module qu'il remplace, et la masquerait dans tout le corps.
+    `None` = le modèle du worker (`OTO_RUNNER_MODEL`), inchangé.
+    """
     if temperature is not None:
         # REFUS FRANC, et c'est délibéré. Ce provider règle la profondeur par
         # `output_config.effort` (cf. l'en-tête du module) ; la température n'y a
@@ -253,8 +259,9 @@ def complete(*, system: str, messages: list, tools: list[dict],
     if anthropic is None:
         raise LlmUnavailable("le paquet `anthropic` n'est pas installé")
     client = anthropic.Anthropic(api_key=api_key or resolve_key())
+    nom = modele or model()
     kwargs: dict = {
-        "model": model(),
+        "model": nom,
         "max_tokens": max_tokens(),
         "system": systeme_cache(system),
         "messages": fil_cache(messages),
@@ -286,7 +293,7 @@ def complete(*, system: str, messages: list, tools: list[dict],
     # La version SERVIE si l'API la rend, à défaut celle qu'on a demandée : une
     # estampille approchée vaut infiniment mieux qu'un `null`, qui ne se distingue
     # pas d'un job qui n'a jamais tourné.
-    servi = getattr(resp, "model", None) or model()
+    servi = getattr(resp, "model", None) or nom
 
     raw = [_block_to_dict(b) for b in getattr(resp, "content", []) or []]
     if stop == "refusal":
