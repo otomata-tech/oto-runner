@@ -575,10 +575,18 @@ journal disait la vérité à chaque battement — *« le passage tourne quand m
 mais son état ne dira pas en cours »* — et personne ne l'a lue pendant huit
 vagues. Une ligne de journal de plus n'y aurait rien changé.
 
+⚠️ **Déclarer, armer et prendre sont FATALS** (18/09/2026, oto-backend#996) : un
+refus arrête le passage **avant tout enfilement**. Tolérés, ils laissaient partir
+des travaux sur une campagne restée `draft`, qu'`op=stop` ne sait pas arrêter.
+Seule la **reprise** se tolère : `launch` refusé `not_launchable` (campagne déjà
+armée ou en cours), puis `take` refusé `not_takeable` sur une campagne que
+`op=get` **lit** `running`. À l'enfilement, un `409 fleet_not_serving` abandonne
+sur-le-champ, comme un `404` : retenter ne réarmera pas la campagne.
+
 D'où `etat_muet` dans le bilan : **combien de fois le passage n'a pas pu dire où
-il en était** (déclaration, armement, prise, battement, accusé d'arrêt). Le
-passage continue — perdre l'observabilité vaut mieux qu'une campagne qui refuse
-de partir — mais il **conclut** dessus, en erreur, là où on lit le résultat :
+il en était** en cours de route (battement, accusé d'arrêt). Le passage continue
+— une plateforme injoignable n'est pas un ordre d'arrêt — mais il **conclut**
+dessus, en erreur, là où on lit le résultat :
 
 ```
 ⚠️ ce passage a tourné EN AVEUGLE : N geste(s) d'état n'ont pas pu être posés.
