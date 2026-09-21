@@ -454,8 +454,8 @@ PYCRAN
   # systemd rejoue sa ligne de commande à l'identique : si cette commande
   # déclarait, chaque relance ouvrirait une campagne NEUVE — l'ancienne laissée
   # `running` sans ordonnanceur, la borne de dépense repartie de zéro. L'unité
-  # reçoit donc l'identifiant, et une relance REPREND (`take` refusé sur une
-  # campagne qui se lit `running` = reprise, cf. `fleet.run_fleet`). Déclarer est
+  # reçoit donc l'identifiant, et une relance REPREND (`take` d'une campagne
+  # `running` par le MÊME preneur = reprise, cf. `fleet.run_fleet`). Déclarer est
   # un geste de compte : le jeton est celui de `.env.fleet`, chargé plus haut.
   _fid=$(cd "$RACINE" && "$PY" -m oto_runner.fleet --declarer "$yaml") || {
     echo "ABANDON : campagne non déclarée — je retire les gardes que je venais d'armer."
@@ -488,10 +488,18 @@ PYCRAN
   # par une version antérieure de ce script garde les siennes (aucune relance).
   # Des tests tiennent ces valeurs et leur cohérence avec le code
   # (`tests/test_relance_ordonnanceur.py`, `tests/test_armement_fatal.py`).
+  #
+  # LE PRENEUR (oto-backend#1032) : `OTO_FLEET_HOLDER`, l'identifiant que
+  # l'ordonnanceur joint à `take`/`beat`/`ack_stop` — `<machine>/<unité>`. Figé
+  # dans l'unité à sa création, il est le MÊME à chaque relance (c'est ce qui lui
+  # fait reprendre SA campagne) et distinct d'une unité à l'autre. Il suit
+  # `$FLOTTE`, le nom réellement posé par `--unit` ; un test tient les deux
+  # ensemble. Sans lui, l'ordonnanceur refuse de démarrer.
   systemd-run --unit="$FLOTTE" --property=EnvironmentFile="$RACINE/.env" \
     --property=Restart=on-failure --property=RestartSec=10min \
     --property=StartLimitIntervalSec=6h --property=StartLimitBurst=6 \
     --property=RestartPreventExitStatus=3 \
+    --setenv=OTO_FLEET_HOLDER="$(hostname)/$FLOTTE" \
     --working-directory="$RACINE" "$PY" -m oto_runner.fleet "$yaml" "#$_fid" >/dev/null || {
       echo "ABANDON : flotte non lancée — je retire la garde que je venais d'armer."
       echo "   la campagne #$_fid reste déclarée, sans rien d'enfilé."

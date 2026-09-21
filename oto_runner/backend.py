@@ -61,7 +61,7 @@ class BackendError(RuntimeError):
 
 class Backend:
     def __init__(self, base: Optional[str] = None, token: Optional[str] = None,
-                 org: Optional[int] = None):
+                 org: Optional[int] = None, preneur: Optional[str] = None):
         """⚠️ `org` est porté par le CLIENT, pas passé appel par appel.
 
         La première version le posait sur trois appels seulement : `create` la
@@ -73,10 +73,16 @@ class Backend:
 
         Un contexte qu'il faut penser à joindre à chaque appel finit par être
         oublié à l'un d'eux, et c'est exactement ce qui est arrivé. Il vit ici :
-        aucun appel ne peut plus l'omettre."""
+        aucun appel ne peut plus l'omettre.
+
+        `preneur` suit la même règle (oto-backend#1032, 21/09/2026) : l'identifiant
+        que l'ORDONNANCEUR déclare (`OTO_FLEET_HOLDER`, lu par `fleet.main`), joint
+        à chacun de ses gestes — `take`, `beat`, `ack_stop`. Le worker n'en a pas :
+        il ne fait aucun de ces gestes."""
         self.base = (base or os.environ.get("OTO_BASE", "https://mcp.oto.cx")).rstrip("/")
         self.token = (token or os.environ.get("OTO_TOKEN", "")).strip()
         self.org = org
+        self.preneur = preneur
         if not self.token:
             raise BackendError("OTO_TOKEN absent de l'environnement du worker")
 
@@ -341,25 +347,38 @@ class Backend:
         return self._post("/api/me/runner/fleets",
                           {"op": "launch", "fleet_id": fleet_id}).get("fleet") or {}
 
-    def prendre_flotte(self, fleet_id: int) -> dict:
-        """`armed` → `running` : je la PRENDS, et je le déclare.
+    def _taken_by(self) -> str:
+        """Le preneur, exigé AVANT l'appel : le backend refuse un geste
+        d'ordonnanceur sans auteur (`400 missing_fields`) — le dire ici nomme la
+        vraie cause, un client construit sans `preneur`."""
+        if not self.preneur:
+            raise RuntimeError("geste d'ordonnanceur sans preneur : OTO_FLEET_HOLDER "
+                               "n'a pas été passé au client (`Backend(preneur=…)`)")
+        return self.preneur
 
-        ⚠️ Un refus ici n'est pas une erreur à retenter : il veut dire qu'un autre
-        ordonnanceur l'a prise, ou qu'elle n'était pas armée. Partir quand même
-        doublerait le passage.
+    def prendre_flotte(self, fleet_id: int) -> dict:
+        """`armed` → `running` : je la PRENDS, et je dis qui la prend (`taken_by`).
+
+        Une campagne `running` que CE preneur tient déjà se REPREND (200) : c'est
+        l'ordonnanceur relancé. ⚠️ Un refus n'est pas une erreur à retenter :
+        `held_by_other`, un autre ordonnanceur la tient ; `not_takeable`, elle
+        n'est ni armée ni en cours. Partir quand même doublerait le passage.
         """
         return self._post("/api/me/runner/fleets",
-                          {"op": "take", "fleet_id": fleet_id}).get("fleet") or {}
+                          {"op": "take", "fleet_id": fleet_id,
+                           "taken_by": self._taken_by()}).get("fleet") or {}
 
     def battre_flotte(self, fleet_id: int) -> bool:
         """Bat, ET demande dans le même appel : « dois-je m'arrêter ? »
 
         ⚠️ C'est ce qui rend `op=stop` RÉEL. Un ordonnanceur qui bat sans jamais
         poser la question laisserait l'ordre d'arrêt sans lecteur — et l'écran
-        annoncerait un arrêt qui n'arrive jamais.
+        annoncerait un arrêt qui n'arrive jamais. Seul le preneur bat : un autre
+        reçoit `409 not_the_holder`.
         """
         out = self._post("/api/me/runner/fleets",
-                         {"op": "beat", "fleet_id": fleet_id})
+                         {"op": "beat", "fleet_id": fleet_id,
+                          "taken_by": self._taken_by()})
         return bool(out.get("stop_requested"))
 
     def accuser_arret(self, fleet_id: int, raison: str | None = None) -> None:
@@ -367,9 +386,11 @@ class Backend:
 
         Le seul geste qui pose le FAIT. Sans lui, un arrêt demandé reste
         `stopping` pour toujours — ce qui est précisément le symptôme d'un
-        ordonnanceur mort, et il ne faut pas le fabriquer en étant vivant.
+        ordonnanceur mort, et il ne faut pas le fabriquer en étant vivant. Seul
+        le preneur accuse : un autre reçoit `409 not_the_holder`.
         """
-        corps = {"op": "ack_stop", "fleet_id": fleet_id}
+        corps = {"op": "ack_stop", "fleet_id": fleet_id,
+                 "taken_by": self._taken_by()}
         if raison:
             corps["reason"] = raison
         self._post("/api/me/runner/fleets", corps)

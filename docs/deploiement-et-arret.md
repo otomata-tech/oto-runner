@@ -127,7 +127,7 @@ siennes — aucune relance.
 |---|---|
 | exit 0 — file vide, volume atteint, budget atteint, **arrêt demandé** (`op=stop` obéi) | non : fin normale |
 | exit 1 — panne : transport, 5xx, `no_runner_armed`, backend indisponible, échecs consécutifs, outil critique en échec, budget non suivable | **oui**, 10 min après |
-| exit 3 — abandon définitif : campagne arrêtée, `404`, `409 fleet_not_serving`, armement ou prise refusés pour une cause que le serveur nomme | non (`RestartPreventExitStatus=3`) |
+| exit 3 — abandon définitif : campagne arrêtée, `404`, `409 fleet_not_serving`, armement ou prise refusés pour une cause que le serveur nomme, campagne tenue par un autre ordonnanceur (`409 held_by_other`, `409 not_the_holder`), `OTO_FLEET_HOLDER` absent | non (`RestartPreventExitStatus=3`) |
 | `systemctl stop` — `flotte.sh arreter`, les gardes | non — et l'arrêt annule aussi une relance en attente |
 
 **Pourquoi ces valeurs.** `RestartSec=10min` dépasse la tolérance interne du
@@ -147,13 +147,35 @@ reset-failed` lève la limite tout de suite, mais **décharge** l'unité transit
 il ne reste alors que `flotte.sh lancer`, qui déclare une campagne **neuve**.
 
 **La reprise.** Relancé, l'ordonnanceur rejoue `launch` (refusé `not_launchable`,
-toléré) puis `take` (refusé `not_takeable`, toléré seulement si la campagne se lit
-`running`) et repart. Ce qui ne survit pas à la relance : les travaux en vol
+toléré) puis `take`, que le backend **accepte** parce que la campagne est tenue par
+le même preneur — `OTO_FLEET_HOLDER`, figé dans l'unité à `<machine>/oto-fleet-<nom>`,
+identique à chaque relance — et repart. Tenue par un autre, la prise est refusée
+`409 held_by_other` : abandon définitif, rien d'enfilé. Ce qui ne survit pas à la relance : les travaux en vol
 (plus suivis, leur coût n'entre plus dans le bilan), le compte de jetons du
 budget et la base du volume, recomptés depuis zéro — la borne `budget_tokens`
 vaut donc **par vie** de l'ordonnanceur, pas par campagne. Les lignes, elles, ne
 sont pas travaillées deux fois : un travail n'est jamais attaché à une ligne à
 l'enfilement, c'est l'agent qui en réserve une sous bail.
+
+**L'ordre de déploiement du preneur** (oto-backend#1032, 21/09/2026). Les deux
+versions ne se parlent pas : un runner qui envoie `taken_by` à un backend qui ne
+le déclare pas est refusé (`400 unknown_fields`) ; un runner qui ne l'envoie pas à
+un backend qui l'exige l'est aussi (`400 missing_fields`) — et là, c'est pire
+qu'un refus de départ : ses battements échouent en « état muet », sa campagne
+tourne **en aveugle** et `op=stop` n'est plus lu. D'où l'ordre, sans exception :
+
+1. la migration `0003_runner_fleets_preneur` jouée à la main sur la base (avant la
+   fusion du backend : le code qui la lit en dépend) ;
+2. oto-backend#1032 fusionné et déployé ;
+3. seulement alors cette version du runner, et les flottes relancées par le
+   nouveau `flotte.sh`.
+
+⚠️ **Au moment du tag de prod du backend, aucun ordonnanceur de l'ancienne version
+ne doit tourner** : arrêter (`flotte.sh arreter`) ou laisser finir les flottes en
+cours avant le tag, les relancer après. Et une unité posée par un `flotte.sh`
+antérieur ne porte pas `OTO_FLEET_HOLDER` : relancée par systemd sur le nouveau
+code, elle refuse de démarrer (exit 3, sans relance) — la relancer par
+`flotte.sh lancer`.
 
 **Arrêter proprement, sans relance** : `flotte.sh arreter <nom>` (un `systemctl
 stop` ne relance jamais — vérifié, y compris pendant l'attente d'une relance), ou
