@@ -13,6 +13,7 @@ qu'elle fait enfiler vivent dans `declaration.py`, partagés avec le mode direct
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import time
 from dataclasses import dataclass, field, replace
@@ -162,6 +163,13 @@ class FleetBilan:
 # les deux ensemble.
 SORTIE_ABANDON_DEFINITIF = 3
 
+# Le motif d'arrêt d'un ordonnanceur qui apprend, EN COURS de passage, qu'il ne
+# tient plus sa campagne : `409 not_the_holder` au battement ou à l'accusé
+# (oto-backend#1032). Un autre ordonnanceur la conduit, ou elle a été réarmée —
+# ce qui la libère. Définitif : relancé, il buterait sur `held_by_other`, ou
+# reprendrait une campagne qu'on a libérée pour un autre.
+_PLUS_TENUE = "campagne plus tenue"
+
 
 class AbandonDefinitif(RuntimeError):
     """Un abandon qu'une relance ne corrigera pas : le serveur a RÉPONDU, et refusé."""
@@ -175,17 +183,27 @@ def _transitoire(e: BackendError) -> bool:
 
 
 def _abandon(geste: str, fleet_id: int, e: BackendError, *,
-             definitif: bool, statut: Optional[str] = None) -> RuntimeError:
+             definitif: bool) -> RuntimeError:
     """L'erreur qui arrête un passage dont la campagne n'a pas pu être armée ou
     prise. Le texte du SERVEUR passe en clair : c'est lui qui dit quoi corriger.
     `definitif` décide du code de sortie (cf. `SORTIE_ABANDON_DEFINITIF`)."""
-    etat = f" (état lu : `{statut}`)" if statut is not None else ""
     return (AbandonDefinitif if definitif else RuntimeError)(
         f"flotte #{fleet_id} {geste}, passage ABANDONNÉ avant d'enfiler quoi que "
-        f"ce soit — {e}{etat}\n"
+        f"ce soit — {e}\n"
         "Une campagne ni `armed` ni `running` échappe à `op=stop` : ses travaux "
         "seraient IMPOSSIBLES à arrêter. Corrige la cause et relance : rien n'a "
         "été lancé.")
+
+
+def _plus_tenue(bilan: FleetBilan, fleet_id: int, geste: str,
+                e: BackendError) -> None:
+    """Le serveur a répondu `not_the_holder` : ce passage ne TIENT plus sa
+    campagne. Ce n'est pas un « état muet » — le serveur a RÉPONDU — et
+    continuer doublerait les exécutions de celui qui la tient."""
+    bilan.arret = f"{_PLUS_TENUE} — {e}"
+    logger.error("flotte #%s ABANDONNÉE (%s refusé) : un autre ordonnanceur tient "
+                 "cette campagne, ou elle a été réarmée depuis que je l'ai prise — "
+                 "%s. Je cesse de la conduire.", fleet_id, geste, e)
 
 
 def declarer(spec: FleetSpec, backend: Backend) -> Optional[int]:
@@ -293,9 +311,17 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
         #
         # Une seule tolérance, la REPRISE d'un passage interrompu : `launch`
         # refusé `not_launchable` (la campagne est déjà armée ou en cours) ne
-        # dit rien d'anormal, et c'est la prise qui tranche ; `take` refusé
-        # `not_takeable` ne se tolère que si la campagne se LIT `running`.
-        # Tout autre refus — dont `no_runner_armed` — est fatal.
+        # dit rien d'anormal, et c'est la prise qui tranche. Tout autre refus —
+        # dont `no_runner_armed` — est fatal.
+        #
+        # ⚠️ La prise tranche SEULE depuis oto-backend#1032 (21/09/2026) : le
+        # backend sait QUI tient la campagne (`taken_by`, le preneur que le
+        # client joint à chaque geste). `running` tenue par CE preneur → reprise,
+        # 200 ; tenue par un AUTRE → `409 held_by_other`, abandon définitif. La
+        # tolérance d'avant — `not_takeable` sur une campagne qui se lit
+        # `running` = reprise — ne distinguait pas les deux : elle reprenait
+        # aussi la campagne d'un autre ordonnanceur VIVANT, et doublait ses
+        # exécutions.
         try:
             backend.armer_flotte(fleet_id)
         except BackendError as e:
@@ -308,19 +334,15 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
             backend.prendre_flotte(fleet_id)
             logger.info("flotte #%s prise — le passage est en cours", fleet_id)
         except BackendError as e:
-            if e.code != "not_takeable":
-                raise _abandon("non prise", fleet_id, e,
-                               definitif=not _transitoire(e)) from e
-            try:
-                statut = backend.lire_flotte(fleet_id).get("status")
-            except BackendError as lecture:
-                raise _abandon("non prise, et son état illisible", fleet_id,
-                               lecture, definitif=not _transitoire(lecture)) from e
-            if statut != "running":
-                raise _abandon("non prise", fleet_id, e, definitif=True,
-                               statut=statut) from e
-            logger.warning("flotte #%s déjà `running` — REPRISE du passage (%s)",
-                           fleet_id, e)
+            if e.code == "held_by_other":
+                raise AbandonDefinitif(
+                    f"flotte #{fleet_id} non prise : un autre ordonnanceur tient "
+                    f"cette campagne — {e}\n"
+                    "Partir quand même doublerait ses exécutions. Si celui qui la "
+                    "tient est mort : `op=stop`, puis `op=launch` (le réarmement la "
+                    "libère), puis relance.") from e
+            raise _abandon("non prise", fleet_id, e,
+                           definitif=not _transitoire(e)) from e
     bilan = FleetBilan(lignes_initiales=backend.count_rows(spec.namespace,
                                                            filter=spec.filter,
                                                            org=spec.org))
@@ -373,6 +395,11 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                                     "job enfilé, les %d en vol vont à leur terme",
                                     fleet_id, len(en_vol))
                 except BackendError as e:
+                    if e.code == "not_the_holder":
+                        # On cesse sur-le-champ : les travaux en vol vont à leur
+                        # terme sans nous, rien de plus ne part.
+                        _plus_tenue(bilan, fleet_id, "battement", e)
+                        return bilan
                     # Une plateforme injoignable n'est pas un ordre d'arrêt : la
                     # confondre éteindrait la flotte à chaque bascule.
                     bilan.etat_muet += 1
@@ -519,10 +546,13 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                     try:
                         backend.accuser_arret(fleet_id)
                     except BackendError as e:
-                        bilan.etat_muet += 1
-                        logger.warning("accusé d'arrêt flotte #%s : %s — l'état "
-                                       "restera `stopping`, à corriger à la main",
-                                       fleet_id, e)
+                        if e.code == "not_the_holder":
+                            _plus_tenue(bilan, fleet_id, "accusé d'arrêt", e)
+                        else:
+                            bilan.etat_muet += 1
+                            logger.warning("accusé d'arrêt flotte #%s : %s — l'état "
+                                           "restera `stopping`, à corriger à la main",
+                                           fleet_id, e)
                 # ⚠️ CONCLURE sur l'aveuglement, pas seulement le journaliser.
                 # Chacun de ces ratés était déjà écrit au journal, un par un, et
                 # personne ne les a lus pendant huit vagues. Une ligne DE PLUS
@@ -670,7 +700,8 @@ _ARRETS_NORMAUX = ("file vide", "volume atteint", "budget atteint", "arrêt dema
 # ⚠️ Le `1` ne relance que parce que l'unité déclare `Restart=on-failure` : posé
 # le 21/09/2026 — jusque-là l'unité n'en déclarait aucun, et rien ne relançait,
 # quel que soit le code.
-_ARRETS_DEFINITIFS = ("cible introuvable", "campagne hors service")
+# `_PLUS_TENUE` (21/09/2026, oto-backend#1032) : un autre ordonnanceur la tient.
+_ARRETS_DEFINITIFS = ("cible introuvable", "campagne hors service", _PLUS_TENUE)
 
 
 def _sortir_sans_relance(motif: str) -> None:
@@ -691,17 +722,32 @@ def main() -> None:
             "        python -m oto_runner.fleet #<id>     (flotte DÉCLARÉE en base)\n"
             "        python -m oto_runner.fleet --declarer <flotte.yaml>   (rend l'id)\n"
             "        python -m oto_runner.fleet <flotte.yaml> #<id>   (REPREND #<id>)")
-    backend = Backend()
     if args[0] == "--declarer":
         # Le geste de `scripts/flotte.sh` : déclarer HORS de l'unité, et lui
         # passer l'identifiant — c'est ce qui fait qu'une relance REPREND.
         # L'identifiant seul sur la sortie standard ; le journal va sur l'erreur.
-        fid = declarer(load_spec(args[1]), backend)
+        fid = declarer(load_spec(args[1]), Backend())
         if fid is None:
             raise SystemExit("déclaration acceptée SANS identifiant rendu — "
                              "rien à passer à l'unité, on ne lance pas.")
         print(fid)
         return
+    # ⚠️ Le PRENEUR (oto-backend#1032) : l'identifiant que cet ordonnanceur joint
+    # à `take`, `beat` et `ack_stop`. `scripts/flotte.sh` le pose dans l'unité
+    # (`<machine>/<unité systemd>`) : STABLE à travers les relances — c'est ce qui
+    # fait reprendre la campagne — et DISTINCT d'une unité à l'autre. Pas de
+    # valeur par défaut : un identifiant inventé ici changerait d'une vie à
+    # l'autre (la relance buterait sur `held_by_other`) ou se partagerait entre
+    # deux ordonnanceurs (tous deux croiraient la tenir). Déclarer n'en a pas
+    # besoin : ce n'est pas un geste d'ordonnanceur.
+    preneur = os.environ.get("OTO_FLEET_HOLDER", "").strip()
+    if not preneur:
+        _sortir_sans_relance(
+            "OTO_FLEET_HOLDER absent : l'ordonnanceur ne sait pas dire qui il est, "
+            "et le backend refuse ses gestes sans preneur. Lance par "
+            "`scripts/flotte.sh`, qui le pose, ou exporte "
+            "OTO_FLEET_HOLDER=<machine>/<unité>.")
+    backend = Backend(preneur=preneur)
     arg = args[0]
     if arg.startswith("#"):
         # Piloté par la configuration DÉCLARÉE : la même que celle que le

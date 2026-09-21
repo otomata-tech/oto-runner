@@ -9,8 +9,8 @@ exécutions enfilées sur une campagne `draft` qu'`op=stop` ne sait pas arrêter
 Ce que ces tests exigent :
 
 1. **Un armement refusé est fatal**, et rien n'est enfilé.
-2. **La reprise reste permise** : `not_launchable` puis `not_takeable` sur une
-   campagne qui se LIT `running`.
+2. **La reprise reste permise** : `not_launchable` puis une prise ACCEPTÉE — le
+   backend reconnaît le même preneur (oto-backend#1032).
 3. **Une prise refusée hors reprise est fatale.**
 4. **Un `409 fleet_not_serving` à l'enfilement abandonne sur-le-champ** — pas
    dix tours plus tard sous le faux motif « backend indisponible ».
@@ -40,7 +40,8 @@ def _refus(status, code, texte):
 
 
 class _Lisible(FauxBackend):
-    """La campagne telle que `op=get` la sert — l'état que la reprise exige."""
+    """La campagne telle que `op=get` la sert — que la prise ne consulte PLUS :
+    depuis oto-backend#1032, le backend tranche (cf. `lectures`)."""
     statut_lu = "running"
 
     def lire_flotte(self, fleet_id):
@@ -72,11 +73,10 @@ def test_un_armement_refuse_ABANDONNE_avant_tout_enfilement():
 # ── ② la reprise d'un passage en cours reste permise ─────────────────────────
 
 class _DejaEnCours(_Lisible):
+    """Relancé : `launch` refusé (déjà `running`), `take` ACCEPTÉ — le backend
+    reconnaît le preneur qui la tient (la prise de la doublure réussit)."""
     def armer_flotte(self, fleet_id):
         raise _refus(409, "not_launchable", "ce passage est `running`")
-
-    def prendre_flotte(self, fleet_id):
-        raise _refus(409, "not_takeable", "ce passage est `running`")
 
 
 def test_not_launchable_sur_une_campagne_running_se_REPREND():
@@ -86,8 +86,9 @@ def test_not_launchable_sur_une_campagne_running_se_REPREND():
     bilan = _run(_spec(fleet_id=7), b)
     assert b.enfiles >= 1, "la reprise d'un passage en cours enfile normalement"
     assert set(b.rattachements) == {7}
-    assert getattr(b, "lectures", 0) >= 1, (
-        "la reprise est PROUVÉE par l'état lu, pas supposée sur le code du refus")
+    assert b.prises == [7], "la reprise passe par la prise, que le backend accepte"
+    assert not getattr(b, "lectures", 0), (
+        "la reprise ne se prouve plus par l'état lu : le backend sait qui la tient")
     assert bilan.etat_muet == 0
     assert bilan.arret.startswith("volume atteint")
 
@@ -95,7 +96,8 @@ def test_not_launchable_sur_une_campagne_running_se_REPREND():
 # ── ③ une prise refusée hors reprise est fatale ──────────────────────────────
 
 class _PriseRefuseeArretee(_DejaEnCours):
-    statut_lu = "stopped"
+    def prendre_flotte(self, fleet_id):
+        raise _refus(409, "not_takeable", "ce passage est `stopped`")
 
 
 def test_not_takeable_sur_une_campagne_qui_ne_tourne_pas_ABANDONNE():
@@ -103,7 +105,8 @@ def test_not_takeable_sur_une_campagne_qui_ne_tourne_pas_ABANDONNE():
     with pytest.raises(RuntimeError) as e:
         _run(_spec(fleet_id=7), b)
     assert b.enfiles == 0
-    assert "`stopped`" in str(e.value), "l'état lu est dit, pas deviné"
+    assert "`stopped`" in str(e.value), "l'état est dit par le serveur, en clair"
+    assert not getattr(b, "lectures", 0), "tout refus de prise est fatal, sans relecture"
 
 
 class _PriseInterdite(_Lisible):
@@ -182,8 +185,9 @@ def test_main_sort_sans_relance_sur_un_abandon_definitif(monkeypatch):
 
     def _sortie(run):
         monkeypatch.setattr(sys, "argv", ["fleet", "x.yaml"])
+        monkeypatch.setenv("OTO_FLEET_HOLDER", "banc/oto-fleet-test")
         monkeypatch.setattr(F, "load_spec", lambda p: _spec())
-        monkeypatch.setattr(F, "Backend", lambda: None)
+        monkeypatch.setattr(F, "Backend", lambda **kw: None)
         monkeypatch.setattr(F, "run_fleet", run)
         with pytest.raises(SystemExit) as e:
             F.main()

@@ -83,8 +83,9 @@ def test_l_unite_reprend_la_campagne_declaree_hors_d_elle():
 
 def _main(monkeypatch, argv, backend=None, run=None):
     monkeypatch.setattr(sys, "argv", ["fleet", *argv])
+    monkeypatch.setenv("OTO_FLEET_HOLDER", "banc/oto-fleet-test")
     monkeypatch.setattr(F, "load_spec", lambda p: _spec())
-    monkeypatch.setattr(F, "Backend", lambda: backend)
+    monkeypatch.setattr(F, "Backend", lambda **kw: backend)
     if run is not None:
         monkeypatch.setattr(F, "run_fleet", run)
     F.main()

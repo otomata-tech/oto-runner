@@ -257,8 +257,9 @@ def test_un_arret_anormal_sort_en_echec_pour_que_systemd_relance(monkeypatch):
 
     def _main_avec(arret):
         monkeypatch.setattr(sys, "argv", ["fleet", "x.yaml"])
+        monkeypatch.setenv("OTO_FLEET_HOLDER", "banc/oto-fleet-test")
         monkeypatch.setattr(F, "load_spec", lambda p: _spec())
-        monkeypatch.setattr(F, "Backend", lambda: None)
+        monkeypatch.setattr(F, "Backend", lambda **kw: None)
         monkeypatch.setattr(F, "run_fleet",
                             lambda spec, b: F.FleetBilan(arret=arret))
         return F.main
