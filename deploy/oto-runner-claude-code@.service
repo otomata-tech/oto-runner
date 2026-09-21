@@ -1,0 +1,73 @@
+# Le pool du moteur CLAUDE CODE — unité de RÉFÉRENCE, pas l'unité déployée.
+#
+# ⚠️ CE FICHIER NE DÉPLOIE RIEN. Les unités de la box sont écrites par
+# /opt/deploy/oto-runner.sh (forced-command, documenté dans otomata-tech/infra) :
+# ce dépôt ne les porte pas et ne peut pas les changer. Ce fichier dit ce que ce
+# moteur EXIGE de son unité, pour que qui tient la box l'applique et puisse
+# comparer. Tant qu'il n'est pas appliqué, les garanties ci-dessous ne tiennent pas.
+#
+# Pourquoi une unité à part de `oto-runner@{1,2,3}` : `OTO_RUNNER_PROVIDER` est un
+# réglage de PROCESSUS. Un worker sert un moteur, pas deux.
+
+[Unit]
+Description=oto-runner — moteur Claude Code (pool %i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/oto-runner
+
+# ── Qui exécute ──────────────────────────────────────────────────────────────
+# Un utilisateur DÉDIÉ, qui n'est pas celui des workers de la boucle maison : le
+# CLI tourne sous cet utilisateur-là, et tout ce qu'il pourrait lire se lit avec
+# ses droits à lui.
+User=oto-claude
+Group=oto-claude
+
+# ⚠️ systemd lit l'EnvironmentFile en tant que ROOT, avant de descendre sur
+# `User=`. Le fichier peut donc rester en 0600 root:root : le worker reçoit ses
+# variables, et le CLI fils n'a AUCUN droit de lecture sur le fichier lui-même.
+# C'était la première remarque de la revue du 18/09 — « le CLI peut lire
+# /opt/oto-runner/.env ». Avec ceci, il ne le peut plus.
+EnvironmentFile=/opt/oto-runner/.env
+Environment=OTO_RUNNER_PROVIDER=claude-code
+
+# ── Ce qu'il ne voit pas ─────────────────────────────────────────────────────
+ProtectHome=yes
+PrivateTmp=yes
+ProtectSystem=strict
+# Le seul chemin que le worker ÉCRIT : ses journaux de passage.
+ReadWritePaths=/opt/oto-runner/passages
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+LockPersonality=yes
+
+# ⚠️ Ce que l'unité NE peut PAS isoler : les journaux des AUTRES orgs servies par
+# ce même pool. C'est le worker lui-même qui les écrit, sous le même utilisateur —
+# aucun réglage d'unité ne sépare deux travaux d'un même processus. Ce qui tient
+# cette garantie-là est ailleurs : la liste d'outils vide (le CLI n'a ni shell, ni
+# lecture de fichiers, ni web), le CLI épinglé, et un HOME/CLAUDE_CONFIG_DIR neuf
+# par travail, effacé avec lui. Un pool par org reste la seule séparation DURE.
+
+# ── L'arrêt ──────────────────────────────────────────────────────────────────
+# ⚠️ `KillMode=mixed` : SIGTERM au seul worker, pas à tout le groupe de contrôle.
+# Sous le défaut (`control-group`), un `systemctl restart` tue AUSSI le `claude`
+# fils, et le travail finit sur « Claude Code s'est terminé sans message de
+# résultat » — un symptôme qui n'accuse pas sa cause. Le worker, lui, sait sortir :
+# son handler lève un drapeau, finit le travail en cours, puis rend la main.
+KillMode=mixed
+# Au-dessus de la deadline murale du moteur (OTO_RUNNER_CLAUDE_CODE_WALL_S, 900 s
+# par défaut), marge comprise. ⚠️ Relever l'une exige de relever l'autre.
+TimeoutStopSec=16min
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

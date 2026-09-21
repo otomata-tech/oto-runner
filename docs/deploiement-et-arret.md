@@ -58,8 +58,16 @@ sortie propre. C'est le seul témoin — son absence est le signal.
 
 ## Le moteur Claude Code (`OTO_RUNNER_PROVIDER=claude-code`)
 
-Un agent qui sert ce moteur fait tourner Claude Code (sous-agents, compaction, jusqu'à
-400 tours) derrière la même session MCP que les autres. Ce qui diffère au déploiement :
+Un agent qui sert ce moteur fait tourner Claude Code — **délégation à des sous-agents
+et compaction** — derrière la même session MCP que les autres.
+
+⚠️ Pas « 400 tours ». `PLAFOND_TOURS = 400` est un toit ; ce qui est servi est le
+`max_steps` du travail (**24** par défaut), et à 900 s de deadline murale c'est le mur
+qui coupe bien avant, en `DeadlineExceeded`. Un travail mort ainsi est rendu en échec :
+**c'est le serveur qui décide de le rejouer** (`attempts`, oto-backend `db/runner_jobs`),
+et un rejeu repart de zéro — donc payé deux fois. Le runner n'a pas la main dessus.
+
+Ce qui diffère au déploiement :
 
 - **L'extra s'installe** : `pip install -e .[claude-code]`. La ligne de déploiement
   (`pip install -e .`) ne l'amène PAS ; sans lui, le premier travail échoue en nommant
@@ -69,13 +77,70 @@ Un agent qui sert ce moteur fait tourner Claude Code (sous-agents, compaction, j
   qui ne contient AUCUN binaire : vérifier `uname -m` et la glibc de la box avant.
 - **Un pool à part** : `OTO_RUNNER_PROVIDER` est par processus, donc de nouvelles unités à
   côté de `oto-runner@{1,2,3}`, déclarées au script de déploiement.
-- **Qui paie** : un déroulé à sous-agents et 400 tours coûte un ordre de grandeur de plus
+- **Qui paie** : un déroulé à sous-agents coûte un ordre de grandeur de plus
   qu'une boucle de 24 tours (un run de sourcing mesuré sur GitHub : 5,82 $). Un
   déclencheur webhook ne porte pas de `max_tokens` : le budget en vol est alors inerte. Sur
   la clé de la plateforme, préférer `OTO_RUNNER_ORG_KEYS_ONLY=1` pour ce pool.
 - **La chaîne de nombres tient** : deadline murale `OTO_RUNNER_CLAUDE_CODE_WALL_S` (900 s
   par défaut) < patience de systemd (16 min) ; le bail est prolongé pendant le déroulé.
   Relever la deadline exige de relever `TimeoutStopSec`.
+
+### Ce que l'unité doit porter — et que ce dépôt ne déploie pas
+
+`deploy/oto-runner-claude-code@.service` est une unité de **référence**. Les unités de
+la box sont écrites par `/opt/deploy/oto-runner.sh` (documenté dans `otomata-tech/infra`) :
+ce dépôt ne les porte pas. **Tant que l'unité n'est pas reprise, rien de cette section
+ne tient.** Ce qu'elle exige :
+
+| Réglage | Pourquoi |
+|---|---|
+| `User=oto-claude` dédié | le CLI tourne sous cet utilisateur, pas sous celui des workers de la boucle maison |
+| `EnvironmentFile=` en 0600 root:root | systemd le lit **en root, avant** de descendre sur `User=` : le worker reçoit ses variables, le CLI fils n'a aucun droit de lecture sur `.env` |
+| `ProtectHome`, `PrivateTmp`, `ProtectSystem=strict` | avec `ReadWritePaths=/opt/oto-runner/passages`, le seul chemin réellement écrit |
+| `KillMode=mixed` | sous le défaut, un `systemctl restart` tue le `claude` fils et le travail meurt sans conclure |
+| `TimeoutStopSec=16min` | au-dessus de la deadline murale, marge comprise |
+
+⚠️ **Ce qu'aucun réglage d'unité ne donne** : la séparation entre deux orgs servies par
+le **même** pool. Les journaux de passage sont écrits par le worker lui-même, sous un
+seul utilisateur. Ce qui tient cette garantie est ailleurs — liste d'outils vide, CLI
+épinglé, `HOME`/`CLAUDE_CONFIG_DIR` neufs par travail — et **un pool par org reste la
+seule séparation dure**.
+
+### L'environnement du sous-processus : liste BLANCHE
+
+Le SDK fusionne tout `os.environ` sous `options.env`, et `options.env` ne peut pas
+*retirer* une variable — seulement l'écraser. Une liste noire laissait donc filer au CLI
+toute variable **future** du `.env`. Le moteur inverse la règle : tout ce qui n'est pas
+nommé dans `_ENV_TRANSMIS` part **vide**, et `HOME` pointe sur le répertoire du travail.
+
+⚠️ Conséquence à vérifier au premier essai en bac à sable : le CLI démarre sous un
+environnement **minimal**. Si un binaire natif exige une variable qu'on n'a pas nommée,
+ça se voit là, pas en production.
+
+### Les variables que ce moteur lit
+
+| Variable | Défaut | Ce qu'elle décide |
+|---|---|---|
+| `OTO_RUNNER_PROVIDER=claude-code` | — | sert ce moteur (réglage de **processus** : un pool à part) |
+| `OTO_RUNNER_CLAUDE_CODE_WALL_S` | `900` | deadline murale d'un déroulé ; doit rester sous `TimeoutStopSec` |
+| `OTO_RUNNER_CLAUDE_CODE_MAX_USD` | *non posée* | borne de dépense de la **session**, sous-agents compris. ⚠️ `max_turns` ne borne QUE le fil principal : sans cette borne, un déroulé à sous-agents n'a pas de plafond de coût |
+| `OTO_RUNNER_MAX_TOOL_OUTPUT` | cf. `agent_runtime` | plafond de sortie d'outil, servi aussi au CLI |
+| `OTO_RUNNER_ORG_KEYS_ONLY=1` | — | recommandé sur ce pool : chaque org paie sa propre clé |
+
+### La liste de contrôle, avant d'armer un pool
+
+1. `pip install -e .[claude-code]` **sur la box** — la ligne du script serveur est
+   `pip install -e .` et elle n'amène PAS l'extra (⚠️ le script vit dans
+   `/opt/deploy/oto-runner.sh`, **pas** dans `.github/workflows/deploy.yml`, dont
+   l'en-tête rappelle que la commande envoyée par ssh est ignorée).
+2. `uname -m` et la glibc : la roue est `manylinux_2_17` x86_64/aarch64, binaire natif
+   ~230 Mo, pas de Node. Ailleurs, pip retombe sur la source, qui ne contient **aucun**
+   binaire.
+3. `uv lock` pour que `uv.lock` porte l'extra épinglé (`claude-agent-sdk==0.2.153`).
+4. Unités de pool déclarées dans `scripts/flotte.sh` — il nomme `oto-runner@{1,2,3}` en
+   dur (lignes 264, 429, 475, 498, 520) et ne connaît pas encore un second pool.
+5. `OTO_RUNNER_CLAUDE_CODE_MAX_USD` posée, sinon la session n'a pas de borne de coût.
+6. Un essai sur une org de **bac à sable**, clé réelle, avant toute org cliente.
 
 ## Lancer une flotte : en unité, JAMAIS à la main
 

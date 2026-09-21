@@ -8,7 +8,13 @@ dependencies = ["requests>=2.31", "pyyaml>=6.0"]
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.40"]
-claude-code = ["claude-agent-sdk>=0.2.153"]
+# ⚠️ ÉPINGLÉ À L'ÉGAL, pas au minimum. La roue embarque le CLI Claude Code, et
+# c'est le CLI qui décide de la liste d'outils réellement servie : la garantie
+# « aucun outil intégré hors la délégation » a été MESURÉE sur un couple précis,
+# SDK 0.2.153 ↔ CLI 2.1.273 (`claude_agent_sdk/_cli_version.py`). Un `>=` laissait
+# un `pip install` de routine changer le CLI sous la garantie, sans rien dire.
+# Relever la version = remesurer la liste d'outils, puis réécrire ce commentaire.
+claude-code = ["claude-agent-sdk==0.2.153"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
