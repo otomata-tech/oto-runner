@@ -121,9 +121,18 @@ _ENV_TRANSMIS = frozenset({
 #: `LC_*` en entier : ce sont des réglages de locale, jamais des secrets.
 _PREFIXES_TRANSMIS = ("LC_",)
 
+#: Ce que le SDK pose LUI-MÊME autour de notre dictionnaire : on n'y touche pas.
+#: Les effacer donnerait à sa valeur à lui un `""` venu de nous — `CLAUDE_CODE_ENTRYPOINT`
+#: est posé AVANT `options.env` dans la fusion, donc notre vide l'écraserait ; et le SDK
+#: retire `CLAUDECODE` exprès (son issue #573), le réintroduire vide le ferait revenir.
+_ENV_DU_SDK = frozenset({"CLAUDE_CODE_ENTRYPOINT", "CLAUDE_AGENT_SDK_VERSION", "CLAUDECODE"})
+
 
 def _transmis(nom: str) -> bool:
-    return nom in _ENV_TRANSMIS or nom.startswith(_PREFIXES_TRANSMIS)
+    """Vrai si la variable passe telle quelle (ou appartient au SDK) — faux si elle
+    doit partir vide."""
+    return (nom in _ENV_TRANSMIS or nom in _ENV_DU_SDK
+            or nom.startswith(_PREFIXES_TRANSMIS))
 
 
 def model() -> str:

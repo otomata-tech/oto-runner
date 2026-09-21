@@ -699,3 +699,13 @@ def test_les_jetons_d_un_travail_MORT_arrivent_jusqu_au_serveur(monkeypatch, tmp
     assert rendu["steps"] == 7 and rendu["model"] == "claude-sonnet-5"
     assert rendu["stopped"] == "DeadlineExceeded"
     assert ("complete", False, "r-NEUF") in backend.appels
+
+
+def test_ce_que_le_SDK_pose_lui_meme_n_est_pas_efface(monkeypatch):
+    """`CLAUDE_CODE_ENTRYPOINT` est posé AVANT `options.env` dans la fusion du SDK :
+    l'effacer y mettrait notre vide. `CLAUDECODE`, le SDK le retire exprès."""
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "cli")
+    monkeypatch.setenv("CLAUDECODE", "1")
+    _, sdk, _ = _lancer(monkeypatch, _simple)
+    assert "CLAUDE_CODE_ENTRYPOINT" not in sdk.options["env"]
+    assert "CLAUDECODE" not in sdk.options["env"]
