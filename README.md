@@ -86,6 +86,8 @@ OTO_RUNNER_MAX_TOOL_OUTPUT=120000    # plafond, en CARACTÈRES, d'une sortie d'o
 OTO_RUNNER_PARALLEL_TOOLS=1          # 1 (défaut) = le modèle groupe ses appels d'outils dans un
                                      # tour ; 0 = UN SEUL par tour (`parallel_tool_calls: false`)
 OTO_RUNNER_TEMPERATURE=0             # DERNIER RECOURS seulement : la campagne prime (cf. ci-dessous)
+OTO_FLEET_HOLDER=<machine>/<unité>   # ORDONNANCEUR de flotte seulement : son preneur, posé par
+                                     # `scripts/flotte.sh` ; exigé (cf. « Qui tient une campagne »)
 ```
 
 ⚠️ **La température se déclare sur la CAMPAGNE, pas sur le worker.** Elle est un
@@ -381,18 +383,22 @@ travail datastore et s'arrête sur une **borne** (déclaration complète :
 de la flotte : il est apposé à chaque job (`fleet`), et c'est par lui qu'on
 retrouve les jobs d'une campagne — plus par « id ≥ N ».
 
-Bornes **normales** (exit 0) : file vide, volume atteint, budget atteint. Toute
-autre borne est une **panne** — exit 1, pour que systemd relance la campagne
-quand la panne passe : échecs consécutifs, backend indisponible, outil critique
-en échec, faux départs en série, **rendement effondré**.
+Bornes **normales** (exit 0) : file vide, volume atteint, budget atteint,
+arrêt demandé (`op=stop` obéi). Toute autre borne est une **panne** — exit 1 :
+échecs consécutifs, backend indisponible, outil critique en échec, budget non
+suivable. L'unité que pose `scripts/flotte.sh` la **relance** seule
+(`Restart=on-failure`, 10 min après, au plus 6 démarrages en 6 h) et la relance
+**reprend la même campagne** : le script la déclare avant de poser l'unité
+(`python -m oto_runner.fleet --declarer <flotte.yaml>` rend l'id) et l'unité
+tourne `python -m oto_runner.fleet <flotte.yaml> '#<id>'`.
 
 **Abandon définitif** (exit 3) : la campagne est arrêtée, hors service
 (`409 fleet_not_serving`), introuvable (`404`), ou le serveur a refusé
 l'armement ou la prise pour une cause qu'il nomme. Relancer referait le même
 refus : l'unité déclare `RestartPreventExitStatus=3` et ne relance pas. Restent
-transitoires (exit 1) : transport, 5xx, `no_runner_armed`. ⚠️ L'unité que pose
-`scripts/flotte.sh` ne déclare aujourd'hui **aucun** `Restart=` : rien ne
-relance, quel que soit le code.
+transitoires (exit 1) : transport, 5xx, `no_runner_armed`. Ce qui est relancé,
+ce qui ne l'est pas, la limite et l'arrêt propre :
+`docs/deploiement-et-arret.md`.
 
 Le plafond par LIGNE borne le prix d'un passage là où il dérape vraiment — une
 ligne seule a coûté **65 571 jetons** le 01/09 :
@@ -587,8 +593,8 @@ vagues. Une ligne de journal de plus n'y aurait rien changé.
 refus arrête le passage **avant tout enfilement**. Tolérés, ils laissaient partir
 des travaux sur une campagne restée `draft`, qu'`op=stop` ne sait pas arrêter.
 Seule la **reprise** se tolère : `launch` refusé `not_launchable` (campagne déjà
-armée ou en cours), puis `take` refusé `not_takeable` sur une campagne que
-`op=get` **lit** `running`. À l'enfilement, un `409 fleet_not_serving` abandonne
+armée ou en cours), puis `take` **accepté** parce que la campagne est tenue par le
+même preneur (ci-dessous). À l'enfilement, un `409 fleet_not_serving` abandonne
 sur-le-champ, comme un `404` : retenter ne réarmera pas la campagne.
 
 D'où `etat_muet` dans le bilan : **combien de fois le passage n'a pas pu dire où
@@ -643,6 +649,28 @@ vide l'agent en fait **deux** — il réserve, reçoit `row: null`, relâche, pu
 conclut proprement. Le **bilan** applique la même règle que la borne, sur la
 même liste importée : les deux parlent du même job, ils ne peuvent pas se
 contredire.
+
+### Qui tient une campagne : le preneur (oto-backend#1032)
+
+Chaque geste d'ordonnanceur — `take`, `beat`, `ack_stop` — porte `taken_by`,
+l'identifiant que l'ordonnanceur **déclare** : `OTO_FLEET_HOLDER`, posé par
+`scripts/flotte.sh` à `<machine>/<unité systemd>` (ex.
+`oto-platform/oto-fleet-vague3`). Stable à travers les relances de l'unité,
+distinct d'une unité à l'autre. `python -m oto_runner.fleet` **refuse de démarrer**
+sans lui (exit 3) ; `--declarer` n'en a pas besoin.
+
+| réponse du backend | ce que fait l'ordonnanceur |
+|---|---|
+| `take` 200 sur une campagne `running` qu'il tient déjà | **reprise** |
+| `take` `409 held_by_other` | abandon définitif (exit 3), rien d'enfilé : un autre ordonnanceur tient cette campagne |
+| `beat` ou `ack_stop` `409 not_the_holder` | cesse de la conduire, abandon définitif (exit 3) |
+
+L'ancienne tolérance — `take` refusé `not_takeable` sur une campagne lue `running`
+= reprise — a disparu : elle reprenait aussi la campagne d'un autre ordonnanceur
+**vivant**. Un preneur mort se remplace par `op=stop` puis `op=launch` (le
+réarmement libère la campagne). ⚠️ **Ordre de déploiement** (migration backend,
+backend, puis runner ; aucun ordonnanceur de l'ancienne version au tag de prod du
+backend) : `docs/deploiement-et-arret.md`.
 
 ### Le bilan de la campagne
 

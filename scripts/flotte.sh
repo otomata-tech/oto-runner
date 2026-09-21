@@ -450,13 +450,59 @@ PYCRAN
   echo "   ⚠️ à DÉPOSER dans le dossier partagé de la mission avec son empreinte :"
   echo "      c'est là, et seulement là, qu'un instantané est un fait."
 
-  # RestartPreventExitStatus=3 : un ABANDON DÉFINITIF de l'ordonnanceur
-  # (`fleet.SORTIE_ABANDON_DEFINITIF`) ne se relance jamais — relancer referait
-  # le même refus. Un test tient la valeur alignée sur le code.
+  # ⚠️ LA CAMPAGNE SE DÉCLARE ICI, HORS DE L'UNITÉ. Une unité relancée par
+  # systemd rejoue sa ligne de commande à l'identique : si cette commande
+  # déclarait, chaque relance ouvrirait une campagne NEUVE — l'ancienne laissée
+  # `running` sans ordonnanceur, la borne de dépense repartie de zéro. L'unité
+  # reçoit donc l'identifiant, et une relance REPREND (`take` d'une campagne
+  # `running` par le MÊME preneur = reprise, cf. `fleet.run_fleet`). Déclarer est
+  # un geste de compte : le jeton est celui de `.env.fleet`, chargé plus haut.
+  _fid=$(cd "$RACINE" && "$PY" -m oto_runner.fleet --declarer "$yaml") || {
+    echo "ABANDON : campagne non déclarée — je retire les gardes que je venais d'armer."
+    systemctl stop "$GARDE.timer" "$PROFILS.timer" 2>/dev/null; exit 1; }
+  case "$_fid" in
+    ''|*[!0-9]*)
+      echo "ABANDON : identifiant de campagne illisible (« $_fid ») — gardes retirées."
+      systemctl stop "$GARDE.timer" "$PROFILS.timer" 2>/dev/null; exit 1 ;;
+  esac
+  echo "campagne déclarée : #$_fid (une relance de l'unité la REPREND)"
+
+  # LA RELANCE AUTOMATIQUE — l'ordonnanceur est autonome (décision du 21/09/2026).
+  # · Restart=on-failure : une PANNE (exit 1 — backend injoignable, 5xx, échecs
+  #   consécutifs, outil critique en panne) se relance. Une fin normale (exit 0,
+  #   dont l'arrêt demandé par `op=stop`) et un `systemctl stop` (`arreter`, les
+  #   gardes) ne se relancent pas — l'arrêt annule aussi une relance en attente.
+  # · RestartPreventExitStatus=3 : un ABANDON DÉFINITIF
+  #   (`fleet.SORTIE_ABANDON_DEFINITIF`) ne se relance jamais — relancer referait
+  #   le même refus.
+  # · RestartSec=10min : au-delà de la tolérance interne du driver (~3-4 min de
+  #   panne dense) et du bail d'une ligne (10 min). Les travaux en vol de la vie
+  #   précédente, que l'ordonnanceur relancé ne suit plus, ont fini avant qu'il
+  #   ré-enfile : la concurrence n'est pas doublée.
+  # · StartLimitBurst=6 sur StartLimitIntervalSec=6h : au plus 6 démarrages en
+  #   6 h, le premier compris — donc 5 relances, soit au moins une heure de panne
+  #   continue couverte. Au-delà l'unité reste `failed` (« Start request repeated
+  #   too quickly ») et un humain regarde. L'intervalle doit dépasser
+  #   5 × RestartSec, sinon la limite ne mord jamais.
+  # ⚠️ Ces propriétés sont posées À LA CRÉATION de l'unité : une flotte lancée
+  # par une version antérieure de ce script garde les siennes (aucune relance).
+  # Des tests tiennent ces valeurs et leur cohérence avec le code
+  # (`tests/test_relance_ordonnanceur.py`, `tests/test_armement_fatal.py`).
+  #
+  # LE PRENEUR (oto-backend#1032) : `OTO_FLEET_HOLDER`, l'identifiant que
+  # l'ordonnanceur joint à `take`/`beat`/`ack_stop` — `<machine>/<unité>`. Figé
+  # dans l'unité à sa création, il est le MÊME à chaque relance (c'est ce qui lui
+  # fait reprendre SA campagne) et distinct d'une unité à l'autre. Il suit
+  # `$FLOTTE`, le nom réellement posé par `--unit` ; un test tient les deux
+  # ensemble. Sans lui, l'ordonnanceur refuse de démarrer.
   systemd-run --unit="$FLOTTE" --property=EnvironmentFile="$RACINE/.env" \
+    --property=Restart=on-failure --property=RestartSec=10min \
+    --property=StartLimitIntervalSec=6h --property=StartLimitBurst=6 \
     --property=RestartPreventExitStatus=3 \
-    --working-directory="$RACINE" "$PY" -m oto_runner.fleet "$yaml" >/dev/null || {
+    --setenv=OTO_FLEET_HOLDER="$(hostname)/$FLOTTE" \
+    --working-directory="$RACINE" "$PY" -m oto_runner.fleet "$yaml" "#$_fid" >/dev/null || {
       echo "ABANDON : flotte non lancée — je retire la garde que je venais d'armer."
+      echo "   la campagne #$_fid reste déclarée, sans rien d'enfilé."
       systemctl stop "$GARDE.timer" 2>/dev/null; exit 1; }
   sleep 2
   echo "flotte $FLOTTE : $(systemctl is-active "$FLOTTE")"
