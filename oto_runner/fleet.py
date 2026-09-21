@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
 from . import journal
@@ -188,6 +188,60 @@ def _abandon(geste: str, fleet_id: int, e: BackendError, *,
         "été lancé.")
 
 
+def declarer(spec: FleetSpec, backend: Backend) -> Optional[int]:
+    """Déclare la campagne EN BASE et rend son identifiant.
+
+    ⚠️ Séparé de `run_fleet` (21/09/2026) pour que `scripts/flotte.sh` déclare
+    AVANT de poser l'unité et lui passe l'identifiant. Une unité relancée par
+    systemd rejoue sa ligne de commande à l'identique : une commande qui
+    déclarait ouvrait une campagne NEUVE à chaque relance — l'ancienne laissée
+    `running` sans ordonnanceur, la borne de dépense repartie de zéro. Et le
+    YAML ne peut pas porter l'identifiant (`fleet_id` est non déclarable)."""
+    if spec.org is not None:
+        backend.org = spec.org
+    try:
+        f = backend.declarer_flotte(
+            label=spec.name, procedure=spec.procedure, tools=list(spec.tools),
+            namespace=spec.namespace, row_filter=spec.filter or None,
+            project_id=spec.project, input=spec.input,
+            max_steps=spec.max_steps, workers=spec.concurrency,
+            max_rows=spec.volume, max_tokens=spec.budget_tokens,
+            max_tokens_per_row=spec.max_tokens_per_row,
+            temperature=spec.temperature,
+            # L'org DÉCLARÉE, celle-là même que la session pose déjà sur les
+            # appels d'outils. Sans elle, la campagne naît ailleurs que là
+            # où sa déclaration la met, et ses travaux cherchent leur
+            # procédure au mauvais endroit.
+            org=spec.org)
+        fleet_id = f.get("id")
+        logger.info("flotte déclarée en base : id=%s — relancer `python -m oto_runner.fleet "
+                    "<déclaration> '#%s'` pour REPRENDRE ce passage",
+                    fleet_id, fleet_id)
+    except BackendError as e:
+        # ⚠️ REFUS, pas repli. Ce chemin dégradait : le passage partait
+        # « sans rattachement », ses travaux tournaient, dépensaient, et
+        # restaient hors de portée d'`op=stop` — personne ne pouvait les
+        # arrêter avant qu'ils finissent d'eux-mêmes. Le 09/09/2026, cinq
+        # d'entre eux ont abouti et la ligne de journal n'a été lue qu'au
+        # bilan.
+        #
+        # La règle de la maison est explicite et je ne l'appliquais pas :
+        # « pas de fallback qui masque un problème — lever une erreur ».
+        # Un passage qu'on ne peut pas arrêter est précisément le problème
+        # que le repli masquait, sous couvert de ne rien bloquer.
+        #
+        # L'erreur du SERVEUR passe en clair : c'est elle qui dit quoi
+        # corriger, et la reformuler ferait perdre le seul texte utile.
+        raise RuntimeError(
+            "flotte non déclarée, passage ABANDONNÉ avant d'enfiler quoi que "
+            f"ce soit — {e}\n"
+            "Sans déclaration, les travaux seraient invisibles à `op=state` "
+            "et IMPOSSIBLES à arrêter avec `op=stop`. Corrige la déclaration "
+            "(ou le serveur) et relance : rien n'a été lancé."
+        ) from e
+    return fleet_id
+
+
 def run_fleet(spec: FleetSpec, backend: Backend, *,
               sleep: Callable[[float], None] = time.sleep,
               clock: Callable[[], float] = time.monotonic,
@@ -217,46 +271,7 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
     plafond_echecs = spec.max_consecutive_failures or _MAX_FAILED_CONSECUTIFS
     fleet_id = spec.fleet_id
     if fleet_id is None:
-        try:
-            f = backend.declarer_flotte(
-                label=spec.name, procedure=spec.procedure, tools=list(spec.tools),
-                namespace=spec.namespace, row_filter=spec.filter or None,
-                project_id=spec.project, input=spec.input,
-                max_steps=spec.max_steps, workers=spec.concurrency,
-                max_rows=spec.volume, max_tokens=spec.budget_tokens,
-                max_tokens_per_row=spec.max_tokens_per_row,
-                temperature=spec.temperature,
-                # L'org DÉCLARÉE, celle-là même que la session pose déjà sur les
-                # appels d'outils. Sans elle, la campagne naît ailleurs que là
-                # où sa déclaration la met, et ses travaux cherchent leur
-                # procédure au mauvais endroit.
-                org=spec.org)
-            fleet_id = f.get("id")
-            logger.info("flotte déclarée en base : id=%s — remettre `fleet_id: %s` "
-                        "dans la déclaration pour REPRENDRE ce passage",
-                        fleet_id, fleet_id)
-        except BackendError as e:
-            # ⚠️ REFUS, pas repli. Ce chemin dégradait : le passage partait
-            # « sans rattachement », ses travaux tournaient, dépensaient, et
-            # restaient hors de portée d'`op=stop` — personne ne pouvait les
-            # arrêter avant qu'ils finissent d'eux-mêmes. Le 09/09/2026, cinq
-            # d'entre eux ont abouti et la ligne de journal n'a été lue qu'au
-            # bilan.
-            #
-            # La règle de la maison est explicite et je ne l'appliquais pas :
-            # « pas de fallback qui masque un problème — lever une erreur ».
-            # Un passage qu'on ne peut pas arrêter est précisément le problème
-            # que le repli masquait, sous couvert de ne rien bloquer.
-            #
-            # L'erreur du SERVEUR passe en clair : c'est elle qui dit quoi
-            # corriger, et la reformuler ferait perdre le seul texte utile.
-            raise RuntimeError(
-                "flotte non déclarée, passage ABANDONNÉ avant d'enfiler quoi que "
-                f"ce soit — {e}\n"
-                "Sans déclaration, les travaux seraient invisibles à `op=state` "
-                "et IMPOSSIBLES à arrêter avec `op=stop`. Corrige la déclaration "
-                "(ou le serveur) et relance : rien n'a été lancé."
-            ) from e
+        fleet_id = declarer(spec, backend)
     # ⚠️ PRENDRE la flotte : `armed` → `running`. C'est l'ordonnanceur qui pose ce
     # FAIT, jamais l'opérateur — `armed` veut dire « on a demandé », `running`
     # veut dire « quelqu'un l'a prise et donne signe ». Un refus n'est pas une
@@ -637,20 +652,24 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                      arret=bilan.arret or "interrompu")
 
 
-# Les motifs d'arrêt NORMAUX — la campagne a fini son travail ou sa borne
-# planifiée. Tout AUTRE motif (échecs consécutifs, backend indisponible) est une
-# PANNE : le process sort en échec pour que systemd (Restart=on-failure +
-# RestartSec long) relance la campagne tout seul quand la panne passe — vécu le
-# 20/08 : un 402 Mistral (crédit épuisé) a arrêté proprement la flotte à 604
-# fiches, et 26 h ont passé avant qu'un humain ne la relance. Le coût d'une
-# relance sous panne persistante est quasi nul (les jobs 402 ne consomment pas).
-_ARRETS_NORMAUX = ("file vide", "volume atteint", "budget atteint")
+# Les motifs d'arrêt NORMAUX — la campagne a fini son travail, atteint sa borne
+# planifiée, ou obéi à un arrêt DEMANDÉ (`op=stop`, accusé par `ack_stop`) :
+# exit 0, l'unité ne relance pas. Tout AUTRE motif (échecs consécutifs, backend
+# indisponible) est une PANNE : le process sort en échec, et l'unité que pose
+# `scripts/flotte.sh` (Restart=on-failure, RestartSec=10min, au plus 6 démarrages
+# en 6 h) relance la campagne quand la panne passe — vécu le 20/08 : un 402
+# Mistral (crédit épuisé) a arrêté proprement la flotte à 604 fiches, et 26 h ont
+# passé avant qu'un humain ne la relance.
+# ⚠️ « arrêt demandé » n'y figurait pas (21/09/2026) : un `op=stop` obéi sortait
+# en panne, et une unité qui relance aurait redémarré la campagne qu'on venait
+# d'arrêter — pour buter sur `stopped` et sortir en abandon définitif.
+_ARRETS_NORMAUX = ("file vide", "volume atteint", "budget atteint", "arrêt demandé")
 # Les motifs d'arrêt DÉFINITIFS — le serveur a répondu que la cible n'existe pas
 # ou ne sert pas : relancer referait le même refus. Sortie en
 # `SORTIE_ABANDON_DEFINITIF`, que l'unité ne relance pas.
-# ⚠️ Constaté le 21/09/2026 : l'unité transiente que pose `scripts/flotte.sh` ne
-# déclare AUCUN `Restart=` — rien ne relance aujourd'hui, quel que soit le code.
-# Le `1` « pour que systemd relance » ne vaut que pour une unité qui le déclare.
+# ⚠️ Le `1` ne relance que parce que l'unité déclare `Restart=on-failure` : posé
+# le 21/09/2026 — jusque-là l'unité n'en déclarait aucun, et rien ne relançait,
+# quel que soit le code.
 _ARRETS_DEFINITIFS = ("cible introuvable", "campagne hors service")
 
 
@@ -664,12 +683,26 @@ def _sortir_sans_relance(motif: str) -> None:
 def main() -> None:
     import sys
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    if len(sys.argv) != 2:
+    args = sys.argv[1:]
+    if not (len(args) == 1 or (len(args) == 2 and not args[0].startswith("#")
+                               and (args[0] == "--declarer" or args[1].startswith("#")))):
         raise SystemExit(
             "usage : python -m oto_runner.fleet <flotte.yaml>\n"
-            "        python -m oto_runner.fleet #<id>     (flotte DÉCLARÉE en base)")
-    arg = sys.argv[1]
+            "        python -m oto_runner.fleet #<id>     (flotte DÉCLARÉE en base)\n"
+            "        python -m oto_runner.fleet --declarer <flotte.yaml>   (rend l'id)\n"
+            "        python -m oto_runner.fleet <flotte.yaml> #<id>   (REPREND #<id>)")
     backend = Backend()
+    if args[0] == "--declarer":
+        # Le geste de `scripts/flotte.sh` : déclarer HORS de l'unité, et lui
+        # passer l'identifiant — c'est ce qui fait qu'une relance REPREND.
+        # L'identifiant seul sur la sortie standard ; le journal va sur l'erreur.
+        fid = declarer(load_spec(args[1]), backend)
+        if fid is None:
+            raise SystemExit("déclaration acceptée SANS identifiant rendu — "
+                             "rien à passer à l'unité, on ne lance pas.")
+        print(fid)
+        return
+    arg = args[0]
     if arg.startswith("#"):
         # Piloté par la configuration DÉCLARÉE : la même que celle que le
         # dashboard affiche et qu'un agent peut lire. Le fichier YAML reste un
@@ -678,6 +711,13 @@ def main() -> None:
         logger.info("flotte #%s chargée depuis la base : %s", arg[1:], spec.name)
     else:
         spec = load_spec(arg)
+        if len(args) == 2:
+            # La déclaration LOCALE (rampe, outils critiques, cadence du bilan…)
+            # sur la campagne DÉJÀ déclarée : la forme que pose l'unité, pour
+            # qu'une relance reprenne au lieu de redéclarer.
+            spec = replace(spec, fleet_id=int(args[1][1:]))
+            logger.info("flotte #%s : REPRISE avec la déclaration %s",
+                        spec.fleet_id, arg)
     try:
         bilan = run_fleet(spec, backend)
     except AbandonDefinitif as e:

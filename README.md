@@ -381,18 +381,22 @@ travail datastore et s'arrête sur une **borne** (déclaration complète :
 de la flotte : il est apposé à chaque job (`fleet`), et c'est par lui qu'on
 retrouve les jobs d'une campagne — plus par « id ≥ N ».
 
-Bornes **normales** (exit 0) : file vide, volume atteint, budget atteint. Toute
-autre borne est une **panne** — exit 1, pour que systemd relance la campagne
-quand la panne passe : échecs consécutifs, backend indisponible, outil critique
-en échec, faux départs en série, **rendement effondré**.
+Bornes **normales** (exit 0) : file vide, volume atteint, budget atteint,
+arrêt demandé (`op=stop` obéi). Toute autre borne est une **panne** — exit 1 :
+échecs consécutifs, backend indisponible, outil critique en échec, budget non
+suivable. L'unité que pose `scripts/flotte.sh` la **relance** seule
+(`Restart=on-failure`, 10 min après, au plus 6 démarrages en 6 h) et la relance
+**reprend la même campagne** : le script la déclare avant de poser l'unité
+(`python -m oto_runner.fleet --declarer <flotte.yaml>` rend l'id) et l'unité
+tourne `python -m oto_runner.fleet <flotte.yaml> '#<id>'`.
 
 **Abandon définitif** (exit 3) : la campagne est arrêtée, hors service
 (`409 fleet_not_serving`), introuvable (`404`), ou le serveur a refusé
 l'armement ou la prise pour une cause qu'il nomme. Relancer referait le même
 refus : l'unité déclare `RestartPreventExitStatus=3` et ne relance pas. Restent
-transitoires (exit 1) : transport, 5xx, `no_runner_armed`. ⚠️ L'unité que pose
-`scripts/flotte.sh` ne déclare aujourd'hui **aucun** `Restart=` : rien ne
-relance, quel que soit le code.
+transitoires (exit 1) : transport, 5xx, `no_runner_armed`. Ce qui est relancé,
+ce qui ne l'est pas, la limite et l'arrêt propre :
+`docs/deploiement-et-arret.md`.
 
 Le plafond par LIGNE borne le prix d'un passage là où il dérape vraiment — une
 ligne seule a coûté **65 571 jetons** le 01/09 :
