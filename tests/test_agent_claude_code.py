@@ -126,7 +126,9 @@ def test_seule_l_allowlist_est_exposee_et_autorisee(monkeypatch):
     assert not any("slack" in t for t in o["allowed_tools"])
     assert o["permission_mode"] == "dontAsk"
     assert o["setting_sources"] == []
-    assert o["system_prompt"] == {"type": "preset", "preset": "claude_code", "append": "cadre"}
+    # Le CADRE DU TRAVAIL, seul : pas le preset `claude_code`, que le backend n'a
+    # pas envoyé et que le worker n'a pas à composer.
+    assert o["system_prompt"] == "cadre"
 
 
 def test_la_cle_du_travail_part_et_les_secrets_du_worker_non(monkeypatch):
@@ -137,6 +139,53 @@ def test_la_cle_du_travail_part_et_les_secrets_du_worker_non(monkeypatch):
     assert env["OTO_WORKER_SECRET"] == "" and env["CLAUDE_CODE_OAUTH_TOKEN"] == ""
     assert env["ANTHROPIC_CUSTOM_HEADERS"] == "anthropic-workspace-id: wrkspc_1"
     assert env["CLAUDE_CONFIG_DIR"].startswith(sdk.options["cwd"])
+
+
+def test_une_variable_que_personne_n_a_prevue_part_vide(monkeypatch):
+    """La propriété qu'une liste NOIRE ne pouvait pas donner : le `.env` du worker
+    peut gagner une variable demain, le CLI ne la lira pas pour autant."""
+    monkeypatch.setenv("UN_SECRET_FUTUR", "à ne pas divulguer")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    _, sdk, _ = _lancer(monkeypatch, _simple)
+    env = sdk.options["env"]
+    assert env["UN_SECRET_FUTUR"] == "", "tout ce qui n'est pas nommé part vide"
+    assert "PATH" not in env, "la liste blanche laisse passer PATH tel quel"
+    assert env["HOME"] == sdk.options["cwd"], "le foyer du CLI est celui du travail"
+
+
+def test_le_journal_ne_dit_que_les_NOMS_de_l_environnement(monkeypatch):
+    _, _, ev = _lancer(monkeypatch, _simple)
+    (reglages,) = [c for e, c in ev if e == "claude_code"]
+    assert "ANTHROPIC_API_KEY" in reglages["env"]
+    assert not any("sk-org" in str(v) for v in reglages["env"])
+
+
+def test_la_borne_de_depense_de_la_session_est_servie_quand_elle_est_posee(monkeypatch):
+    monkeypatch.setenv("OTO_RUNNER_CLAUDE_CODE_MAX_USD", "2.5")
+    _, sdk, _ = _lancer(monkeypatch, _simple)
+    assert sdk.options["max_budget_usd"] == 2.5
+
+
+def test_sans_borne_de_depense_rien_n_est_servi(monkeypatch):
+    monkeypatch.delenv("OTO_RUNNER_CLAUDE_CODE_MAX_USD", raising=False)
+    _, sdk, _ = _lancer(monkeypatch, _simple)
+    assert "max_budget_usd" not in sdk.options
+
+
+def test_une_borne_de_depense_illisible_est_refusee(monkeypatch):
+    monkeypatch.setenv("OTO_RUNNER_CLAUDE_CODE_MAX_USD", "beaucoup")
+    with pytest.raises(AC.LlmUnavailable, match="montant > 0"):
+        _lancer(monkeypatch, _simple)
+
+
+def test_les_deux_bornes_se_lisent_ensemble(monkeypatch):
+    """Un plafond de tours généreux et un mur court se contredisent : le journal les
+    porte côte à côte pour qu'on ne lise pas le premier comme une promesse."""
+    monkeypatch.setenv("OTO_RUNNER_CLAUDE_CODE_WALL_S", "900")
+    spec = AgentSpec(system="s", tools=frozenset(), max_steps=400)
+    _, _, ev = _lancer(monkeypatch, _simple, spec=spec)
+    (reglages,) = [c for e, c in ev if e == "claude_code"]
+    assert reglages["max_turns"] == 400 and reglages["mur_s"] == 900
 
 
 def test_le_repertoire_du_travail_est_efface(monkeypatch):
@@ -432,3 +481,221 @@ def test_le_premier_battement_part_meme_sur_une_machine_juste_demarree(monkeypat
     battements = []
     _lancer(monkeypatch, _appelle, heartbeat=lambda: battements.append(1))
     assert battements == [1]
+
+
+# ── Ce qu'un déroulé MORT a coûté ────────────────────────────────────────────
+# Alexis, revue du 18/09 : « Budget dépassé : `resultat` vaut `None`, donc l'usage
+# déclaré est vide et le travail conclut `max_tokens` sans aucun jeton déclaré. Les
+# chemins deadline, clé refusée et transport mort ne posent pas `usage_partiel` non
+# plus, contrairement à `agent_runtime`. Leur coût est perdu. »
+
+def _messages(n, **usage):
+    async def script(sdk, prompt, options):
+        for i in range(n):
+            yield AssistantMessage(content=[], model="claude-sonnet-5",
+                                   parent_tool_use_id=None, message_id=f"m{i}",
+                                   usage=dict(usage))
+        await asyncio.sleep(5)     # ne conclut jamais de lui-même
+        yield _resultat()
+    return script
+
+
+def test_le_budget_depasse_declare_CE_QU_IL_A_DEPENSE(monkeypatch):
+    """Le cas nommé par la revue : sans bilan de session, l'usage venait vide."""
+    async def script(sdk, prompt, options):
+        for i in range(3):
+            yield AssistantMessage(content=[], model="claude-sonnet-5",
+                                   parent_tool_use_id=None, message_id=f"m{i}",
+                                   usage={"input_tokens": 400, "output_tokens": 100,
+                                          "cache_read_input_tokens": 7,
+                                          "cache_creation_input_tokens": 3})
+        yield _resultat()
+
+    spec = AgentSpec(system="s", tools=frozenset(), max_tokens=1000)
+    res, _, _ = _lancer(monkeypatch, script, spec=spec)
+    assert res.stopped == "max_tokens"
+    assert res.usage["input_tokens"] == 800 and res.usage["output_tokens"] == 200
+    assert res.usage["cache_creation_input_tokens"] == 6
+    assert res.couverture["tours"] == 2, "deux messages comptés, pas le troisième"
+    assert conclusion.resultat_declare(res, "x")["usage_tokens"] == 1000
+
+
+def test_la_deadline_emporte_ce_qui_a_ete_depense(monkeypatch):
+    monkeypatch.setenv("OTO_RUNNER_CLAUDE_CODE_WALL_S", "1")
+    with pytest.raises(AC.DeadlineExceeded) as pris:
+        _lancer(monkeypatch, _messages(2, input_tokens=300, output_tokens=50))
+    assert pris.value.usage_partiel["input_tokens"] == 600
+    assert pris.value.couverture_partielle["tours"] == 2
+    assert pris.value.modele_partiel == "claude-sonnet-5"
+    assert conclusion.resultat_partiel(pris.value, "claude-sonnet-5")["usage_tokens"] == 700
+
+
+def test_une_cle_refusee_emporte_ce_qui_a_ete_depense(monkeypatch):
+    async def script(sdk, prompt, options):
+        yield AssistantMessage(content=[], model="claude-sonnet-5",
+                               parent_tool_use_id=None, message_id="m1",
+                               usage={"input_tokens": 120, "output_tokens": 30})
+        yield SystemMessage(subtype="api_retry", data={"error_status": 403})
+
+    with pytest.raises(RuntimeError) as pris:
+        _lancer(monkeypatch, script)
+    assert pris.value.usage_partiel["input_tokens"] == 120
+    assert pris.value.couverture_partielle["tours"] == 1
+
+
+def test_un_transport_mort_emporte_ce_qui_a_ete_depense(monkeypatch):
+    mcp = Mcp()
+    mcp.panne = RuntimeError("session MCP rouverte mais refusée")
+
+    async def script(sdk, prompt, options):
+        yield AssistantMessage(content=[], model="claude-sonnet-5",
+                               parent_tool_use_id=None, message_id="m1",
+                               usage={"input_tokens": 90, "output_tokens": 10})
+        await sdk.outils["data_rows"].handler({})
+        yield AssistantMessage(content=[], model="claude-sonnet-5",
+                               parent_tool_use_id=None, message_id="m2", usage={})
+
+    with pytest.raises(RuntimeError, match="transport MCP mort") as pris:
+        _lancer(monkeypatch, script, mcp=mcp)
+    assert pris.value.usage_partiel["input_tokens"] is None, "un message muet : pas de somme"
+    assert pris.value.couverture_partielle["sommes"]["input_tokens"] == 90
+    assert pris.value.pas_partiels == 1
+
+
+def test_un_deroule_mort_avant_son_premier_message_ne_declare_rien(monkeypatch):
+    """⚠️ `None` n'est pas 0 : un déroulé mort avant d'avoir rien dépensé ne doit
+    PAS rendre des zéros, qui se liraient comme une mesure."""
+    async def script(sdk, prompt, options):
+        raise ResultError("démarrage refusé")
+        yield
+
+    with pytest.raises(ResultError) as pris:
+        _lancer(monkeypatch, script)
+    assert pris.value.couverture_partielle["tours"] == 0
+    assert conclusion.resultat_partiel(pris.value, "claude-sonnet-5") is None
+
+
+# ── La borne devient muette : on s'arrête en le DISANT ───────────────────────
+
+def test_un_usage_absent_sous_borne_arrete_en_le_nommant(monkeypatch):
+    async def script(sdk, prompt, options):
+        yield AssistantMessage(content=[], model="claude-sonnet-5",
+                               parent_tool_use_id=None, message_id="m1",
+                               usage={"input_tokens": 10, "output_tokens": 2})
+        yield AssistantMessage(content=[], model="claude-sonnet-5",
+                               parent_tool_use_id=None, message_id="m2", usage={})
+        yield _resultat()
+
+    spec = AgentSpec(system="s", tools=frozenset(), max_tokens=10_000)
+    res, _, ev = _lancer(monkeypatch, script, spec=spec)
+    assert res.stopped == "max_tokens_non_mesurable"
+    (dit,) = [c for e, c in ev if e == "borne_non_suivie"]
+    assert dit["manque"] == ["entrée", "sortie"] and dit["jetons_bornes"] == 12
+
+
+def test_un_sous_agent_muet_n_aveugle_pas_la_borne(monkeypatch):
+    """Le bilan de session couvre les sous-agents (`model_usage`) : couper le déroulé
+    parce qu'un des leurs n'a rien déclaré arrêterait un déroulé sain."""
+    async def script(sdk, prompt, options):
+        yield AssistantMessage(content=[], model="claude-sonnet-5",
+                               parent_tool_use_id=None, message_id="m1",
+                               usage={"input_tokens": 10, "output_tokens": 2})
+        yield AssistantMessage(content=[], model="claude-haiku-4-5",
+                               parent_tool_use_id="t1", message_id="m2", usage={})
+        yield _resultat()
+
+    spec = AgentSpec(system="s", tools=frozenset(), max_tokens=10_000)
+    res, _, ev = _lancer(monkeypatch, script, spec=spec)
+    assert res.stopped == "end_turn"
+    assert [c["manque"] for e, c in ev if e == "usage_absent_sous_agent"] == [["entrée", "sortie"]]
+
+
+def test_sans_borne_demandee_un_message_muet_ne_coupe_rien(monkeypatch):
+    async def script(sdk, prompt, options):
+        yield AssistantMessage(content=[], model="claude-sonnet-5",
+                               parent_tool_use_id=None, message_id="m1", usage={})
+        yield _resultat()
+
+    res, _, ev = _lancer(monkeypatch, script)
+    assert res.stopped == "end_turn"
+    assert not [c for e, c in ev if e == "borne_non_suivie"]
+
+
+# ── SIGTERM : le CLI fils tué par un redémarrage ─────────────────────────────
+
+class ProcessError(Exception):
+    def __init__(self, message, exit_code=None):
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+def test_le_cli_tue_par_un_signal_le_dit_et_emporte_son_cout(monkeypatch):
+    """Sous le `KillMode` par défaut, un `systemctl restart` tue le `claude` fils : le
+    SDK sort en code NÉGATIF. Le travail disait « sorti sans message de résultat »."""
+    async def script(sdk, prompt, options):
+        yield AssistantMessage(content=[], model="claude-sonnet-5",
+                               parent_tool_use_id=None, message_id="m1",
+                               usage={"input_tokens": 500, "output_tokens": 40})
+        raise ProcessError("Command failed with exit code -15", exit_code=-15)
+
+    with pytest.raises(RuntimeError, match="signal 15") as pris:
+        _lancer(monkeypatch, script)
+    assert "KillMode=mixed" in str(pris.value)
+    assert pris.value.usage_partiel["input_tokens"] == 500
+    assert pris.value.couverture_partielle["tours"] == 1
+
+
+def test_une_sortie_en_erreur_ordinaire_n_est_pas_dite_signal(monkeypatch):
+    async def script(sdk, prompt, options):
+        raise ProcessError("Command failed with exit code 1", exit_code=1)
+        yield
+
+    with pytest.raises(ProcessError):
+        _lancer(monkeypatch, script)
+
+
+def test_le_drapeau_d_arret_du_worker_ne_coupe_pas_un_deroule_en_vol(monkeypatch):
+    """Le handler de SIGTERM du worker ne fait que lever un drapeau : le travail en
+    cours va jusqu'au bout, et c'est la BOUCLE qui s'arrête ensuite."""
+    monkeypatch.setattr(W, "_arret_demande", False)
+    W._demander_arret(15, None)
+    try:
+        res, _, _ = _lancer(monkeypatch, _simple)
+        assert res.stopped == "end_turn", "le déroulé en vol n'est pas interrompu"
+        assert W._arret_demande is True
+    finally:
+        W._arret_demande = False
+
+
+def test_les_jetons_d_un_travail_MORT_arrivent_jusqu_au_serveur(monkeypatch, tmp_path):
+    """Le bout de la chaîne : ce que `run_once` accroche à l'exception doit arriver
+    dans le `complete` que le worker rend au serveur. Un attribut que personne ne lit
+    n'est pas une correction — c'est là que le coût d'un déroulé mort se paie."""
+    monkeypatch.setenv("OTO_RUNNER_JOURNAL_DIR", str(tmp_path))
+
+    class McpDuTravail(FauxMcp):
+        def schemas(self, noms):
+            return Mcp().schemas(noms)
+
+    monkeypatch.setattr(W, "McpSession", McpDuTravail)
+
+    def faux_run_once(**kw):
+        boum = AC.DeadlineExceeded("déroulé Claude Code > 900s wall-clock")
+        boum.usage_partiel = {"input_tokens": 4000, "output_tokens": 900,
+                              "cache_read_input_tokens": 12,
+                              "cache_creation_input_tokens": 30}
+        boum.couverture_partielle = {"tours": 5, "declares": {}, "sommes": {}}
+        boum.modele_partiel = "claude-sonnet-5"
+        boum.pas_partiels = 7
+        raise boum
+
+    monkeypatch.setattr(AC, "run_once", faux_run_once)
+    backend = FauxBackend()
+    W._un_travail(backend, _job("start"), AC, file=backend)
+
+    (rendu,) = [a[1] for a in backend.appels if a[0] == "complete_result"]
+    assert rendu["usage_tokens"] == 4900, "l'entrée non cachée + la sortie"
+    assert rendu["usage_cache_read"] == 12
+    assert rendu["steps"] == 7 and rendu["model"] == "claude-sonnet-5"
+    assert rendu["stopped"] == "DeadlineExceeded"
+    assert ("complete", False, "r-NEUF") in backend.appels

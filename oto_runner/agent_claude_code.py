@@ -8,6 +8,11 @@ un sourcing qui pagine une centaine de candidats y perd la procédure en route o
 s'arrête `blocked`. Ce moteur délègue la boucle entière à Claude Code, qui a les
 trois.
 
+⚠️ Ce qu'il ne promet PAS : des déroulés de 400 tours. `PLAFOND_TOURS` est un toit,
+le travail est servi à `spec.max_steps` (24 par défaut), et c'est la deadline murale
+(900 s) qui coupe en pratique. Ce que ce moteur apporte vraiment, c'est la
+DÉLÉGATION et la COMPACTION — pas une longueur.
+
 Ce qui ne change PAS, et c'est la raison de la forme :
 
 - **Les outils passent par la session MCP du travail** (`McpSession`), exposée à
@@ -64,22 +69,61 @@ PREFIXE = f"mcp__{SERVEUR}__"
 OUTILS_INTEGRES = ("Agent",)
 _NOMS_DELEGATION = ("Agent", "Task")
 
-#: Plafond de tours du fil principal. La boucle maison plafonne à 64 et la
-#: plateforme accepte davantage ; ici le travail est servi jusqu'à ce plafond, et
-#: une valeur au-delà est DITE au journal plutôt que rabotée en silence.
+#: PLAFOND de tours du fil principal — un toit, jamais une promesse. Ce qui est
+#: servi, c'est `spec.max_steps` (24 par défaut) ; ce nombre ne fait que dire
+#: jusqu'où le moteur accepte d'aller, et une demande au-delà est DITE au journal
+#: plutôt que rabotée en silence.
+#:
+#: ⚠️ Ce n'est PAS la borne qui mord. Un déroulé n'a que `wall_s()` secondes
+#: (900 par défaut) pour jouer ses tours : bien avant 400, c'est le mur qui coupe,
+#: en `DeadlineExceeded` — et un travail mort ainsi peut être rejoué depuis zéro,
+#: donc payé deux fois. Les deux nombres partent ensemble au journal (`_options`).
+#: ⚠️ Et il ne borne que le FIL PRINCIPAL : un sous-agent déroule ses propres
+#: tours dessous. La seule borne de session est `OTO_RUNNER_CLAUDE_CODE_MAX_USD`.
 PLAFOND_TOURS = 400
 
 _ENV_WALL = "OTO_RUNNER_CLAUDE_CODE_WALL_S"
+#: La borne de dépense de la SESSION (dollars), sous-agents compris. Non posée = pas
+#: de borne : `max_turns` ne borne que le fil principal.
+_ENV_MAX_USD = "OTO_RUNNER_CLAUDE_CODE_MAX_USD"
 #: Sous la patience de systemd à l'arrêt (16 min, `docs/deploiement-et-arret.md`) : au-delà,
 #: un déploiement tuerait un déroulé qui avait le droit de finir. La relever exige de
 #: relever `TimeoutStopSec` avec elle.
 _WALL_DEFAUT_S = 900
 _BATTEMENT_S = 60
 
-#: Ce que le sous-processus hérite du worker et ne doit JAMAIS lire : il n'a pas
-#: d'outil pour le faire, mais un secret absent ne se divulgue pas.
+#: Les secrets du worker, effacés NOMMÉMENT — même absents de l'environnement au
+#: moment de l'appel. La liste blanche ci-dessous les couvrirait ; les nommer garde
+#: écrit ce qui ne doit jamais atteindre le CLI.
 _SECRETS_DU_WORKER = ("OTO_WORKER_SECRET", "OTO_TOKEN", "OTO_RUNNER_OPENAI_API_KEY",
                       "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+
+#: ⚠️ LISTE BLANCHE, et non liste noire. Le SDK fusionne TOUT `os.environ` sous
+#: `options.env` (`_internal/transport/subprocess_cli.py` : `{**os.environ, ...,
+#: **options.env}`), et `options.env` ne peut pas RETIRER une variable — seulement
+#: l'écraser. Une liste noire laissait donc passer au CLI toute variable FUTURE du
+#: `.env` du worker : il suffisait d'en ajouter une pour la lui offrir. Ici, tout ce
+#: qui n'est pas nommé part VIDE.
+#:
+#: Chaque nom se justifie, sinon il sort :
+_ENV_TRANSMIS = frozenset({
+    "PATH",              # le SDK résout le CLI en absolu avant de lancer, mais le
+                         # binaire natif et ses propres enfants en ont besoin
+    "LANG", "LC_ALL",    # l'encodage de la sortie ; un CLI en C locale casse l'UTF-8
+    "TZ",                # les dates que l'agent écrit sont celles de la box
+    "TMPDIR",            # sans lui, /tmp — que `PrivateTmp` isole déjà
+    "USER", "LOGNAME",   # ni secrets ni identifiants : des outils POSIX les lisent
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",  # l'autorité TLS de la box
+    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",                 # la sortie réseau de la box,
+    "https_proxy", "http_proxy", "no_proxy",                 # aux deux casses (curl lit
+                                                             # la minuscule, node la majuscule)
+})
+#: `LC_*` en entier : ce sont des réglages de locale, jamais des secrets.
+_PREFIXES_TRANSMIS = ("LC_",)
+
+
+def _transmis(nom: str) -> bool:
+    return nom in _ENV_TRANSMIS or nom.startswith(_PREFIXES_TRANSMIS)
 
 
 def model() -> str:
@@ -104,6 +148,25 @@ def _sdk():
     return claude_agent_sdk
 
 
+def max_usd() -> Optional[float]:
+    """La borne de DÉPENSE de la session, ou `None`. Absente = pas de borne servie.
+
+    `max_turns` ne borne que le fil principal : un sous-agent déroule ses propres
+    tours dessous, et rien ne les comptait. Le SDK, lui, sait arrêter la session
+    entière sur un montant (`max_budget_usd`) — c'est la borne honnête ici.
+    """
+    brut = os.environ.get(_ENV_MAX_USD, "").strip()
+    if not brut:
+        return None
+    try:
+        valeur = float(brut)
+    except ValueError:
+        valeur = 0.0
+    if valeur <= 0:
+        raise LlmUnavailable(f"{_ENV_MAX_USD} = {brut!r} : un montant > 0 est attendu")
+    return valeur
+
+
 def wall_s() -> int:
     brut = os.environ.get(_ENV_WALL, "").strip()
     if not brut:
@@ -117,6 +180,19 @@ def wall_s() -> int:
 class _Etat:
     steps: list = dataclasses.field(default_factory=list)
     panne: Optional[str] = None
+    #: Le compte EN VOL, tenu HORS de la coroutine — `asyncio.wait_for` l'annule à la
+    #: deadline, et tout ce qui vivait dedans partirait avec elle. C'est ce qui permet
+    #: à un déroulé MORT (deadline, clé refusée, transport, signal) de dire ce qu'il a
+    #: dépensé au lieu de le perdre.
+    #:
+    #: ⚠️ Ses `tours` comptent des MESSAGES, pas des tours d'API, et il ne sert QUE de
+    #: repli : dès qu'un `ResultMessage` arrive, c'est le bilan de session qui fait foi
+    #: (il couvre les sous-agents via `model_usage`). Les deux ne se fusionnent JAMAIS —
+    #: un poste que les sous-agents ne déclarent pas ferait tomber tout le compte à
+    #: `None` alors que le bilan, lui, le connaît.
+    compteur: Compteur = dataclasses.field(default_factory=Compteur)
+    vus: set = dataclasses.field(default_factory=set)
+    servi: Optional[str] = None
 
 
 def _outils(sdk, mcp, noms: frozenset, etat: _Etat, note) -> list:
@@ -159,9 +235,19 @@ def _un_outil(sdk, mcp, schema: dict, limite: int, etat: _Etat, note):
 
 
 def _environnement(cle: str, workspace: Optional[str], spec, dossier: str) -> dict:
+    """L'environnement du sous-processus : la liste blanche, et rien d'autre.
+
+    Calculé À L'APPEL, sur l'`os.environ` du moment : une variable ajoutée au worker
+    après le démarrage est effacée elle aussi.
+    """
     env = {s: "" for s in _SECRETS_DU_WORKER}
+    env.update({nom: "" for nom in os.environ if not _transmis(nom)})
     env.update({
         "ANTHROPIC_API_KEY": cle,
+        # Le foyer du sous-processus est CELUI DU TRAVAIL, effacé avec lui : rien de
+        # ce que le CLI écrirait « chez lui » ne vit sous le foyer du worker, ni ne
+        # passe d'une org à la suivante.
+        "HOME": dossier,
         "CLAUDE_CONFIG_DIR": os.path.join(dossier, "config"),
         "DISABLE_TELEMETRY": "1",
         "DISABLE_ERROR_REPORTING": "1",
@@ -180,15 +266,21 @@ def _environnement(cle: str, workspace: Optional[str], spec, dossier: str) -> di
 
 
 def _options(sdk, *, instructions: str, serveur, noms: frozenset, spec, modele,
-             env: dict, dossier: str, note):
+             env: dict, dossier: str, mur_s: int, note):
     demande = spec.max_steps if spec is not None else PLAFOND_TOURS
     tours = max(1, min(int(demande), PLAFOND_TOURS))
     if tours != demande:
         note("plafond_tours", demande=demande, servi=tours, plafond=PLAFOND_TOURS)
     effort = (spec.effort if spec is not None else None) or agent_llm.effort_hote()
     reglages = {
-        "system_prompt": {"type": "preset", "preset": "claude_code",
-                          "append": instructions},
+        # ⚠️ Le CADRE DU TRAVAIL, tel quel — pas le preset `claude_code` complété.
+        # Le preset est un prompt système de plusieurs milliers de jetons que le
+        # backend n'a pas envoyés : le servir, c'est composer à la place du
+        # demandeur, et le worker ne compose pas (doctrine). Ce que ça coûte en
+        # échange : le preset est aussi ce qui APPREND au modèle à déléguer à un
+        # sous-agent. L'outil reste offert ; la délégation, elle, reste à mesurer
+        # sur un essai réel.
+        "system_prompt": instructions,
         "mcp_servers": {SERVEUR: serveur},
         "strict_mcp_config": True,
         "tools": list(OUTILS_INTEGRES),
@@ -203,15 +295,26 @@ def _options(sdk, *, instructions: str, serveur, noms: frozenset, spec, modele,
     }
     if effort and effort != EFFORT_SANS_RAISONNEMENT:
         reglages["effort"] = effort
+    plafond_usd = max_usd()
+    if plafond_usd is not None:
+        # La SEULE borne qui tienne sur toute la session : `max_turns` ne borne que le
+        # fil principal, un sous-agent déroule ses propres tours dessous. Le SDK sort
+        # en `error_max_budget_usd`, que `_ARRETS` conclut déjà en `max_tokens`.
+        reglages["max_budget_usd"] = plafond_usd
     if spec is not None and spec.temperature is not None:
         # Claude Code n'expose pas de température : la servir en silence ferait croire
         # que deux passages comparés l'étaient à réglage égal.
         note("temperature_non_servie", temperature=spec.temperature)
         logger.warning("température %s déclarée et non servie par Claude Code",
                        spec.temperature)
+    # ⚠️ Les deux bornes qui se contredisent, CÔTE À CÔTE dans le journal : un
+    # déroulé de `tours` tours n'a que `mur_s` secondes pour les jouer, et ce qui
+    # dépasse meurt en `DeadlineExceeded` — puis peut être rejoué depuis zéro, donc
+    # payé deux fois. Les lire ensemble évite de relire un plafond de tours généreux
+    # comme une promesse que le mur ne tiendra pas.
     note("claude_code", **{k: v for k, v in reglages.items()
                            if k not in ("env", "mcp_servers")},
-         env=sorted(k for k in env if env[k]))
+         mur_s=mur_s, env=sorted(k for k in env if env[k]))
     return sdk.ClaudeAgentOptions(**reglages)
 
 
@@ -219,6 +322,18 @@ _CLE_REFUSEE = (401, 403)
 
 _ARRETS = {"success": "end_turn", "error_max_turns": "max_steps",
            "error_max_budget_usd": "max_tokens"}
+
+
+def _postes(entree, sortie, lus, ecrits) -> dict:
+    """Les postes de `comptage`, sans jamais fabriquer un zéro : un poste que le
+    fournisseur n'a pas déclaré reste ABSENT, et `Compteur` le rendra `None`."""
+    usage = {"input_tokens": entree, "output_tokens": sortie,
+             "cache_read_input_tokens": lus, "cache_creation_input_tokens": ecrits}
+    if None not in (entree, lus, ecrits):
+        # `input_tokens` est le non-caché exact ; l'entrée TOTALE ne se pose que
+        # lorsque les deux caches sont connus (cf. la doctrine de `comptage`).
+        usage["input_total_tokens"] = entree + lus + ecrits
+    return {k: v for k, v in usage.items() if v is not None}
 
 
 def _usage_du_resultat(resultat) -> dict:
@@ -229,29 +344,54 @@ def _usage_du_resultat(resultat) -> dict:
         def somme(cle):
             valeurs = [m.get(cle) for m in par_modele.values() if isinstance(m, dict)]
             return None if any(v is None for v in valeurs) else sum(int(v) for v in valeurs)
-        entree, sortie = somme("inputTokens"), somme("outputTokens")
-        lus, ecrits = somme("cacheReadInputTokens"), somme("cacheCreationInputTokens")
-    else:
-        u = getattr(resultat, "usage", None) or {}
-        entree, sortie = u.get("input_tokens"), u.get("output_tokens")
-        lus, ecrits = u.get("cache_read_input_tokens"), u.get("cache_creation_input_tokens")
-    usage = {"input_tokens": entree, "output_tokens": sortie,
-             "cache_read_input_tokens": lus, "cache_creation_input_tokens": ecrits}
-    if None not in (entree, lus, ecrits):
-        usage["input_total_tokens"] = entree + lus + ecrits
-    return {k: v for k, v in usage.items() if v is not None}
+        return _postes(somme("inputTokens"), somme("outputTokens"),
+                       somme("cacheReadInputTokens"), somme("cacheCreationInputTokens"))
+    u = getattr(resultat, "usage", None) or {}
+    return _postes(u.get("input_tokens"), u.get("output_tokens"),
+                   u.get("cache_read_input_tokens"), u.get("cache_creation_input_tokens"))
 
 
-def _jetons_du_message(message) -> int:
+def _usage_du_message(message) -> dict:
+    """L'usage d'UN message d'assistant, aux noms de l'API — la même forme que le
+    bilan, pour que le compte en vol et le bilan de session se lisent pareil."""
     u = getattr(message, "usage", None) or {}
-    return sum(int(u.get(k) or 0) for k in
-               ("input_tokens", "output_tokens", "cache_creation_input_tokens"))
+    return _postes(u.get("input_tokens"), u.get("output_tokens"),
+                   u.get("cache_read_input_tokens"), u.get("cache_creation_input_tokens"))
+
+
+def _compter(etat: _Etat, message, principal: bool, plafond, note) -> Optional[str]:
+    """Compte UN message d'assistant, et rend l'arrêt qu'il déclenche — ou `None`.
+
+    ⚠️ Le compte tourne MÊME SANS BORNE demandée. Il ne sert pas qu'à arrêter :
+    c'est lui qui dit ce qu'a coûté un déroulé mort avant son bilan de session
+    (deadline, clé refusée, transport mort, signal). Le tenir seulement « si
+    plafond » laissait ces jetons nulle part.
+    """
+    manque = etat.compteur.ajouter(_usage_du_message(message))
+    if plafond is None:
+        return None
+    if manque and principal:
+        # ⚠️ Une borne DEMANDÉE ne se suit que sur des messages MESURÉS : un usage
+        # absent compté pour 0 la rendrait muette. Même arbitrage que la boucle
+        # maison (13/09/2026), même nom d'arrêt.
+        note("borne_non_suivie", borne="max_tokens", max_tokens=plafond,
+             manque=manque, jetons_bornes=etat.compteur.borne)
+        return "max_tokens_non_mesurable"
+    if manque:
+        # Un SOUS-AGENT muet n'aveugle pas la borne : le bilan de session le couvre
+        # (`model_usage`), et sans bilan la couverture dira le manque. S'arrêter là
+        # couperait un déroulé sain — le fil principal, lui, DOIT être mesuré.
+        note("usage_absent_sous_agent", manque=manque)
+        return None
+    if etat.compteur.borne >= plafond:
+        note("budget_depasse", jetons=etat.compteur.borne, plafond=plafond)
+        return "max_tokens"
+    return None
 
 
 async def _derouler(sdk, prompt: str, options, *, etat: _Etat, spec, note,
                     battre: Callable[[], None]):
-    resultat, texte, servi, arret = None, "", None, None
-    vus, budget = set(), 0
+    resultat, texte, arret = None, "", None
     plafond = spec.max_tokens if spec is not None else None
     flux = sdk.query(prompt=prompt, options=options).__aiter__()
     try:
@@ -290,16 +430,20 @@ async def _derouler(sdk, prompt: str, options, *, etat: _Etat, spec, note,
                     elif nom_bloc == "TextBlock" and principal and getattr(bloc, "text", ""):
                         texte = bloc.text
                 if principal and getattr(message, "model", None):
-                    servi = message.model
+                    etat.servi = message.model
                 # Un message d'API arrive découpé en plusieurs messages (un par bloc), qui
                 # portent tous son usage : il ne se compte qu'une fois.
+                #
+                # ⚠️ Le compte tourne MÊME SANS BORNE demandée. Il ne sert pas qu'à
+                # arrêter : c'est lui qui dit ce qu'a coûté un déroulé mort avant son
+                # bilan de session (deadline, clé refusée, transport, signal). Le
+                # compter seulement « si plafond » laissait ces jetons nulle part.
                 identifiant = getattr(message, "message_id", None)
-                if plafond and (identifiant is None or identifiant not in vus):
-                    vus.add(identifiant)
-                    budget += _jetons_du_message(message)
-                    if budget > plafond:
-                        arret = "max_tokens"
-                        note("budget_depasse", jetons=budget, plafond=plafond)
+                if identifiant is None or identifiant not in etat.vus:
+                    if identifiant is not None:
+                        etat.vus.add(identifiant)
+                    arret = _compter(etat, message, principal, plafond, note) or arret
+                    if arret:
                         break
             elif genre == "ResultMessage":
                 resultat = message
@@ -311,7 +455,26 @@ async def _derouler(sdk, prompt: str, options, *, etat: _Etat, spec, note,
         fermer = getattr(flux, "aclose", None)
         if fermer is not None:
             await fermer()
-    return resultat, texte, servi, arret
+    return resultat, texte, arret
+
+
+def _mort_nommee(e: BaseException) -> BaseException:
+    """Traduit une mort de sous-processus en échec qui DIT ce qui s'est passé.
+
+    Un `systemctl restart` sous le `KillMode` par défaut envoie SIGTERM à tout le
+    groupe de contrôle, donc au `claude` fils : le SDK sort alors en `ProcessError`
+    avec un code NÉGATIF (le signal), et le travail finissait sur « sorti sans
+    message de résultat » — un symptôme qui n'accuse pas sa cause. Cf.
+    `docs/deploiement-et-arret.md` (`KillMode=mixed`).
+    """
+    code = getattr(e, "exit_code", None)
+    if isinstance(code, int) and code < 0:
+        return RuntimeError(
+            f"Claude Code tué par le signal {-code} avant de conclure — un "
+            "redémarrage de l'unité tue le CLI fils tant qu'elle n'est pas en "
+            "`KillMode=mixed` avec un `TimeoutStopSec` au-dessus de la deadline "
+            f"({_ENV_WALL})")
+    return e
 
 
 def run_once(*, instructions: str, inputs: str, tools, api_key: Optional[str] = None,
@@ -321,8 +484,34 @@ def run_once(*, instructions: str, inputs: str, tools, api_key: Optional[str] = 
     """UN déroulé Claude Code complet → AgentResult.
 
     Lève : `LlmUnavailable` (SDK ou clé absents), `DeadlineExceeded` (au-delà de
-    `OTO_RUNNER_CLAUDE_CODE_WALL_S`), `RuntimeError` (transport MCP mort, ou
-    Claude Code sorti sans résultat) — le retry de job décide."""
+    `OTO_RUNNER_CLAUDE_CODE_WALL_S`), `RuntimeError` (transport MCP mort, CLI tué
+    par un signal, ou Claude Code sorti sans résultat) — le retry de job décide.
+
+    ⚠️ Ce qui SORT par une exception emporte ce qu'il a coûté : `usage_partiel`,
+    `couverture_partielle`, `modele_partiel` et `pas_partiels` sont accrochés à
+    l'exception, exactement comme `agent_runtime.run` le fait pour la boucle
+    maison — c'est `conclusion.resultat_partiel` qui les lit, et sans eux un
+    déroulé mort rendait ZÉRO jeton au serveur alors qu'il en avait dépensé.
+    """
+    etat = _Etat()
+    try:
+        return _deroule_complet(
+            etat, instructions=instructions, inputs=inputs, tools=tools,
+            api_key=api_key, modele=modele, on_event=on_event, mcp=mcp, spec=spec,
+            workspace=workspace, heartbeat=heartbeat)
+    except BaseException as e:
+        e.usage_partiel = etat.compteur.usage()               # type: ignore[attr-defined]
+        e.couverture_partielle = etat.compteur.couverture()   # type: ignore[attr-defined]
+        e.modele_partiel = etat.servi                         # type: ignore[attr-defined]
+        e.pas_partiels = len(etat.steps)                      # type: ignore[attr-defined]
+        raise
+
+
+def _deroule_complet(etat: _Etat, *, instructions: str, inputs: str, tools,
+                     api_key: Optional[str] = None, modele: Optional[str] = None,
+                     on_event=None, mcp=None, spec=None,
+                     workspace: Optional[str] = None,
+                     heartbeat: Optional[Callable[[], None]] = None) -> AgentResult:
     if mcp is None:
         raise LlmUnavailable("le moteur Claude Code exige la session MCP du travail")
     sdk = _sdk()
@@ -346,30 +535,38 @@ def run_once(*, instructions: str, inputs: str, tools, api_key: Optional[str] = 
         dernier[0] = time.monotonic()
         heartbeat()
 
-    etat = _Etat()
     dossier = tempfile.mkdtemp(prefix="oto-claude-code-")
     try:
         serveur = sdk.create_sdk_mcp_server(SERVEUR, tools=_outils(sdk, mcp, noms, etat, note))
+        limite = wall_s()
         options = _options(sdk, instructions=instructions, serveur=serveur, noms=noms,
                            spec=spec, modele=nom,
                            env=_environnement(cle, workspace, spec, dossier),
-                           dossier=dossier, note=note)
-        limite = wall_s()
+                           dossier=dossier, mur_s=limite, note=note)
         try:
-            resultat, texte, servi, arret = asyncio.run(asyncio.wait_for(
+            resultat, texte, arret = asyncio.run(asyncio.wait_for(
                 _derouler(sdk, inputs, options, etat=etat, spec=spec, note=note,
                           battre=battre), timeout=limite))
         except asyncio.TimeoutError as e:
             raise DeadlineExceeded(
                 f"déroulé Claude Code > {limite}s wall-clock ({_ENV_WALL})") from e
+        except Exception as e:
+            traduite = _mort_nommee(e)
+            if traduite is not e:
+                raise traduite from e
+            raise
     finally:
         shutil.rmtree(dossier, ignore_errors=True)
 
     if etat.panne:
         raise RuntimeError(f"transport MCP mort pendant le déroulé — {etat.panne}")
-    compte = Compteur()
     defaut = None
     if resultat is not None:
+        # Le bilan de SESSION fait foi : il couvre les sous-agents (`model_usage`) et
+        # se compte pour UN tour. Il ne se fusionne pas avec le compte en vol, dont
+        # les `tours` comptent des messages — mêler les deux ferait tomber à `None`
+        # des postes que le bilan connaît.
+        compte = Compteur()
         compte.ajouter(_usage_du_resultat(resultat))
         note("resultat_claude_code", sous_type=resultat.subtype,
              tours=resultat.num_turns, cout_usd=resultat.total_cost_usd,
@@ -377,6 +574,11 @@ def run_once(*, instructions: str, inputs: str, tools, api_key: Optional[str] = 
              # `model` du bilan ne nomme que le fil principal : les sous-agents peuvent
              # en servir d'autres, et c'est ici qu'ils se lisent.
              modeles=sorted((getattr(resultat, "model_usage", None) or {}).keys()))
+    else:
+        # Pas de bilan : le déroulé s'est arrêté AVANT (budget dépassé). Le compte en
+        # vol est tout ce qu'on a — et il vaut mieux que le zéro qu'on rendait.
+        compte = etat.compteur
+        note("usage_en_vol", raison=arret, **compte.couverture())
     if arret is None:
         if resultat is None:
             raise RuntimeError("Claude Code s'est terminé sans message de résultat")
@@ -390,4 +592,4 @@ def run_once(*, instructions: str, inputs: str, tools, api_key: Optional[str] = 
     reponse = (getattr(resultat, "result", None) or texte or "").strip()
     return AgentResult(reply=reponse, steps=list(etat.steps), stopped=arret,
                        usage=compte.usage(), couverture=compte.couverture(),
-                       model=servi or nom, defaut=defaut)
+                       model=etat.servi or nom, defaut=defaut)
