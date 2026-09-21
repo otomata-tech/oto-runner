@@ -386,6 +386,14 @@ autre borne est une **panne** — exit 1, pour que systemd relance la campagne
 quand la panne passe : échecs consécutifs, backend indisponible, outil critique
 en échec, faux départs en série, **rendement effondré**.
 
+**Abandon définitif** (exit 3) : la campagne est arrêtée, hors service
+(`409 fleet_not_serving`), introuvable (`404`), ou le serveur a refusé
+l'armement ou la prise pour une cause qu'il nomme. Relancer referait le même
+refus : l'unité déclare `RestartPreventExitStatus=3` et ne relance pas. Restent
+transitoires (exit 1) : transport, 5xx, `no_runner_armed`. ⚠️ L'unité que pose
+`scripts/flotte.sh` ne déclare aujourd'hui **aucun** `Restart=` : rien ne
+relance, quel que soit le code.
+
 Le plafond par LIGNE borne le prix d'un passage là où il dérape vraiment — une
 ligne seule a coûté **65 571 jetons** le 01/09 :
 

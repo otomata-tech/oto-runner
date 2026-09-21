@@ -20,7 +20,8 @@ from __future__ import annotations
 import pytest
 
 from oto_runner.backend import BackendError
-from oto_runner.fleet import _ARRETS_NORMAUX, FleetSpec
+from oto_runner.fleet import (_ARRETS_NORMAUX, SORTIE_ABANDON_DEFINITIF,
+                              AbandonDefinitif, FleetSpec)
 from tests.test_fleet import FauxBackend, _run
 
 
@@ -139,3 +140,71 @@ def test_fleet_not_serving_a_l_enfilement_ABANDONNE_sur_le_champ():
     assert "`draft`" in bilan.arret, "le motif d'arrêt dit l'état de la campagne"
     assert not any(bilan.arret.startswith(m) for m in _ARRETS_NORMAUX), (
         "un abandon n'est pas une fin normale : le process sort en échec")
+
+
+# ── ⑤ définitif ≠ transitoire : ce que systemd a le droit de relancer ────────
+# Un refus que le serveur NOMME ne passera pas seul : relancer referait le même
+# refus, en boucle. Une panne de transport, une 5xx ou `no_runner_armed`, si.
+
+class _ArmementInterdit(_Lisible):
+    def armer_flotte(self, fleet_id):
+        raise _refus(403, "forbidden", "pas le droit d'armer ce passage")
+
+
+class _ArmementInjoignable(_Lisible):
+    def armer_flotte(self, fleet_id):
+        raise BackendError("/api/me/runner/fleets → réseau : ReadTimeout", status=None)
+
+
+def test_un_armement_refuse_par_le_serveur_est_DEFINITIF():
+    with pytest.raises(AbandonDefinitif):
+        _run(_spec(), _ArmementInterdit([1, 1, 0]))
+
+
+def test_no_runner_armed_et_transport_restent_TRANSITOIRES():
+    for b in (_SansRunner([1, 1, 0]), _ArmementInjoignable([1, 1, 0])):
+        with pytest.raises(RuntimeError) as e:
+            _run(_spec(), b)
+        assert not isinstance(e.value, AbandonDefinitif), (
+            f"{type(b).__name__} : une panne qui peut passer seule reste relançable")
+        assert b.enfiles == 0
+
+
+def test_une_campagne_arretee_est_un_abandon_DEFINITIF():
+    with pytest.raises(AbandonDefinitif):
+        _run(_spec(fleet_id=7), _PriseRefuseeArretee([1, 1, 0]))
+
+
+def test_main_sort_sans_relance_sur_un_abandon_definitif(monkeypatch):
+    import sys
+
+    from oto_runner import fleet as F
+
+    def _sortie(run):
+        monkeypatch.setattr(sys, "argv", ["fleet", "x.yaml"])
+        monkeypatch.setattr(F, "load_spec", lambda p: _spec())
+        monkeypatch.setattr(F, "Backend", lambda: None)
+        monkeypatch.setattr(F, "run_fleet", run)
+        with pytest.raises(SystemExit) as e:
+            F.main()
+        return e.value.code
+
+    def _leve(spec, b):
+        raise AbandonDefinitif("flotte #7 non prise (état lu : `stopped`)")
+
+    assert _sortie(_leve) == SORTIE_ABANDON_DEFINITIF
+    for arret in ("campagne hors service — 409 : cette campagne est `draft`",
+                  "cible introuvable — 404"):
+        assert _sortie(lambda s, b, a=arret: F.FleetBilan(arret=a)) == \
+            SORTIE_ABANDON_DEFINITIF, arret
+    assert _sortie(lambda s, b: F.FleetBilan(
+        arret="backend indisponible (10 erreurs consécutives du driver)")) == 1, (
+        "une panne reste relançable : exit 1")
+
+
+def test_l_unite_ne_relance_pas_le_code_d_abandon():
+    """Le code et l'unité se tiennent : changer l'un sans l'autre rouvrirait la
+    relance en boucle, en silence."""
+    from pathlib import Path
+    sh = (Path(__file__).resolve().parents[1] / "scripts" / "flotte.sh").read_text()
+    assert f"--property=RestartPreventExitStatus={SORTIE_ABANDON_DEFINITIF}" in sh

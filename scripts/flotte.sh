@@ -450,7 +450,11 @@ PYCRAN
   echo "   ⚠️ à DÉPOSER dans le dossier partagé de la mission avec son empreinte :"
   echo "      c'est là, et seulement là, qu'un instantané est un fait."
 
+  # RestartPreventExitStatus=3 : un ABANDON DÉFINITIF de l'ordonnanceur
+  # (`fleet.SORTIE_ABANDON_DEFINITIF`) ne se relance jamais — relancer referait
+  # le même refus. Un test tient la valeur alignée sur le code.
   systemd-run --unit="$FLOTTE" --property=EnvironmentFile="$RACINE/.env" \
+    --property=RestartPreventExitStatus=3 \
     --working-directory="$RACINE" "$PY" -m oto_runner.fleet "$yaml" >/dev/null || {
       echo "ABANDON : flotte non lancée — je retire la garde que je venais d'armer."
       systemctl stop "$GARDE.timer" 2>/dev/null; exit 1; }
