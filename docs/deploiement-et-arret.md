@@ -61,6 +61,7 @@ sortie propre. C'est le seul témoin — son absence est le signal.
 ```bash
 systemd-run --unit="oto-fleet-$FLEET" --working-directory=/opt/oto-runner \
   --property=EnvironmentFile=/opt/oto-runner/.env \
+  --property=RestartPreventExitStatus=3 \
   /opt/oto-runner/.venv/bin/python -m oto_runner.fleet "/opt/oto-runner/$FLEET.yaml"
 ```
 

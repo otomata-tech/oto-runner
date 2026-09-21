@@ -71,17 +71,20 @@ def test_l_ordre_compte_declarer_puis_armer_puis_prendre():
 
 
 # ── ce qu'on n'a pas pu dire se COMPTE, et se conclut ────────────────────────
+# ⚠️ Depuis le 18/09/2026, un armement ou une prise refusés ne sont plus
+# « muets » : ils ARRÊTENT le passage avant tout enfilement (cf.
+# `test_armement_fatal.py`). Restent muets les gestes d'état EN COURS de
+# passage — le battement, l'accusé d'arrêt.
 
-class _ArmementRefuse(FauxBackend):
-    def armer_flotte(self, fleet_id):
-        raise BackendError("403 — pas le droit d'armer")
+class _BattementRefuse(FauxBackend):
+    def battre_flotte(self, fleet_id):
+        raise BackendError("503 — la plateforme ne répond pas")
 
 
-def test_un_armement_refuse_se_COMPTE_dans_le_bilan():
-    """⚠️ Le cœur du lot. Le passage continue — c'est voulu, perdre
-    l'observabilité vaut mieux qu'une campagne qui refuse de partir — mais il ne
-    continue plus EN SILENCE."""
-    bilan = _run(_spec(), _bk(_ArmementRefuse))
+def test_un_battement_refuse_se_COMPTE_dans_le_bilan():
+    """⚠️ Le cœur du lot. Le passage continue — une plateforme injoignable
+    n'est pas un ordre d'arrêt — mais il ne continue plus EN SILENCE."""
+    bilan = _run(_spec(), _bk(_BattementRefuse))
     assert bilan.etat_muet >= 1, (
         "l'échec a été rattrapé sans laisser de trace dans le bilan — "
         "c'est exactement le défaut qu'on corrige")
@@ -93,7 +96,7 @@ def test_un_passage_aveugle_le_DIT_a_la_fin(caplog):
     C'est la CONCLUSION qui manque — celle qu'on lit quand on regarde le
     résultat."""
     with caplog.at_level(logging.ERROR):
-        _run(_spec(), _bk(_ArmementRefuse))
+        _run(_spec(), _bk(_BattementRefuse))
     dit = "\n".join(r.getMessage() for r in caplog.records
                     if r.levelno >= logging.ERROR)
     assert "AVEUGLE" in dit.upper(), "le passage n'a pas conclu sur son aveuglement"

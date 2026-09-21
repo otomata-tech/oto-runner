@@ -119,8 +119,9 @@ class FleetBilan:
     lignes_initiales: int = 0
     lignes_restantes: int = 0
     arret: str = ""
-    # Combien de fois le passage n'a PAS pu dire où il en était — déclaration,
-    # armement, prise, battement, accusé d'arrêt.
+    # Combien de fois le passage n'a PAS pu dire où il en était, EN COURS de
+    # route — battement, accusé d'arrêt. (Déclarer, armer et prendre ne se
+    # comptent plus : un refus y arrête le passage avant tout enfilement.)
     #
     # ⚠️ **C'est le vrai défaut du 03/09**, pas l'armement manquant. Chacun de ces
     # gestes échouait, était journalisé en `warning`, et le passage continuait :
@@ -153,6 +154,40 @@ class FleetBilan:
     journaux_absents: int = 0
 
 
+# ⚠️ Le code de sortie d'un ABANDON DÉFINITIF : ce qu'aucune relance ne corrigera
+# — campagne arrêtée ou hors service, refus que le serveur NOMME. Distinct du `1`
+# de la panne (backend injoignable, 5xx), que systemd a le droit de relancer :
+# relancer un refus définitif referait le même refus, en boucle. L'unité le
+# déclare dans `RestartPreventExitStatus=` (`scripts/flotte.sh`) ; un test tient
+# les deux ensemble.
+SORTIE_ABANDON_DEFINITIF = 3
+
+
+class AbandonDefinitif(RuntimeError):
+    """Un abandon qu'une relance ne corrigera pas : le serveur a RÉPONDU, et refusé."""
+
+
+def _transitoire(e: BackendError) -> bool:
+    """Une panne qui peut passer seule : pas de réponse (transport), une 5xx, ou
+    aucun runner joignable (`no_runner_armed` — un worker qui redémarre, au
+    déploiement par exemple, revient de lui-même)."""
+    return e.status is None or e.status >= 500 or e.code == "no_runner_armed"
+
+
+def _abandon(geste: str, fleet_id: int, e: BackendError, *,
+             definitif: bool, statut: Optional[str] = None) -> RuntimeError:
+    """L'erreur qui arrête un passage dont la campagne n'a pas pu être armée ou
+    prise. Le texte du SERVEUR passe en clair : c'est lui qui dit quoi corriger.
+    `definitif` décide du code de sortie (cf. `SORTIE_ABANDON_DEFINITIF`)."""
+    etat = f" (état lu : `{statut}`)" if statut is not None else ""
+    return (AbandonDefinitif if definitif else RuntimeError)(
+        f"flotte #{fleet_id} {geste}, passage ABANDONNÉ avant d'enfiler quoi que "
+        f"ce soit — {e}{etat}\n"
+        "Une campagne ni `armed` ni `running` échappe à `op=stop` : ses travaux "
+        "seraient IMPOSSIBLES à arrêter. Corrige la cause et relance : rien n'a "
+        "été lancé.")
+
+
 def run_fleet(spec: FleetSpec, backend: Backend, *,
               sleep: Callable[[float], None] = time.sleep,
               clock: Callable[[], float] = time.monotonic,
@@ -166,10 +201,6 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
     # qui échoue n'arrête PAS le passage — le rattachement sert à LIRE, il ne
     # conditionne pas le travail. Perdre l'observabilité est un moindre mal
     # devant une campagne qui refuse de partir.
-    # ⚠️ Compté AVANT que le bilan existe (il naît d'un appel réseau, plus bas) :
-    # un aveuglement qui survient pendant le démarrage doit être compté aussi,
-    # c'est même là qu'il est le plus probable.
-    muet = 0
     # ⚠️ La borne DÉCLARÉE gagne sur le défaut du runner. Résolue ici, une fois,
     # pour qu'elle soit lisible au démarrage plutôt que devinée à la lecture du
     # code : une garde dont on ne sait pas quelle valeur elle applique n'est pas
@@ -236,24 +267,48 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
         # qu'`armed`. Sans ce geste le refus est systématique — et il l'a été sur
         # les 14 campagnes déclarées jusqu'au 03/09, aucune n'ayant jamais atteint
         # `running` alors que huit vagues tournaient.
+        #
+        # ⚠️ Et un refus d'armer ou de prendre ARRÊTE le passage, avant tout
+        # enfilement — le même refus que la déclaration, un geste plus loin
+        # (18/09/2026, oto-backend#996). Ces deux chemins journalisaient et
+        # continuaient : les travaux partaient sur une campagne restée `draft`,
+        # et `op=stop` n'arrête que ce qui est `armed` ou `running`. Des
+        # exécutions impossibles à arrêter — exactement ce que le refus de
+        # déclaration existait pour empêcher.
+        #
+        # Une seule tolérance, la REPRISE d'un passage interrompu : `launch`
+        # refusé `not_launchable` (la campagne est déjà armée ou en cours) ne
+        # dit rien d'anormal, et c'est la prise qui tranche ; `take` refusé
+        # `not_takeable` ne se tolère que si la campagne se LIT `running`.
+        # Tout autre refus — dont `no_runner_armed` — est fatal.
         try:
             backend.armer_flotte(fleet_id)
         except BackendError as e:
-            muet += 1
-            logger.warning("flotte #%s non armée (%s) — la prise va donc échouer, "
-                           "et l'état restera muet sur ce passage", fleet_id, e)
+            if e.code != "not_launchable":
+                raise _abandon("non armée", fleet_id, e,
+                               definitif=not _transitoire(e)) from e
+            logger.info("flotte #%s déjà armée ou en cours (%s) — reprise, la "
+                        "prise tranche", fleet_id, e)
         try:
             backend.prendre_flotte(fleet_id)
             logger.info("flotte #%s prise — le passage est en cours", fleet_id)
         except BackendError as e:
-            muet += 1
-            logger.warning("flotte #%s non prise (%s) — le passage tourne quand "
-                           "même, mais son état ne dira pas « en cours »",
+            if e.code != "not_takeable":
+                raise _abandon("non prise", fleet_id, e,
+                               definitif=not _transitoire(e)) from e
+            try:
+                statut = backend.lire_flotte(fleet_id).get("status")
+            except BackendError as lecture:
+                raise _abandon("non prise, et son état illisible", fleet_id,
+                               lecture, definitif=not _transitoire(lecture)) from e
+            if statut != "running":
+                raise _abandon("non prise", fleet_id, e, definitif=True,
+                               statut=statut) from e
+            logger.warning("flotte #%s déjà `running` — REPRISE du passage (%s)",
                            fleet_id, e)
     bilan = FleetBilan(lignes_initiales=backend.count_rows(spec.namespace,
                                                            filter=spec.filter,
                                                            org=spec.org))
-    bilan.etat_muet = muet
     en_vol: set[int] = set()
     dernier_depart: Optional[float] = None
     failed_consecutifs = 0
@@ -541,6 +596,19 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                         logger.error("flotte ABANDONNÉE : %s — %d done, %d failed",
                                      bilan.arret, bilan.done, bilan.failed)
                         return bilan
+                    # ⚠️ Un `409 fleet_not_serving` est de la même famille : la
+                    # campagne n'est ni `armed` ni `running` (jamais armée, ou
+                    # arrêtée entre-temps), et le serveur refuse d'y ajouter une
+                    # exécution qu'`op=stop` ne saurait pas arrêter. Retenter ne
+                    # la réarmera pas. Toléré, ce refus finissait dix tours plus
+                    # tard en « backend indisponible » — un diagnostic faux sur
+                    # un serveur qui répondait, et qui disait pourquoi.
+                    # Le texte du serveur passe en clair : il NOMME l'état.
+                    if e.status == 409 and e.code == "fleet_not_serving":
+                        bilan.arret = f"campagne hors service — {e}"
+                        logger.error("flotte ABANDONNÉE : %s — %d done, %d failed",
+                                     bilan.arret, bilan.done, bilan.failed)
+                        return bilan
                     erreurs_backend += 1
                     if erreurs_backend >= _MAX_ERREURS_BACKEND:
                         bilan.arret = (f"backend indisponible ({erreurs_backend} "
@@ -577,6 +645,20 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
 # fiches, et 26 h ont passé avant qu'un humain ne la relance. Le coût d'une
 # relance sous panne persistante est quasi nul (les jobs 402 ne consomment pas).
 _ARRETS_NORMAUX = ("file vide", "volume atteint", "budget atteint")
+# Les motifs d'arrêt DÉFINITIFS — le serveur a répondu que la cible n'existe pas
+# ou ne sert pas : relancer referait le même refus. Sortie en
+# `SORTIE_ABANDON_DEFINITIF`, que l'unité ne relance pas.
+# ⚠️ Constaté le 21/09/2026 : l'unité transiente que pose `scripts/flotte.sh` ne
+# déclare AUCUN `Restart=` — rien ne relance aujourd'hui, quel que soit le code.
+# Le `1` « pour que systemd relance » ne vaut que pour une unité qui le déclare.
+_ARRETS_DEFINITIFS = ("cible introuvable", "campagne hors service")
+
+
+def _sortir_sans_relance(motif: str) -> None:
+    logger.error("ABANDON DÉFINITIF — %s\nPAS DE RELANCE (exit %d) : la cause ne "
+                 "passera pas seule, relancer referait le même refus. Corrige-la, "
+                 "puis relance à la main.", motif, SORTIE_ABANDON_DEFINITIF)
+    sys.exit(SORTIE_ABANDON_DEFINITIF)
 
 
 def main() -> None:
@@ -596,8 +678,13 @@ def main() -> None:
         logger.info("flotte #%s chargée depuis la base : %s", arg[1:], spec.name)
     else:
         spec = load_spec(arg)
-    bilan = run_fleet(spec, backend)
+    try:
+        bilan = run_fleet(spec, backend)
+    except AbandonDefinitif as e:
+        _sortir_sans_relance(str(e))
     logger.info("bilan : %s", bilan)
+    if any(bilan.arret.startswith(m) for m in _ARRETS_DEFINITIFS):
+        _sortir_sans_relance(bilan.arret)
     if not any(bilan.arret.startswith(m) for m in _ARRETS_NORMAUX):
         sys.exit(1)   # panne → systemd relance (jamais sur une fin normale)
 
