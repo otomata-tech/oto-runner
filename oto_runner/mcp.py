@@ -175,6 +175,14 @@ class McpSession:
                    "Accept": "application/json, text/event-stream"}
         if self.session:
             entetes["Mcp-Session-Id"] = self.session
+        if corps.get("method") == "initialize" and self.org is not None:
+            # La boîte à outils d'une session se calcule au HANDSHAKE : sans cet
+            # en-tête, elle suit l'org maison du compte porteur, pas celle de la
+            # mission (#1058 : la maison a basculé 2 → 226 le 22/09, et les
+            # connecteurs de toutes les flottes ont disparu ~2h). Le backend
+            # vérifie l'appartenance ; il ne le lit qu'à l'initialize — les appels
+            # portent déjà leur org en `_org`, c'est elle qui fait foi ensuite.
+            entetes["X-Oto-Org"] = str(self.org)
         r = post_with_deadline(self.url, json=corps, headers=entetes,
                                timeout=_TIMEOUT, wall_s=300)
         brut = _utf8(r)
