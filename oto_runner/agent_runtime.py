@@ -170,6 +170,8 @@ class AgentResult:
     # boucle (cf. `Turn.defaut`) — `None` quand elle s'est arrêtée autrement.
     couverture: Optional[dict] = None    # ce qui fonde `usage` (cf. `comptage`) :
     # les tours, et par poste combien l'ont déclaré et quoi. `None` = non compté.
+    abonnement: Optional[dict] = None    # l'état du FORFAIT du porteur, tel que le
+    # fournisseur l'annonce (voie `claude-subscription` seule) — `None` ailleurs.
 
 
 # `on_turn(role, content_neutre, provider_raw)` : le point d'ancrage du FIL (R1).

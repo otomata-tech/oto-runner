@@ -1,6 +1,7 @@
 """Le choix du provider — une variable d'env, une erreur franche.
 
-`OTO_RUNNER_PROVIDER` ∈ {anthropic, openai} (défaut anthropic). Conséquence de
+`OTO_RUNNER_PROVIDER` ∈ {anthropic, openai, conversations, claude-subscription}
+(défaut anthropic). Conséquence de
 la forme de fil opaque (llm_types) : **un run se continue sur le provider qui
 l'a commencé** — un worker `openai` qui reprendrait un fil Anthropic rejouerait
 des blocs que l'API ne comprend pas. V1 : un worker = un provider, et les
@@ -22,5 +23,9 @@ def get_provider():
     if nom == "conversations":
         from . import agent_conversations
         return agent_conversations
+    if nom == "claude-subscription":
+        from . import agent_abonnement
+        return agent_abonnement
     raise SystemExit(
-        f"OTO_RUNNER_PROVIDER inconnu : `{nom}` (anthropic | openai | conversations)")
+        f"OTO_RUNNER_PROVIDER inconnu : `{nom}` "
+        "(anthropic | openai | conversations | claude-subscription)")
