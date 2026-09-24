@@ -122,6 +122,9 @@ def resultat_declare(res, modele_par_defaut: str) -> dict:
         # d'un job qui n'a pas tourné. Ici, au pire, on estampille ce qu'on a
         # DEMANDÉ ; le transport, lui, sait ce qui a été SERVI et gagne.
         "model": res.model or modele_par_defaut,
+        # Le forfait du porteur (voie abonnement) : le backend le lit au `complete`
+        # pour mettre la personne en attente au seuil, ou la dire déconnectée.
+        **({"abonnement": res.abonnement} if getattr(res, "abonnement", None) else {}),
     }
 
 

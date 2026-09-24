@@ -322,6 +322,25 @@ def _exiger_sans_texte_joint(job: dict) -> None:
             "faut retirer, pas le texte qu'il faut ignorer.")
 
 
+def _contexte_du_bac(job: dict, provider, mcp, file) -> dict:
+    """Ce que la voie ABONNEMENT reçoit en plus (`provider.BAC`) — rien pour les autres.
+
+    Le run tourne dans le bac du porteur, pas ici : le provider a besoin du bac
+    (`sandbox_id`, remis par le backend au claim), de la session MCP du travail
+    (son relais y reprend jeton délégué, org, projet et run) et d'un moyen de
+    PROLONGER le bail pendant que le CLI tourne."""
+    if not getattr(provider, "BAC", False):
+        return {}
+
+    def prolonger() -> None:
+        try:
+            file.extend(job["id"], _LEASE_S)
+        except BackendError as e:   # même tolérance que le heartbeat de la boucle
+            logger.warning("extend %s toléré : %s", job["id"], e)
+
+    return {"bac": job.get("sandbox_id"), "mcp": mcp, "prolonger": prolonger}
+
+
 def _instruction_du(job: dict) -> str:
     """L'instruction du travail, ou un refus franc — jamais un texte de repli."""
     ordre = ((job.get("payload") or {}).get("input") or "").strip()
@@ -474,7 +493,8 @@ def _traiter(backend: Backend, job: dict, provider,
         ordre = prompt or _instruction_du(job)
         res = provider.run_once(instructions=spec.system, inputs=ordre,
                                 tools=p.get("tools") or (), api_key=cle,
-                                modele=spec.model, on_event=on_event)
+                                modele=spec.model, on_event=on_event,
+                                **_contexte_du_bac(job, provider, mcp, file))
         # Le fil garde l'ORDRE et la SYNTHÈSE (l'observabilité au grain run) — le
         # verbatim des tours vit et meurt chez Mistral (store=False, conformité).
         releve = ", ".join(f"{s.tool}{'' if s.ok else ' (non exécuté)'}"
