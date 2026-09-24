@@ -68,7 +68,7 @@ def test_seule_la_voie_abonnement_recoit_le_contexte_du_bac():
         pass
     assert worker._contexte_du_bac({"id": 1}, Autre, object(), object()) == {}
     ctx = worker._contexte_du_bac({"id": 1, "sandbox_id": "u42"}, A, "mcp", object())
-    assert ctx["bac"] == "u42" and ctx["mcp"] == "mcp" and callable(ctx["prolonger"])
+    assert ctx["sandbox"] == "u42" and ctx["mcp"] == "mcp" and callable(ctx["prolonger"])
 
 
 class SessionFactice:

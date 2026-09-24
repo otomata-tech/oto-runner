@@ -1,7 +1,7 @@
-"""Le RELAIS MCP d'un bac : Claude Code parle stdio, le relais parle à oto.
+"""Le RELAIS MCP d'un sandbox : Claude Code parle stdio, le relais parle à oto.
 
 Pourquoi il existe : sur la voie `claude-subscription` (`agent_abonnement`), la
-boucle d'outils tourne dans le CLI Claude Code, dans le bac de la personne — pas
+boucle d'outils tourne dans le CLI Claude Code, dans le sandbox de la personne — pas
 dans le worker. Brancher le CLI directement sur `mcp.oto.cx` lui laisserait deux
 gestes que le runner ne confie jamais au modèle : poser les jetons de contexte
 (`_org`, `_project`, `_run_id` — mesuré le 08/09/2026 : un `_org` inventé quinze
@@ -9,7 +9,7 @@ fois) et respecter l'allowlist du travail. Le relais est une `McpSession`, la
 même que la boucle du worker : il pose le contexte, retire ces jetons des schémas
 servis, et refuse tout outil hors de l'allowlist.
 
-Il tourne DANS le bac (sous l'utilisateur de la personne), lancé par le CLI via
+Il tourne DANS le sandbox (sous l'utilisateur de la personne), lancé par le CLI via
 `--mcp-config`. Il ne voit que ce que le travail lui remet par l'environnement :
 le jeton DÉLÉGUÉ du travail (borné au bail), jamais le secret du worker.
 
@@ -60,7 +60,7 @@ class Relais:
             return self._ok(message, {
                 "protocolVersion": version or _VERSION_PAR_DEFAUT,
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "oto", "version": "relais-bac"}})
+                "serverInfo": {"name": "oto", "version": "relais-sandbox"}})
         if methode == "ping":
             return self._ok(message, {})
         if methode == "tools/list":

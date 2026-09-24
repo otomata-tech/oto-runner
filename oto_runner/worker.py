@@ -323,13 +323,13 @@ def _exiger_sans_texte_joint(job: dict) -> None:
 
 
 def _contexte_du_bac(job: dict, provider, mcp, file) -> dict:
-    """Ce que la voie ABONNEMENT reçoit en plus (`provider.BAC`) — rien pour les autres.
+    """Ce que la voie ABONNEMENT reçoit en plus (`provider.SANDBOX`) — rien pour les autres.
 
-    Le run tourne dans le bac du porteur, pas ici : le provider a besoin du bac
+    Le run tourne dans le sandbox du porteur, pas ici : le provider a besoin du sandbox
     (`sandbox_id`, remis par le backend au claim), de la session MCP du travail
     (son relais y reprend jeton délégué, org, projet et run) et d'un moyen de
     PROLONGER le bail pendant que le CLI tourne."""
-    if not getattr(provider, "BAC", False):
+    if not getattr(provider, "SANDBOX", False):
         return {}
 
     def prolonger() -> None:
@@ -338,7 +338,7 @@ def _contexte_du_bac(job: dict, provider, mcp, file) -> dict:
         except BackendError as e:   # même tolérance que le heartbeat de la boucle
             logger.warning("extend %s toléré : %s", job["id"], e)
 
-    return {"bac": job.get("sandbox_id"), "mcp": mcp, "prolonger": prolonger}
+    return {"sandbox": job.get("sandbox_id"), "mcp": mcp, "prolonger": prolonger}
 
 
 def _instruction_du(job: dict) -> str:
