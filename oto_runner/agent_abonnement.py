@@ -1,13 +1,13 @@
 """La voie `claude-subscription` : le travail tourne sur l'ABONNEMENT Claude de son porteur.
 
 Famille `claude_subscription` (oto-backend#1043, modèles `sub:*`). Le travail ne
-s'exécute pas ici : il s'exécute dans le BAC de la personne — un utilisateur Unix
+s'exécute pas ici : il s'exécute dans le SANDBOX de la personne — un utilisateur Unix
 de la box de la ferme, où elle a connecté elle-même son abonnement au CLI Claude
-Code officiel (dépôt `otomata-tech/ferme-claude`). Ce module demande le run à
-l'AGENT de la box, qui le lance dans le bac et en renvoie le flux.
+Code officiel (dépôt `otomata-tech/claude-sandbox-manager`). Ce module demande le run à
+l'AGENT de la box, qui le lance dans le sandbox et en renvoie le flux.
 
 Ce qui ne passe JAMAIS par ici : l'identifiant de l'abonnement. Il vit dans le
-HOME du bac ; le worker ne reçoit du backend qu'un `sandbox_id`, et ne remet à
+HOME du sandbox ; le worker ne reçoit du backend qu'un `sandbox_id`, et ne remet à
 l'agent que ce que le travail porte déjà — la consigne, l'allowlist, le jeton
 DÉLÉGUÉ (borné au bail) pour le relais MCP (`relais_mcp`).
 
@@ -18,7 +18,7 @@ personne pendant que le CLI tourne encore (deux exécutions sur une session).
 
 Ce que le worker rapporte au backend en plus : `abonnement` — l'état du forfait
 tel que le fournisseur l'annonce (`rate_limit_event`), et `deconnecte` quand le
-bac n'est plus connecté. C'est ce qui met la personne en attente au seuil, avant
+sandbox n'est plus connecté. C'est ce qui met la personne en attente au seuil, avant
 le refus.
 
 Environnement : `OTO_FERME_URL` (l'agent, sur le réseau privé de la box),
@@ -39,7 +39,7 @@ from .agent_runtime import AgentResult, AgentStep
 logger = logging.getLogger("oto_runner")
 
 ONE_SHOT = True     # le worker choisit le chemin là-dessus
-BAC = True          # … et remet à ce provider le contexte du bac (cf. worker._traiter)
+SANDBOX = True          # … et remet à ce provider le contexte du sandbox (cf. worker._traiter)
 
 FAMILLE = "claude_subscription"
 DEFAULT_MODEL = "sub:sonnet"
@@ -130,7 +130,7 @@ def lire_flux(evenements, on_event=None, prolonger: Optional[Callable[[], None]]
         raise RuntimeError(f"le CLI n'a rendu aucun résultat ({resume.get('erreur') or 'flux coupé'})")
     source = init.get("apiKeySource")
     if source != "none":
-        # Une clé d'API dans le bac ferait payer quelqu'un d'autre que l'abonnement.
+        # Une clé d'API dans le sandbox ferait payer quelqu'un d'autre que l'abonnement.
         raise RuntimeError(f"le run n'a pas tourné sur l'abonnement (apiKeySource={source!r})")
     erreur_du_cli = bool(resultat.get("is_error"))
     return AgentResult(
@@ -149,13 +149,13 @@ def lire_flux(evenements, on_event=None, prolonger: Optional[Callable[[], None]]
 
 
 def run_once(*, instructions: str, inputs: str, tools, api_key: Optional[str] = None,
-             modele: Optional[str] = None, on_event=None, bac: Optional[str] = None,
+             modele: Optional[str] = None, on_event=None, sandbox: Optional[str] = None,
              mcp=None, prolonger: Optional[Callable[[], None]] = None) -> AgentResult:
-    """UN run complet dans le bac `bac`, outils compris (côté CLI), → AgentResult."""
+    """UN run complet dans le sandbox `sandbox`, outils compris (côté CLI), → AgentResult."""
     if api_key:
         raise RuntimeError("un travail d'abonnement ne porte jamais de clé de modèle")
-    if not bac:
-        raise RuntimeError("travail d'abonnement sans `sandbox_id` : aucun bac où le lancer")
+    if not sandbox:
+        raise RuntimeError("travail d'abonnement sans `sandbox_id` : aucun sandbox où le lancer")
     if mcp is None:
         raise RuntimeError("travail d'abonnement sans session MCP : le relais n'aurait aucun contexte")
     resolve_key()
@@ -166,7 +166,7 @@ def run_once(*, instructions: str, inputs: str, tools, api_key: Optional[str] = 
         "mcp": {"url": mcp.url, "token": mcp.token, "org": mcp.org, "project": mcp.project,
                 "run_id": mcp.run_id, "tools": sorted(tools or ())},
     }
-    url = f"{os.environ[_ENV_AGENT].rstrip('/')}/api/bacs/{bac}/runs"
+    url = f"{os.environ[_ENV_AGENT].rstrip('/')}/api/sandboxes/{sandbox}/runs"
     entetes = {"Authorization": f"Bearer {os.environ[_ENV_JETON]}",
                "Accept": "application/x-ndjson"}
     with requests.post(url, json=corps, headers=entetes, stream=True,
