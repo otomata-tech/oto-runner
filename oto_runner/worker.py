@@ -322,7 +322,7 @@ def _exiger_sans_texte_joint(job: dict) -> None:
             "faut retirer, pas le texte qu'il faut ignorer.")
 
 
-def _contexte_du_bac(job: dict, provider, mcp, file) -> dict:
+def _contexte_du_sandbox(job: dict, provider, mcp, file, apposer) -> dict:
     """Ce que la voie ABONNEMENT reçoit en plus (`provider.SANDBOX`) — rien pour les autres.
 
     Le run tourne dans le sandbox du porteur, pas ici : le provider a besoin du sandbox
@@ -338,7 +338,10 @@ def _contexte_du_bac(job: dict, provider, mcp, file) -> dict:
         except BackendError as e:   # même tolérance que le heartbeat de la boucle
             logger.warning("extend %s toléré : %s", job["id"], e)
 
-    return {"sandbox": job.get("sandbox_id"), "mcp": mcp, "prolonger": prolonger}
+    # `apposer` : le FIL du run, tenu EN DIRECT — chaque message du CLI y part à son
+    # arrivée, comme les tours de la boucle ordinaire (même rejeux, même prolongation).
+    return {"sandbox": job.get("sandbox_id"), "mcp": mcp, "prolonger": prolonger,
+            "apposer": apposer}
 
 
 def _instruction_du(job: dict) -> str:
@@ -491,18 +494,25 @@ def _traiter(backend: Backend, job: dict, provider,
         # aucune prescription métier — ni où écrire, ni sous quelle forme :
         # c'est la procédure qui le dit à l'agent, pas l'exécuteur.
         ordre = prompt or _instruction_du(job)
+        # Voie SANDBOX (abonnement) : le CLI rend ses messages au fil de l'eau, et le
+        # fil se tient EN DIRECT — l'ordre d'abord, puis chaque message à son arrivée.
+        en_direct = bool(getattr(provider, "SANDBOX", False))
+        if en_direct:
+            apposer("user", {"text": ordre}, {"role": "user", "content": ordre})
         res = provider.run_once(instructions=spec.system, inputs=ordre,
                                 tools=p.get("tools") or (), api_key=cle,
                                 modele=spec.model, on_event=on_event,
-                                **_contexte_du_bac(job, provider, mcp, file))
-        # Le fil garde l'ORDRE et la SYNTHÈSE (l'observabilité au grain run) — le
-        # verbatim des tours vit et meurt chez Mistral (store=False, conformité).
-        releve = ", ".join(f"{s.tool}{'' if s.ok else ' (non exécuté)'}"
-                           for s in res.steps) or "aucun appel d'outil"
-        apposer("user", {"content": ordre}, {"role": "user", "content": ordre})
-        apposer("assistant",
-                {"content": res.reply, "tool_relevé": releve},
-                {"role": "assistant", "content": res.reply})
+                                **_contexte_du_sandbox(job, provider, mcp, file, apposer))
+        if not en_direct:
+            # Chemin Conversations : le fil garde l'ORDRE et la SYNTHÈSE (l'observabilité
+            # au grain run) — le verbatim des tours vit et meurt chez Mistral
+            # (store=False, conformité).
+            releve = ", ".join(f"{s.tool}{'' if s.ok else ' (non exécuté)'}"
+                               for s in res.steps) or "aucun appel d'outil"
+            apposer("user", {"content": ordre}, {"role": "user", "content": ordre})
+            apposer("assistant",
+                    {"content": res.reply, "tool_relevé": releve},
+                    {"role": "assistant", "content": res.reply})
     else:
         res = agent_runtime.run(spec, mcp, provider, prompt=prompt,
                                 history=historique, on_turn=apposer, api_key=cle,
