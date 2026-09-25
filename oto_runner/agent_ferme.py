@@ -42,25 +42,27 @@ logger = logging.getLogger("oto_runner")
 
 ONE_SHOT = True
 SANDBOX = True
+MOTEUR = "claude_code_ferme"   # ce que le résultat dit de ce qui a tourné
 EFFORT_SERVI = True       # le CLI prend `--effort` (cf. `worker._exiger_effort_servi`)
+ORG_DU_TRAVAIL = True     # le sandbox est celui de l'org DU TRAVAIL (`worker._contexte_du_sandbox`)
+#: Ne démarre qu'en worker « clés clients seules » (`worker._verifier_cle_au_demarrage`) :
+#: sans ce mode, le backend lui servirait les agents posés SANS modèle (qu'aucune clé ne
+#: paie ici) et ceux des orgs sans clé déposée, au lieu de les arrêter à la réservation.
+CLES_CLIENTS_EXIGEES = True
 WORKSPACE_SERVI = True    # le workspace d'une clé d'organisation part avec le run
 FAMILLE = "anthropic"
 DEFAULT_MODEL = "claude-sonnet-5"
 SOURCE_ATTENDUE = "ANTHROPIC_API_KEY"
 
 _ENV_AGENT, _ENV_JETON = agent_abonnement._ENV_AGENT, agent_abonnement._ENV_JETON
-# Une box pleine (429) : réessayée, bail prolongé entre deux essais, puis l'échec nommé.
-_PLEINE_ESSAIS, _PLEINE_ATTENTE_S = 4, 20
+FermePleine = agent_abonnement.FermePleine
+_PLEINE_ESSAIS = agent_abonnement._PLEINE_ESSAIS
 
 _sandboxes_creees: set = set()
 
 
 class LlmUnavailable(RuntimeError):
     pass
-
-
-class FermePleine(RuntimeError):
-    """La ferme tient déjà toutes ses places, essai après essai."""
 
 
 def model() -> str:
@@ -111,8 +113,12 @@ def run_once(*, instructions: str, inputs: str, tools, api_key: Optional[str] = 
              apposer: Optional[Callable[[str, dict, dict], None]] = None,
              max_tokens: Optional[int] = None, max_seconds: Optional[int] = None,
              effort: Optional[str] = None, workspace: Optional[str] = None,
+             org: Optional[int] = None,
              horloge=time.monotonic, attendre=time.sleep) -> AgentResult:
-    """UN run complet dans le sandbox de l'org, sur la clé de l'org, → AgentResult."""
+    """UN run complet dans le sandbox de l'org, sur la clé de l'org, → AgentResult.
+
+    `org` : l'org DU TRAVAIL (celle que la réservation rend), jamais celle de la session
+    MCP — une charge sans org ferait partager un seul sandbox à toutes."""
     if not api_key:
         # La plateforme ne paie aucun run : sans la clé de l'org, rien ne part.
         raise RuntimeError("travail sans clé d'organisation : la voie ferme ne tourne que "
@@ -120,7 +126,9 @@ def run_once(*, instructions: str, inputs: str, tools, api_key: Optional[str] = 
     if mcp is None:
         raise RuntimeError("travail sans session MCP : le relais n'aurait aucun contexte")
     resolve_key()
-    slug = sandbox or sandbox_de_l_org(mcp.org)
+    if sandbox is None and org is None:
+        raise RuntimeError("travail sans org : aucun sandbox d'org où le lancer")
+    slug = sandbox or sandbox_de_l_org(org)
     _assurer_sandbox(slug)
     corps = {
         "prompt": inputs,
@@ -137,27 +145,16 @@ def run_once(*, instructions: str, inputs: str, tools, api_key: Optional[str] = 
     echeance = horloge() + max_seconds if max_seconds else None
     lecture = (min(agent_abonnement._LECTURE_S, max_seconds) if max_seconds
                else agent_abonnement._LECTURE_S)
-    for essai in range(_PLEINE_ESSAIS):
-        with requests.post(_url(f"{slug}/runs"), json=corps,
-                           headers=_entetes(Accept="application/x-ndjson"),
-                           stream=True, timeout=(10, lecture)) as r:
-            if r.status_code == 429:
-                if on_event:
-                    on_event("ferme_pleine", {"essai": essai + 1})
-                if prolonger:
-                    prolonger()
-                if essai + 1 < _PLEINE_ESSAIS:
-                    attendre(_PLEINE_ATTENTE_S * (essai + 1))
-                continue
-            if r.status_code != 200:
-                raise RuntimeError(f"agent de la ferme : {r.status_code} {r.text[:300]}")
-            lignes = (json.loads(l) for l in r.iter_lines(decode_unicode=True) if l)
-            res = agent_abonnement.lire_flux(
-                agent_abonnement._jusqu_a(lignes, echeance, horloge), on_event=on_event,
-                prolonger=prolonger, apposer=apposer, horloge=horloge,
-                max_tokens=max_tokens, echeance=echeance, source_attendue=SOURCE_ATTENDUE)
-            # Une clé ne porte pas de forfait : rien à rapporter comme un abonnement.
-            res.abonnement = None
-            return res
-    raise FermePleine(f"la ferme est restée pleine sur {_PLEINE_ESSAIS} essais — "
-                      "le travail repassera à sa prochaine tentative")
+    with agent_abonnement.poster_le_run(
+            _url(f"{slug}/runs"), corps, _entetes(Accept="application/x-ndjson"), lecture,
+            prolonger=prolonger, on_event=on_event, attendre=attendre) as r:
+        if r.status_code != 200:
+            raise RuntimeError(f"agent de la ferme : {r.status_code} {r.text[:300]}")
+        lignes = (json.loads(l) for l in r.iter_lines(decode_unicode=True) if l)
+        res = agent_abonnement.lire_flux(
+            agent_abonnement._jusqu_a(lignes, echeance, horloge), on_event=on_event,
+            prolonger=prolonger, apposer=apposer, horloge=horloge,
+            max_tokens=max_tokens, echeance=echeance, source_attendue=SOURCE_ATTENDUE)
+    # Une clé ne porte pas de forfait : rien à rapporter comme un abonnement.
+    res.abonnement = None
+    return res

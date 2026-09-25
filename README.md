@@ -451,9 +451,19 @@ plateforme ne paie aucun run : sans clé d'org, rien ne part — à lancer en
 `OTO_RUNNER_ORG_KEYS_ONLY=1`.
 
 **Basculer = remplacer les workers**, pas migrer les agents : la famille ne change pas.
-Pour essayer sur une org d'abord : `OTO_RUNNER_ORGS=<org>` (le worker ne réserve que ces
-orgs). ⚠️ Ce champ exige un backend qui déclare `org_ids` au claim — posé face à un
-backend plus ancien, chaque réservation part en `400 : unknown_fields`.
+⚠️ Démarre seulement en `OTO_RUNNER_ORG_KEYS_ONLY=1` (sinon `SystemExit`) : une org sans
+clé déposée voit donc ses agents Claude ARRÊTÉS à la réservation, raison écrite — le prix
+de « la plateforme ne paie aucun run ».
+
+**Essayer sur une org d'abord** : `OTO_RUNNER_ORGS=<org>` — ce worker ne réserve que ces
+orgs. ⚠️ Il ne les réserve pas SEUL : les workers `anthropic` de la boucle maison prennent
+toujours aussi les travaux de ces orgs, l'essai est donc un MÉLANGE. Chaque résultat dit
+quel moteur a tourné (`moteur` : `claude_code_ferme`, `boucle`, …) : c'est là qu'on lit
+l'essai. ⚠️ `org_ids` exige un backend qui le déclare au claim — posé face à un backend
+plus ancien, chaque réservation part en `400 : unknown_fields`.
+
+Une box pleine (429) se réessaie (4 essais, bail prolongé) sur **les deux** voies de la
+ferme : clé et abonnement partagent les mêmes places.
 
 ### Les limites d'UN run déclarées sur l'agent (25/09/2026)
 

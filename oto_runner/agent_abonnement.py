@@ -40,6 +40,7 @@ logger = logging.getLogger("oto_runner")
 
 ONE_SHOT = True     # le worker choisit le chemin là-dessus
 PAYE_PAR = "abonnement"   # ce que le résultat dit de qui a payé (`worker._paye_par`)
+MOTEUR = "claude_code_abonnement"   # ce que le résultat dit de ce qui a tourné
 SANDBOX = True          # … et remet à ce provider le contexte du sandbox (cf. worker._traiter)
 
 FAMILLE = "claude_subscription"
@@ -60,6 +61,37 @@ _FINS = {"success": "end_turn", "error_max_turns": "max_steps"}
 
 class LlmUnavailable(RuntimeError):
     pass
+
+
+class FermePleine(RuntimeError):
+    """La ferme tient déjà toutes ses places, essai après essai."""
+
+
+#: Une box pleine (429) : réessayée, bail prolongé entre deux essais, puis l'échec nommé.
+#: Commun aux deux voies de la ferme : les runs par clé et par abonnement se partagent
+#: les mêmes places, et un travail d'abonnement ne doit pas perdre une tentative parce
+#: que des runs par clé occupent la box.
+_PLEINE_ESSAIS, _PLEINE_ATTENTE_S = 4, 20
+
+
+def poster_le_run(url: str, corps: dict, entetes: dict, lecture: int,
+                  prolonger=None, on_event=None, attendre=time.sleep):
+    """`POST …/runs` en flux — la réponse OUVERTE (à fermer par `with`), une fois qu'elle
+    n'est plus un 429."""
+    for essai in range(_PLEINE_ESSAIS):
+        r = requests.post(url, json=corps, headers=entetes, stream=True,
+                          timeout=(10, lecture))
+        if r.status_code != 429:
+            return r
+        r.close()
+        if on_event:
+            on_event("ferme_pleine", {"essai": essai + 1})
+        if prolonger:
+            prolonger()
+        if essai + 1 < _PLEINE_ESSAIS:
+            attendre(_PLEINE_ATTENTE_S * (essai + 1))
+    raise FermePleine(f"la ferme est restée pleine sur {_PLEINE_ESSAIS} essais — "
+                      "le travail repassera à sa prochaine tentative")
 
 
 def model() -> str:
@@ -326,7 +358,7 @@ def run_once(*, instructions: str, inputs: str, tools, api_key: Optional[str] = 
              mcp=None, prolonger: Optional[Callable[[], None]] = None,
              apposer: Optional[Callable[[str, dict, dict], None]] = None,
              max_tokens: Optional[int] = None, max_seconds: Optional[int] = None,
-             horloge=time.monotonic) -> AgentResult:
+             horloge=time.monotonic, attendre=time.sleep) -> AgentResult:
     """UN run complet dans le sandbox `sandbox`, outils compris (côté CLI), → AgentResult.
 
     `max_tokens` / `max_seconds` : les limites déclarées sur l'agent, tenues ICI, sur le
@@ -356,8 +388,8 @@ def run_once(*, instructions: str, inputs: str, tools, api_key: Optional[str] = 
     url = f"{os.environ[_ENV_AGENT].rstrip('/')}/api/sandboxes/{sandbox}/runs"
     entetes = {"Authorization": f"Bearer {os.environ[_ENV_JETON]}",
                "Accept": "application/x-ndjson"}
-    with requests.post(url, json=corps, headers=entetes, stream=True,
-                       timeout=(10, lecture)) as r:
+    with poster_le_run(url, corps, entetes, lecture, prolonger=prolonger,
+                       on_event=on_event, attendre=attendre) as r:
         if r.status_code != 200:
             raise RuntimeError(f"agent de la ferme : {r.status_code} {r.text[:300]}")
         lignes = (json.loads(l) for l in r.iter_lines(decode_unicode=True) if l)

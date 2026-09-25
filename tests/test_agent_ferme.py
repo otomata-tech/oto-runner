@@ -31,6 +31,9 @@ class Reponse:
     def __exit__(self, *a):
         return False
 
+    def close(self):
+        pass
+
     def iter_lines(self, decode_unicode=True):
         return (json.dumps(e) for e in self._ev)
 
@@ -53,7 +56,7 @@ def ferme(monkeypatch):
 
 def _lancer(**kw):
     base = dict(instructions="i", inputs="go", tools=["data_rows"], api_key="sk-ant-api03-org",
-                modele="claude-sonnet-5", mcp=MCP, attendre=lambda s: None)
+                modele="claude-sonnet-5", mcp=MCP, org=4242, attendre=lambda s: None)
     return F.run_once(**{**base, **kw})
 
 
@@ -78,6 +81,19 @@ def test_le_sandbox_n_est_cree_qu_une_fois_par_processus(ferme):
     _lancer()
     _lancer()
     assert len(ferme["put"]) == 1 and len(ferme["post"]) == 2
+
+
+def test_le_sandbox_est_celui_de_l_org_du_travail_jamais_de_la_session(ferme):
+    ferme["reponses"].append(Reponse(200, [INIT, FIN]))
+    _lancer(org=4343, mcp=types.SimpleNamespace(**{**vars(MCP), "org": None}))
+    assert ferme["put"][0].endswith(F.sandbox_de_l_org(4343))
+    assert F.sandbox_de_l_org(4343) != F.sandbox_de_l_org(4242)
+
+
+def test_sans_org_rien_ne_part(ferme):
+    with pytest.raises(RuntimeError, match="sans org"):
+        _lancer(org=None)
+    assert ferme["post"] == [] and ferme["put"] == []
 
 
 def test_sans_cle_d_org_rien_ne_part(ferme):
@@ -143,6 +159,41 @@ def test_une_cle_d_org_se_dit_payee_par_l_org():
     from oto_runner import agent_abonnement
     assert worker._paye_par(F, "sk-ant-api03-org") == "cle_org"
     assert worker._paye_par(agent_abonnement, None) == "abonnement"
+
+
+def test_la_ferme_refuse_de_demarrer_hors_du_mode_cles_clients(monkeypatch):
+    monkeypatch.delenv("OTO_RUNNER_ORG_KEYS_ONLY", raising=False)
+    with pytest.raises(SystemExit, match="OTO_RUNNER_ORG_KEYS_ONLY"):
+        worker._verifier_cle_au_demarrage(F, "anthropic")
+    monkeypatch.setenv("OTO_RUNNER_ORG_KEYS_ONLY", "1")
+    worker._verifier_cle_au_demarrage(F, "anthropic")
+
+
+def test_le_worker_remet_l_org_du_travail_a_la_ferme():
+    ctx = worker._contexte_du_sandbox({"id": 1, "org_id": 4242}, F, MCP, None, None)
+    assert ctx["org"] == 4242
+    from oto_runner import agent_abonnement
+    assert "org" not in worker._contexte_du_sandbox({"id": 1, "org_id": 4242},
+                                                    agent_abonnement, MCP, None, None)
+
+
+def test_le_resultat_dit_quel_moteur_a_tourne():
+    from oto_runner import agent_abonnement, agent_conversations, agent_llm
+    assert worker._moteur(F) == "claude_code_ferme"
+    assert worker._moteur(agent_abonnement) == "claude_code_abonnement"
+    assert worker._moteur(agent_llm) == "boucle"
+    assert worker._moteur(agent_conversations) == "conversations"
+
+
+def test_une_ferme_pleine_ne_coute_pas_une_tentative_a_l_abonnement(ferme):
+    """Les deux voies partagent les places : l'abonnement réessaie comme la clé."""
+    from oto_runner import agent_abonnement
+    abo = {"type": "system", "subtype": "init", "apiKeySource": "none", "model": "x"}
+    ferme["reponses"] += [Reponse(429), Reponse(200, [abo, FIN])]
+    attentes = []
+    res = agent_abonnement.run_once(instructions="i", inputs="go", tools=[], sandbox="u1",
+                                    mcp=MCP, attendre=attentes.append)
+    assert res.stopped == "end_turn" and attentes == [20]
 
 
 def test_la_famille_de_la_ferme_est_anthropic():

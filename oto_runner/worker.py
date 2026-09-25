@@ -215,6 +215,12 @@ def _verifier_cle_au_demarrage(provider, depot: str) -> None:
     mais il doit nommer le dépôt qu'il consomme, sinon aucune clé ne lui sera
     jamais remise et il sonderait à vide pour toujours.
     """
+    if getattr(provider, "CLES_CLIENTS_EXIGEES", False) and not _cles_clients_seules():
+        raise SystemExit(
+            f"ce provider ne tourne que sur la clé de l'org : lance-le avec "
+            f"{_ENV_CLES_CLIENTS}=1. Sans ce mode, le backend lui servirait les agents posés "
+            "sans modèle et ceux des orgs sans clé, qu'il ferait échouer tentative après "
+            "tentative au lieu que la réservation les arrête, raison écrite.")
     if not _cles_clients_seules():
         provider.resolve_key()
         return
@@ -367,7 +373,10 @@ def _contexte_du_sandbox(job: dict, provider, mcp, file, apposer) -> dict:
     # `apposer` : le FIL du run, tenu EN DIRECT — chaque message du CLI y part à son
     # arrivée, comme les tours de la boucle ordinaire (même rejeux, même prolongation).
     return {"sandbox": job.get("sandbox_id"), "mcp": mcp, "prolonger": prolonger,
-            "apposer": apposer}
+            "apposer": apposer,
+            # La voie ferme par clé lance le run dans le sandbox de l'org DU TRAVAIL.
+            **({"org": job.get("org_id")} if getattr(provider, "ORG_DU_TRAVAIL", False)
+               else {})}
 
 
 def _bornes_du_one_shot(spec: AgentSpec, provider, note) -> dict:
@@ -396,6 +405,13 @@ def _paye_par(provider, cle: Optional[str]) -> str:
     if declare:
         return declare
     return "cle_org" if cle else "cle_plateforme"
+
+
+def _moteur(provider) -> str:
+    """Ce qui a EXÉCUTÉ le run — pour distinguer deux moteurs qui servent la même famille
+    (la boucle maison et Claude Code dans la ferme, pendant une bascule)."""
+    return (getattr(provider, "MOTEUR", None)
+            or ("conversations" if getattr(provider, "ONE_SHOT", False) else "boucle"))
 
 
 def _reglages_du_one_shot(spec: AgentSpec, provider, workspace: Optional[str]) -> dict:
@@ -602,6 +618,7 @@ def _traiter(backend: Backend, job: dict, provider,
     demande = journal.modele_demande(job, provider) or _modele_courant(provider)
     resultat = conclusion.resultat_declare(res, demande)
     resultat["paye_par"] = _paye_par(provider, cle)
+    resultat["moteur"] = _moteur(provider)
     jetons, lus_en_cache = resultat["usage_tokens"], resultat["usage_cache_read"]
     echec = conclusion.echec_nomme(res)
     outcome = "failed" if echec else ("done" if res.stopped == "end_turn" else "blocked")
