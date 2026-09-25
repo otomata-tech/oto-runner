@@ -185,6 +185,28 @@ def _cles_clients_seules() -> bool:
     return (os.environ.get(_ENV_CLES_CLIENTS) or "").strip() == "1"
 
 
+#: Les orgs que CE worker sert, et elles seules (`12,34`) — pour essayer un moteur sur une
+#: org avant de le donner au parc. Absent = toutes, comme avant. ⚠️ Exige un backend qui
+#: déclare `org_ids` au claim : posé face à un backend plus ancien, CHAQUE réservation
+#: partirait en `400 : unknown_fields`.
+_ENV_ORGS = "OTO_RUNNER_ORGS"
+
+
+def _orgs_servies() -> Optional[list]:
+    brut = (os.environ.get(_ENV_ORGS) or "").strip()
+    if not brut:
+        return None
+    try:
+        orgs = [int(x) for x in brut.split(",") if x.strip()]
+    except ValueError:
+        raise SystemExit(f"{_ENV_ORGS} = {brut!r} : des identifiants d'org séparés par des "
+                         "virgules sont attendus")
+    if not orgs:
+        raise SystemExit(f"{_ENV_ORGS} = {brut!r} : aucune org — retire la variable pour "
+                         "les servir toutes")
+    return orgs
+
+
 def _verifier_cle_au_demarrage(provider, depot: str) -> None:
     """Échoue FORT au boot si le worker ne pourra payer aucun tour.
 
@@ -273,7 +295,8 @@ def _exiger_tentative(job: dict) -> None:
 
 def _exiger_effort_servi(p: dict, provider) -> None:
     effort = str(p.get("effort") or "").strip()
-    if effort and getattr(provider, "ONE_SHOT", False):
+    if (effort and getattr(provider, "ONE_SHOT", False)
+            and not getattr(provider, "EFFORT_SERVI", False)):
         raise EffortNonServi(
             f"ce travail demande l'effort `{effort}` et ce worker sert la voie "
             "Conversations, qui ne l'envoie pas. Il n'est pas exécuté : le servir sans "
@@ -367,10 +390,23 @@ def _bornes_du_one_shot(spec: AgentSpec, provider, note) -> dict:
 
 
 def _paye_par(provider, cle: Optional[str]) -> str:
-    """Qui a payé les jetons de ce run — dit dans le résultat, pas déduit d'une facture."""
-    if getattr(provider, "SANDBOX", False):
-        return "abonnement"
+    """Qui a payé les jetons de ce run — dit dans le résultat, pas déduit d'une facture.
+    Un provider qui le sait le déclare (`PAYE_PAR` : l'abonnement) ; sinon, la clé."""
+    declare = getattr(provider, "PAYE_PAR", None)
+    if declare:
+        return declare
     return "cle_org" if cle else "cle_plateforme"
+
+
+def _reglages_du_one_shot(spec: AgentSpec, provider, workspace: Optional[str]) -> dict:
+    """Ce qu'un provider ONE-SHOT sait recevoir en plus, s'il le déclare : l'effort
+    (`EFFORT_SERVI`), le workspace d'une clé d'organisation (`WORKSPACE_SERVI`)."""
+    out = {}
+    if getattr(provider, "EFFORT_SERVI", False) and spec.effort:
+        out["effort"] = spec.effort
+    if getattr(provider, "WORKSPACE_SERVI", False) and workspace:
+        out["workspace"] = workspace
+    return out
 
 
 def _instruction_du(job: dict) -> str:
@@ -532,7 +568,8 @@ def _traiter(backend: Backend, job: dict, provider,
                                 tools=p.get("tools") or (), api_key=cle,
                                 modele=spec.model, on_event=on_event,
                                 **_contexte_du_sandbox(job, provider, mcp, file, apposer),
-                                **_bornes_du_one_shot(spec, provider, note))
+                                **_bornes_du_one_shot(spec, provider, note),
+                                **_reglages_du_one_shot(spec, provider, workspace))
         if not en_direct:
             # Chemin Conversations : le fil garde l'ORDRE et la SYNTHÈSE (l'observabilité
             # au grain run) — le verbatim des tours vit et meurt chez Mistral
@@ -706,6 +743,7 @@ def main() -> None:
     # Échoue FORT au boot si le worker ne peut payer aucun tour, pas au 1er job.
     _verifier_cle_au_demarrage(provider, depot)
     cles_seules = _cles_clients_seules()
+    orgs = _orgs_servies()   # lu au boot : une valeur illisible échoue ICI
     lease_s = 960 if getattr(provider, "ONE_SHOT", False) else _LEASE_S
     # L'alias configuré ET ce qu'il résout : deux workers lancés de part et
     # d'autre d'une bascule le disent au journal, sans qu'on ait à le deviner.
@@ -725,7 +763,8 @@ def main() -> None:
             # autre implémentation de `claim` (doublures, file de flotte) reste
             # compatible sans être touchée.
             job = backend.claim(lease_seconds=lease_s, depot=depot,
-                                **({"org_key_only": True} if cles_seules else {}))
+                                **({"org_key_only": True} if cles_seules else {}),
+                                **({"org_ids": orgs} if orgs else {}))
         except BackendError as e:
             logger.warning("claim : %s", e)
             time.sleep(_POLL_S)

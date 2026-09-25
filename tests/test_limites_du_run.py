@@ -313,7 +313,7 @@ def test_un_flux_sans_resultat_avant_l_echeance_reste_une_panne():
 
 
 def test_un_run_arrete_a_sa_borne_est_quand_meme_refuse_s_il_payait_par_cle():
-    with pytest.raises(RuntimeError, match="abonnement"):
+    with pytest.raises(RuntimeError, match="apiKeySource"):
         A.lire_flux([dict(INIT, apiKeySource="ANTHROPIC_API_KEY"), *FLUX, FIN], max_tokens=10)
 
 

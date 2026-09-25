@@ -1,0 +1,163 @@
+"""La voie `claude-farm` : un travail de la famille `anthropic`, exécuté par Claude Code
+dans la FERME, sur la clé d'API de l'organisation.
+
+Le pendant de `agent_abonnement` (la voie `claude-subscription`), avec ce qui change
+quand c'est une CLÉ qui paie et non une session :
+
+- **Le sandbox est celui de l'ORG**, pas d'une personne : `o<empreinte de l'org>`, créé
+  au premier run (l'agent de la ferme le fait sans effet s'il existe). Il ne détient
+  rien — aucune session, aucune clé.
+- **La clé part avec CHAQUE run** (`api_key`, et `workspace` pour une clé
+  d'organisation Anthropic) : la ferme l'écrit pour ce run seul et l'efface à la fin.
+  Aucune copie ne vit sur la box ; la rotation dans le coffre vaut au run suivant.
+- **Le CLI doit annoncer `apiKeySource: ANTHROPIC_API_KEY`** : une session qui paierait
+  à la place de la clé arrête le run avant son premier tour.
+- **Pas de verrou par sandbox** côté ferme (aucun rafraîchissement OAuth à protéger) :
+  plusieurs travaux d'une même org tournent en parallèle, dans la limite des places de
+  la box. Une box pleine (429) se réessaie ici, bail prolongé, avant d'échouer.
+- Aucun forfait à rapporter : `abonnement` reste vide.
+
+Ce qui ne change pas : le flux lu (`agent_abonnement.lire_flux`), ses limites en vol
+(`max_tokens`, `max_seconds`), le fil tenu en direct, le relais MCP dans le sandbox.
+
+Opt-in par processus : `OTO_RUNNER_PROVIDER=claude-farm`, dépôt `anthropic`. Prévu pour
+un worker « clés clients seules » (`OTO_RUNNER_ORG_KEYS_ONLY=1`) : la plateforme ne
+paie aucun run. Environnement : `OTO_FERME_URL`, `OTO_FERME_TOKEN`, `OTO_MCP_URL`.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import time
+from typing import Callable, Optional
+
+import requests
+
+from . import agent_abonnement
+from .agent_runtime import AgentResult
+
+logger = logging.getLogger("oto_runner")
+
+ONE_SHOT = True
+SANDBOX = True
+EFFORT_SERVI = True       # le CLI prend `--effort` (cf. `worker._exiger_effort_servi`)
+WORKSPACE_SERVI = True    # le workspace d'une clé d'organisation part avec le run
+FAMILLE = "anthropic"
+DEFAULT_MODEL = "claude-sonnet-5"
+SOURCE_ATTENDUE = "ANTHROPIC_API_KEY"
+
+_ENV_AGENT, _ENV_JETON = agent_abonnement._ENV_AGENT, agent_abonnement._ENV_JETON
+# Une box pleine (429) : réessayée, bail prolongé entre deux essais, puis l'échec nommé.
+_PLEINE_ESSAIS, _PLEINE_ATTENTE_S = 4, 20
+
+_sandboxes_creees: set = set()
+
+
+class LlmUnavailable(RuntimeError):
+    pass
+
+
+class FermePleine(RuntimeError):
+    """La ferme tient déjà toutes ses places, essai après essai."""
+
+
+def model() -> str:
+    return os.environ.get("OTO_RUNNER_MODEL") or DEFAULT_MODEL
+
+
+def depot() -> str:
+    return FAMILLE
+
+
+def resolve_key() -> str:
+    """Aucune clé à ce worker : il ne paie rien. Ce qu'il lui faut, c'est l'agent de la
+    ferme. La clé est celle de l'org, remise avec chaque travail (`run_once`)."""
+    for nom in (_ENV_AGENT, _ENV_JETON):
+        if not (os.environ.get(nom) or "").strip():
+            raise LlmUnavailable(f"{nom} absent de l'environnement du worker")
+    return ""
+
+
+def sandbox_de_l_org(org_id) -> str:
+    """Le sandbox d'une org : un nom stable, qui ne dit pas laquelle. Préfixe `o` (celui
+    d'une personne est `u`, côté backend) : les deux ne se rencontrent jamais."""
+    return "o" + hashlib.sha256(f"org:{org_id}".encode()).hexdigest()[:20]
+
+
+def _url(chemin: str) -> str:
+    return f"{os.environ[_ENV_AGENT].rstrip('/')}/api/sandboxes/{chemin}"
+
+
+def _entetes(**extra) -> dict:
+    return {"Authorization": f"Bearer {os.environ[_ENV_JETON]}", **extra}
+
+
+def _assurer_sandbox(slug: str) -> None:
+    """Crée le sandbox de l'org s'il n'existe pas — une fois par processus : la ferme
+    répond sans rien faire à un sandbox qui existe déjà."""
+    if slug in _sandboxes_creees:
+        return
+    r = requests.put(_url(slug), headers=_entetes(), timeout=(10, 60))
+    if r.status_code != 200:
+        raise RuntimeError(f"agent de la ferme : création du sandbox → {r.status_code} {r.text[:300]}")
+    _sandboxes_creees.add(slug)
+
+
+def run_once(*, instructions: str, inputs: str, tools, api_key: Optional[str] = None,
+             modele: Optional[str] = None, on_event=None, sandbox: Optional[str] = None,
+             mcp=None, prolonger: Optional[Callable[[], None]] = None,
+             apposer: Optional[Callable[[str, dict, dict], None]] = None,
+             max_tokens: Optional[int] = None, max_seconds: Optional[int] = None,
+             effort: Optional[str] = None, workspace: Optional[str] = None,
+             horloge=time.monotonic, attendre=time.sleep) -> AgentResult:
+    """UN run complet dans le sandbox de l'org, sur la clé de l'org, → AgentResult."""
+    if not api_key:
+        # La plateforme ne paie aucun run : sans la clé de l'org, rien ne part.
+        raise RuntimeError("travail sans clé d'organisation : la voie ferme ne tourne que "
+                           "sur la clé que l'org a déposée")
+    if mcp is None:
+        raise RuntimeError("travail sans session MCP : le relais n'aurait aucun contexte")
+    resolve_key()
+    slug = sandbox or sandbox_de_l_org(mcp.org)
+    _assurer_sandbox(slug)
+    corps = {
+        "prompt": inputs,
+        "model": modele or model(),
+        "system": instructions,
+        "auth": "key",
+        "api_key": api_key,
+        **({"workspace": workspace} if workspace else {}),
+        **({"effort": effort} if effort else {}),
+        "mcp": {"url": mcp.url, "token": mcp.token, "org": mcp.org, "project": mcp.project,
+                "run_id": mcp.run_id, "tools": sorted(tools or ())},
+        **({"max_seconds": int(max_seconds)} if max_seconds else {}),
+    }
+    echeance = horloge() + max_seconds if max_seconds else None
+    lecture = (min(agent_abonnement._LECTURE_S, max_seconds) if max_seconds
+               else agent_abonnement._LECTURE_S)
+    for essai in range(_PLEINE_ESSAIS):
+        with requests.post(_url(f"{slug}/runs"), json=corps,
+                           headers=_entetes(Accept="application/x-ndjson"),
+                           stream=True, timeout=(10, lecture)) as r:
+            if r.status_code == 429:
+                if on_event:
+                    on_event("ferme_pleine", {"essai": essai + 1})
+                if prolonger:
+                    prolonger()
+                if essai + 1 < _PLEINE_ESSAIS:
+                    attendre(_PLEINE_ATTENTE_S * (essai + 1))
+                continue
+            if r.status_code != 200:
+                raise RuntimeError(f"agent de la ferme : {r.status_code} {r.text[:300]}")
+            lignes = (json.loads(l) for l in r.iter_lines(decode_unicode=True) if l)
+            res = agent_abonnement.lire_flux(
+                agent_abonnement._jusqu_a(lignes, echeance, horloge), on_event=on_event,
+                prolonger=prolonger, apposer=apposer, horloge=horloge,
+                max_tokens=max_tokens, echeance=echeance, source_attendue=SOURCE_ATTENDUE)
+            # Une clé ne porte pas de forfait : rien à rapporter comme un abonnement.
+            res.abonnement = None
+            return res
+    raise FermePleine(f"la ferme est restée pleine sur {_PLEINE_ESSAIS} essais — "
+                      "le travail repassera à sa prochaine tentative")

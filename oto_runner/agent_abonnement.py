@@ -39,6 +39,7 @@ from .agent_runtime import AgentResult, AgentStep
 logger = logging.getLogger("oto_runner")
 
 ONE_SHOT = True     # le worker choisit le chemin là-dessus
+PAYE_PAR = "abonnement"   # ce que le résultat dit de qui a payé (`worker._paye_par`)
 SANDBOX = True          # … et remet à ce provider le contexte du sandbox (cf. worker._traiter)
 
 FAMILLE = "claude_subscription"
@@ -186,7 +187,7 @@ def _usage_du_resultat(resultat: dict) -> tuple[dict, Optional[dict]]:
 def lire_flux(evenements, on_event=None, prolonger: Optional[Callable[[], None]] = None,
               apposer: Optional[Callable[[str, dict, dict], None]] = None,
               horloge=time.monotonic, max_tokens: Optional[int] = None,
-              echeance: Optional[float] = None) -> AgentResult:
+              echeance: Optional[float] = None, source_attendue: str = "none") -> AgentResult:
     """Le flux `stream-json` du CLI (plus le résumé de l'agent) → `AgentResult`.
 
     `apposer(role, neutre, brut)` : le fil du run, tenu EN DIRECT — chaque message du CLI y
@@ -225,10 +226,12 @@ def lire_flux(evenements, on_event=None, prolonger: Optional[Callable[[], None]]
             # Vérifié DÈS l'annonce, pas à la fin : un run arrêté à sa borne ne passe
             # jamais par la fin, et il doit être refusé avant le premier tour payé.
             source = ev.get("apiKeySource")
-            if source != "none":
-                # Une clé d'API dans le sandbox ferait payer quelqu'un d'autre que l'abonnement.
+            if source != source_attendue:
+                # Le CLI paie avec autre chose que ce qui a été servi : une clé dans le
+                # sandbox d'un abonnement, ou une session là où on a remis une clé.
                 raise RuntimeError(
-                    f"le run n'a pas tourné sur l'abonnement (apiKeySource={source!r})")
+                    f"le run n'a pas tourné sur ce qui devait le payer "
+                    f"(apiKeySource={source!r}, attendu {source_attendue!r})")
         elif t == "rate_limit_event":
             forfait = ev.get("rate_limit_info")
         elif t == "assistant":
@@ -296,9 +299,10 @@ def lire_flux(evenements, on_event=None, prolonger: Optional[Callable[[], None]]
                                        if forfait else None))
     if resultat is None:
         raise RuntimeError(f"le CLI n'a rendu aucun résultat ({resume.get('erreur') or 'flux coupé'})")
-    if init.get("apiKeySource") != "none":
-        raise RuntimeError(f"le run n'a pas tourné sur l'abonnement "
-                           f"(apiKeySource={init.get('apiKeySource')!r})")
+    if init.get("apiKeySource") != source_attendue:
+        raise RuntimeError(f"le run n'a pas tourné sur ce qui devait le payer "
+                           f"(apiKeySource={init.get('apiKeySource')!r}, "
+                           f"attendu {source_attendue!r})")
     erreur_du_cli = bool(resultat.get("is_error"))
     usage, par_modele = _usage_du_resultat(resultat)
     return AgentResult(

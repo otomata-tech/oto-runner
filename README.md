@@ -430,6 +430,31 @@ maximum 107 204 — plus aucune ligne folle.
 > attrape « ça tourne à vide », ce sont les **faux départs en série**, décrits
 > ci-dessus.
 
+### Claude Code dans la ferme, sur la clé de l'org : `claude-farm` (25/09/2026)
+
+`OTO_RUNNER_PROVIDER=claude-farm` sert la famille **`anthropic`** — les modèles et les
+agents d'aujourd'hui, inchangés — en exécutant chaque travail avec **Claude Code** dans la
+ferme (`otomata-tech/claude-sandbox-manager`), au lieu de la boucle maison. C'est le
+pendant, par clé, de `claude-subscription` :
+
+| | `claude-subscription` | `claude-farm` |
+| --- | --- | --- |
+| famille | `claude_subscription` (`sub:*`) | `anthropic` (inchangée) |
+| sandbox | celui de la personne (`u…`), qui détient sa session | celui de l'org (`o…`), qui ne détient rien |
+| ce qui paie | la session, jamais une clé | la clé de l'org, **remise avec chaque run**, effacée par la ferme à la fin |
+| `apiKeySource` attendu | `none` | `ANTHROPIC_API_KEY` |
+| en parallèle | un run par sandbox (rafraîchissement OAuth) | plusieurs, dans la limite des places de la box (429 réessayé, bail prolongé) |
+| rapport | forfait (`abonnement`) | aucun ; `paye_par: cle_org` |
+
+Effort (`--effort`) et workspace d'une clé d'organisation partent avec le run. La
+plateforme ne paie aucun run : sans clé d'org, rien ne part — à lancer en
+`OTO_RUNNER_ORG_KEYS_ONLY=1`.
+
+**Basculer = remplacer les workers**, pas migrer les agents : la famille ne change pas.
+Pour essayer sur une org d'abord : `OTO_RUNNER_ORGS=<org>` (le worker ne réserve que ces
+orgs). ⚠️ Ce champ exige un backend qui déclare `org_ids` au claim — posé face à un
+backend plus ancien, chaque réservation part en `400 : unknown_fields`.
+
 ### Les limites d'UN run déclarées sur l'agent (25/09/2026)
 
 Un agent (déclencheur ou flotte) peut déclarer `max_run_seconds` et, sur un
@@ -441,7 +466,7 @@ chaque moteur garde exactement ce qu'il avait. Qui les tient, et comment :
 | --- | --- | --- |
 | boucle ordinaire | vérifiée **avant** chaque tour : un tour entamé va au bout (dépassement ≤ un tour) | après chaque tour, comme avant |
 | Conversations (one-shot) | partagée par passes et relances, **rabotée à 900 s** (échéance du chemin, `borne_rabotee` au journal) | **non tenue** : l'usage n'arrive qu'à la fin — `borne_non_suivie` au journal |
-| ferme (`claude-subscription`) | tenue sur le flux ; un silence au-delà de l'échéance est une borne, pas une panne ; aussi envoyée à la ferme | tenue **en vol** sur le flux |
+| ferme (`claude-subscription`, `claude-farm`) | tenue sur le flux ; un silence au-delà de l'échéance est une borne, pas une panne ; aussi envoyée à la ferme | tenue **en vol** sur le flux |
 
 Atteinte, une limite conclut `stopped: max_seconds` ou `max_tokens` — `blocked`, jamais
 un échec : le rejeu rejouerait la même limite. Sur la ferme, quitter le flux ferme la
