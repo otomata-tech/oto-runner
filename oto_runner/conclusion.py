@@ -138,13 +138,36 @@ def echec_nomme(res) -> Optional[str]:
       fournisseur, fin non déclarée — la réponse ou l'appel peut être incomplet.
     Conclus `done`, ces travaux cachaient une ligne jamais servie ; conclus en
     échec nommé, ils passent par la mécanique existante des tentatives, et se
-    voient là où les échecs se lisent."""
+    voient là où les échecs se lisent.
+
+    ⚠️ La fin du tour se lit sous LES DEUX noms, parce que les deux transports la
+    nomment différemment : Chat Completions pose `finish_reason`, Anthropic pose
+    `stop_reason` (leurs énumérations respectives). Ce motif ne lisait que le
+    premier — donc, sur la voie Anthropic, il rendait « non déclarée » alors que
+    la cause était là, à côté, dans le même dictionnaire. Mesuré sur un agent
+    événementiel de production : NEUF tentatives réparties sur trois travaux, les
+    18 et 22/09/2026, toutes rendues `fin_anormale (non déclarée)` — un motif
+    d'échec qui ne nomme rien fait chercher la cause dans les journaux d'une
+    machine, quand elle avait été captée à la source et jetée au dernier pas."""
     arret = getattr(res, "stopped", None)
     defaut = getattr(res, "defaut", None) or {}
     if arret == "appel_mal_encode":
         return f"appel_outil_mal_encode ({defaut.get('outil') or 'outil inconnu'})"
     if arret == "fin_anormale":
-        return f"fin_anormale ({defaut.get('finish_reason') or 'non déclarée'})"
+        return f"fin_anormale ({_fin_du_tour(defaut) or 'non déclarée'})"
+    return None
+
+
+def _fin_du_tour(defaut: dict) -> Optional[str]:
+    """La fin déclarée par le fournisseur, quel que soit le nom qu'il lui donne.
+
+    ⚠️ Un nom inconnu ne se devine pas : on rend `None`, et l'appelant dit « non
+    déclarée ». C'est un relevé, pas une reconstruction — mieux vaut avouer le
+    manque que nommer une fin qu'on n'a pas lue."""
+    for nom in ("finish_reason", "stop_reason"):
+        valeur = defaut.get(nom)
+        if valeur:
+            return str(valeur)
     return None
 
 
