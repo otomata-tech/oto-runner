@@ -49,6 +49,9 @@ _ENV_AGENT = "OTO_FERME_URL"
 _ENV_JETON = "OTO_FERME_TOKEN"
 _PROLONGER_S = 60
 _LECTURE_S = 600    # silence toléré entre deux événements (un outil lent)
+# Le fil borne un tour à 256 000 caractères (oto-backend, `run_thread`) : une sortie d'outil
+# se coupe AVANT, bloc par bloc, et la coupe se DIT dans le texte gardé.
+_SORTIE_MAX = 50_000
 
 # Les fins du CLI (`result.subtype`) → le vocabulaire de la boucle (`AgentResult.stopped`).
 _FINS = {"success": "end_turn", "error_max_turns": "max_steps"}
@@ -85,9 +88,36 @@ def _nom_outil(nom: str) -> str:
     return nom[len(_PREFIXE_OUTIL):] if nom.startswith(_PREFIXE_OUTIL) else nom
 
 
+def _borner(texte: str) -> str:
+    if len(texte) <= _SORTIE_MAX:
+        return texte
+    return texte[:_SORTIE_MAX] + f"\n[… coupé pour le fil : {len(texte)} caractères au total]"
+
+
+def _message_borne(message: dict) -> dict:
+    """Le message tel que le CLI l'a rendu, sorties d'outils bornées pour le fil."""
+    blocs = []
+    for bloc in message.get("content") or []:
+        if isinstance(bloc, dict) and bloc.get("type") == "tool_result":
+            contenu = bloc.get("content")
+            if isinstance(contenu, str):
+                bloc = {**bloc, "content": _borner(contenu)}
+            elif isinstance(contenu, list):
+                bloc = {**bloc, "content": [
+                    {**c, "text": _borner(c["text"])} if isinstance(c, dict) and "text" in c else c
+                    for c in contenu]}
+        blocs.append(bloc)
+    return {**message, "content": blocs}
+
+
 def lire_flux(evenements, on_event=None, prolonger: Optional[Callable[[], None]] = None,
+              apposer: Optional[Callable[[str, dict, dict], None]] = None,
               horloge=time.monotonic) -> AgentResult:
     """Le flux `stream-json` du CLI (plus le résumé de l'agent) → `AgentResult`.
+
+    `apposer(role, neutre, brut)` : le fil du run, tenu EN DIRECT — chaque message du CLI y
+    part à son arrivée, au format de la boucle ordinaire (`assistant` : texte + appels ;
+    `tool` : issue de chaque appel). Le brut est le message Anthropic que le CLI a rendu.
 
     Séparé du transport pour se tester sur un flux enregistré."""
     steps: list[AgentStep] = []
@@ -107,15 +137,30 @@ def lire_flux(evenements, on_event=None, prolonger: Optional[Callable[[], None]]
         elif t == "rate_limit_event":
             forfait = ev.get("rate_limit_info")
         elif t == "assistant":
-            for bloc in (ev.get("message") or {}).get("content") or []:
+            message = ev.get("message") or {}
+            textes, appels = [], []
+            for bloc in message.get("content") or []:
                 if bloc.get("type") == "tool_use":
-                    en_vol[bloc.get("id")] = (_nom_outil(bloc.get("name") or "?"), maintenant)
+                    nom = _nom_outil(bloc.get("name") or "?")
+                    en_vol[bloc.get("id")] = (nom, maintenant)
+                    appels.append({"name": nom})
+                elif bloc.get("type") == "text":
+                    textes.append(bloc.get("text") or "")
+            if apposer:
+                apposer("assistant", {"text": "".join(textes), "tool_calls": appels}, message)
         elif t == "user":
-            for bloc in (ev.get("message") or {}).get("content") or []:
+            message = ev.get("message") or {}
+            issues = []
+            for bloc in message.get("content") or []:
                 if isinstance(bloc, dict) and bloc.get("type") == "tool_result":
                     nom, depart = en_vol.pop(bloc.get("tool_use_id"), ("?", maintenant))
+                    duree = int((maintenant - depart) * 1000)
                     steps.append(AgentStep(tool=nom, ok=not bloc.get("is_error"),
-                                           duration_ms=int((maintenant - depart) * 1000)))
+                                           duration_ms=duree))
+                    issues.append({"name": nom, "ok": not bloc.get("is_error"),
+                                   "duration_ms": duree})
+            if apposer and issues:
+                apposer("tool", {"tool_calls": issues}, _message_borne(message))
         elif t == "result":
             resultat = ev
         elif t == "ferme_resume":
@@ -124,7 +169,7 @@ def lire_flux(evenements, on_event=None, prolonger: Optional[Callable[[], None]]
         # Pas une exception : c'est une CONCLUSION que le backend doit lire
         # (`deconnecte` → la personne passe `needs_login`, ses travaux attendent).
         return AgentResult(reply="", stopped="fin_anormale",
-                           defaut={"finish_reason": "bac_deconnecte"},
+                           defaut={"finish_reason": "sandbox_deconnecte"},
                            abonnement={"deconnecte": True})
     if resultat is None:
         raise RuntimeError(f"le CLI n'a rendu aucun résultat ({resume.get('erreur') or 'flux coupé'})")
@@ -150,7 +195,8 @@ def lire_flux(evenements, on_event=None, prolonger: Optional[Callable[[], None]]
 
 def run_once(*, instructions: str, inputs: str, tools, api_key: Optional[str] = None,
              modele: Optional[str] = None, on_event=None, sandbox: Optional[str] = None,
-             mcp=None, prolonger: Optional[Callable[[], None]] = None) -> AgentResult:
+             mcp=None, prolonger: Optional[Callable[[], None]] = None,
+             apposer: Optional[Callable[[str, dict, dict], None]] = None) -> AgentResult:
     """UN run complet dans le sandbox `sandbox`, outils compris (côté CLI), → AgentResult."""
     if api_key:
         raise RuntimeError("un travail d'abonnement ne porte jamais de clé de modèle")
@@ -174,4 +220,4 @@ def run_once(*, instructions: str, inputs: str, tools, api_key: Optional[str] = 
         if r.status_code != 200:
             raise RuntimeError(f"agent de la ferme : {r.status_code} {r.text[:300]}")
         lignes = (json.loads(l) for l in r.iter_lines(decode_unicode=True) if l)
-        return lire_flux(lignes, on_event=on_event, prolonger=prolonger)
+        return lire_flux(lignes, on_event=on_event, prolonger=prolonger, apposer=apposer)
