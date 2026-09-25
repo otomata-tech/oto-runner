@@ -430,6 +430,41 @@ maximum 107 204 — plus aucune ligne folle.
 > attrape « ça tourne à vide », ce sont les **faux départs en série**, décrits
 > ci-dessus.
 
+### Les limites d'UN run déclarées sur l'agent (25/09/2026)
+
+Un agent (déclencheur ou flotte) peut déclarer `max_run_seconds` et, sur un
+déclencheur, `max_tokens` (oto-backend). Le travail les porte en `max_seconds` et
+`max_tokens` — **seulement s'ils sont déclarés : absents, aucune échéance nouvelle**,
+chaque moteur garde exactement ce qu'il avait. Qui les tient, et comment :
+
+| moteur | `max_seconds` | `max_tokens` |
+| --- | --- | --- |
+| boucle ordinaire | vérifiée **avant** chaque tour : un tour entamé va au bout (dépassement ≤ un tour) | après chaque tour, comme avant |
+| Conversations (one-shot) | partagée par passes et relances, **rabotée à 900 s** (échéance du chemin, `borne_rabotee` au journal) | **non tenue** : l'usage n'arrive qu'à la fin — `borne_non_suivie` au journal |
+| ferme (`claude-subscription`) | tenue sur le flux ; un silence au-delà de l'échéance est une borne, pas une panne ; aussi envoyée à la ferme | tenue **en vol** sur le flux |
+
+Atteinte, une limite conclut `stopped: max_seconds` ou `max_tokens` — `blocked`, jamais
+un échec : le rejeu rejouerait la même limite. Sur la ferme, quitter le flux ferme la
+connexion ; l'agent de la ferme ne s'en aperçoit qu'à sa prochaine écriture, et arrête
+alors l'unité du run. ⚠️ D'ici là le CLI continue : un appel muet va au bout, le tour
+suivant se paie, et le sandbox reste occupé — **le dépassement est d'un tour au plus**,
+pas zéro. La durée de l'unité (`RuntimeMaxSec`, posée depuis `max_seconds`) est le
+filet ; si ce dépassement compte, le remède est une route d'arrêt côté ferme. Quand
+c'est la ferme qui tue l'unité à sa durée, le flux finit sans `result` : au-delà de
+l'échéance, c'est la borne atteinte, pas une panne.
+
+⚠️ **Le flux du CLI répète l'usage d'un message sur chacun de ses blocs**, et n'y
+annonce qu'une sortie **partielle** (1 ou 3 jetons pour un message qui en fera des
+centaines). La borne en vol garde donc le maximum par identifiant de message, et sa
+sortie est un minorant : un run arrêté en vol publie `usage_output: null`, jamais ce
+minorant. Le compte qui fait foi est celui du `result` final.
+
+Sur la ferme, les postes d'usage sont la **somme de `result.modelUsage`** — chaque
+modèle qui a servi, sous-agents compris ; `usage` n'en porte que le fil principal. Le
+détail part en `usage_par_modele` (`{modèle: {entree, sortie, cache_lu, cache_ecrit,
+cout_usd}}`, coût au tarif public calculé par le CLI). Chaque résultat dit aussi
+**qui a payé** : `paye_par` ∈ `cle_org` | `cle_plateforme` | `abonnement`.
+
 Chaque job conclu déclare son coût et sa sortie (`usage_tokens`, `usage_input`,
 `usage_input_total`, `usage_output`, `usage_cache_read`, `usage_cache_write`,
 `usage_couverture`, `tool_counts`, `claims`, `writes`, `claim_vide`, `faux_depart`,

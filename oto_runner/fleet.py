@@ -564,7 +564,7 @@ def run_fleet(spec: FleetSpec, backend: Backend, *,
                 # résultat, est la seule façon de ne pas prendre un passage
                 # tronqué pour un passage fini.
                 coupes = sum(n for m, n in bilan.arrets.items()
-                             if m in ("max_steps", "max_tokens"))
+                             if m in ("max_steps", "max_tokens", "max_seconds"))
                 if coupes:
                     logger.error("⚠️ %d travail/travaux sur %d ont été COUPÉS à "
                                  "leur plafond (%s) : ils comptent comme réussis "
