@@ -78,6 +78,7 @@ worker la déclare au job. C'est un relevé d'observabilité : il ne fait jamais
 from __future__ import annotations
 
 import json
+import math
 import logging
 import os
 import random
@@ -266,7 +267,8 @@ def modele_resolu(nom: str) -> Optional[str]:
 
 def run_once(*, instructions: str, inputs: str, tools,
              api_key: Optional[str] = None, modele: Optional[str] = None,
-             on_event=None) -> AgentResult:
+             on_event=None, max_seconds: Optional[int] = None,
+             horloge=time.monotonic) -> AgentResult:
     """UNE conversation complète (outils compris, côté Mistral) → AgentResult.
 
     `on_event(type, champs)` : le journal du travail — `conversation` (la requête
@@ -283,7 +285,20 @@ def run_once(*, instructions: str, inputs: str, tools,
     concaténés, jetons additionnés).
 
     Le bilan porte la version CONCRÈTE que l'alias résolvait au moment de
-    l'appel : sans elle, une bascule d'alias ne se date pas après coup."""
+    l'appel : sans elle, une bascule d'alias ne se date pas après coup.
+
+    `max_seconds` : la durée murale déclarée sur l'agent. Elle borne le TOUT — passes et
+    relances —, jamais au-delà des 900 s de ce chemin (`_WALL_S`, que le bail one-shot
+    couvre) : ce qui dépasse est raboté, et le journal le dit. Atteinte, elle conclut
+    `stopped=max_seconds` avec ce qui a été compté — pas une exception : le rejeu de
+    travail rejouerait la même échéance."""
+    debut = horloge()
+    duree = _WALL_S
+    if max_seconds is not None:
+        duree = min(int(max_seconds), _WALL_S)
+        if duree < max_seconds and on_event:
+            on_event("borne_rabotee", {"borne": "max_seconds", "demande": max_seconds,
+                                       "servie": duree, "raison": "échéance du chemin one-shot"})
     # `modele` = celui que l'agent DÉCLARE (oto-backend #939) ; à défaut celui du
     # worker. Il traverse `modele_resolu` comme l'autre : c'est l'alias servi qui
     # est relevé, et un alias déclaré par un agent en a autant besoin.
@@ -311,9 +326,33 @@ def run_once(*, instructions: str, inputs: str, tools,
 
     cumul: Optional[AgentResult] = None
     for relance in range(maxi + 1):
+        # Sans échéance d'agent : chaque passe garde ses 900 s, comme avant. Avec : les
+        # passes et relances se partagent la durée déclarée.
+        restant = (_WALL_S if max_seconds is None
+                   else math.ceil(duree - (horloge() - debut)))
+        if restant <= 0:
+            note("borne_atteinte", borne="max_seconds", max_seconds=max_seconds,
+                 relance=relance)
+            if cumul is not None:
+                cumul.stopped = "max_seconds"
+            break
         note("conversation", url=url, corps=corps, relance=relance,
              modele_resolu=resolu)
-        d = _poster(url, corps, entetes)
+        try:
+            d = _poster(url, corps, entetes, wall_s=max(1, restant))
+        except DeadlineExceeded:
+            # L'échéance de l'AGENT (plus courte que celle du chemin) a coupé la passe :
+            # une borne atteinte, pas une panne. Sans elle, c'est la panne d'avant.
+            if max_seconds is None or duree >= _WALL_S:
+                raise
+            note("borne_atteinte", borne="max_seconds", max_seconds=max_seconds,
+                 relance=relance, en_vol=True)
+            if cumul is None:
+                # Rien n'est revenu : l'usage de la passe coupée n'est pas connu, et il
+                # reste NON DÉCLARÉ (jamais un zéro), cf. `comptage`.
+                return AgentResult(reply="", stopped="max_seconds", model=resolu)
+            cumul.stopped = "max_seconds"
+            break
         note("reponse", outputs=d.get("outputs"), usage=d.get("usage"),
              modele=d.get("model"), relance=relance)
         cumul = _cumuler(cumul, _parse(d, tools, demande=nom))
@@ -337,7 +376,7 @@ def run_once(*, instructions: str, inputs: str, tools,
     return cumul
 
 
-def _poster(url: str, corps: dict, entetes: dict) -> dict:
+def _poster(url: str, corps: dict, entetes: dict, wall_s: int = _WALL_S) -> dict:
     """UN POST vers /v1/conversations, rejeux transitoires compris → son JSON."""
     derniere = None
     for essai in range(3):
@@ -346,7 +385,7 @@ def _poster(url: str, corps: dict, entetes: dict) -> dict:
         # un run légitime coupé à read=300 dès la 3e fiche de campagne). La
         # deadline MURALE (900 s) reste le seul vrai couperet.
         r = post_with_deadline(url, json=corps, headers=entetes,
-                               timeout=(10, 660), wall_s=_WALL_S)
+                               timeout=(10, 660), wall_s=wall_s)
         if r.status_code in _TRANSITOIRE:
             derniere = f"{r.status_code} : {r.text[:200]}"
             logger.warning("conversations %s (essai %s/3)", derniere, essai + 1)

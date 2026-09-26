@@ -125,6 +125,10 @@ def resultat_declare(res, modele_par_defaut: str) -> dict:
         # Le forfait du porteur (voie abonnement) : le backend le lit au `complete`
         # pour mettre la personne en attente au seuil, ou la dire déconnectée.
         **({"abonnement": res.abonnement} if getattr(res, "abonnement", None) else {}),
+        # L'usage par modèle quand le transport le rend (sous-agents compris) : les postes
+        # ci-dessus en sont la somme. Un conteneur — `_resume` le lâche si la conclusion
+        # est refusée pour sa taille, les totaux restent.
+        **({"usage_par_modele": res.par_modele} if getattr(res, "par_modele", None) else {}),
     }
 
 

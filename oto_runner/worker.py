@@ -103,6 +103,9 @@ def _spec_du_job(job: dict) -> AgentSpec:
         # coûte, et une ligne mesurée à 65 571 jetons le 01/09 tenait largement
         # sous ses 40 pas.
         max_tokens=(int(p["max_tokens"]) if p.get("max_tokens") else None),
+        # La durée murale déclarée sur l'agent (oto-backend `max_run_seconds`). Absente =
+        # aucune échéance nouvelle : chaque moteur garde exactement ce qu'il avait.
+        max_seconds=(int(p["max_seconds"]) if p.get("max_seconds") else None),
         # ⚠️ `is not None` et non la véracité : `temperature: 0` est LA valeur
         # qu'on déclare pour rendre deux passages comparables, et un test de
         # véracité la jetterait comme si elle n'avait pas été posée.
@@ -182,6 +185,28 @@ def _cles_clients_seules() -> bool:
     return (os.environ.get(_ENV_CLES_CLIENTS) or "").strip() == "1"
 
 
+#: Les orgs que CE worker sert, et elles seules (`12,34`) — pour essayer un moteur sur une
+#: org avant de le donner au parc. Absent = toutes, comme avant. ⚠️ Exige un backend qui
+#: déclare `org_ids` au claim : posé face à un backend plus ancien, CHAQUE réservation
+#: partirait en `400 : unknown_fields`.
+_ENV_ORGS = "OTO_RUNNER_ORGS"
+
+
+def _orgs_servies() -> Optional[list]:
+    brut = (os.environ.get(_ENV_ORGS) or "").strip()
+    if not brut:
+        return None
+    try:
+        orgs = [int(x) for x in brut.split(",") if x.strip()]
+    except ValueError:
+        raise SystemExit(f"{_ENV_ORGS} = {brut!r} : des identifiants d'org séparés par des "
+                         "virgules sont attendus")
+    if not orgs:
+        raise SystemExit(f"{_ENV_ORGS} = {brut!r} : aucune org — retire la variable pour "
+                         "les servir toutes")
+    return orgs
+
+
 def _verifier_cle_au_demarrage(provider, depot: str) -> None:
     """Échoue FORT au boot si le worker ne pourra payer aucun tour.
 
@@ -190,6 +215,12 @@ def _verifier_cle_au_demarrage(provider, depot: str) -> None:
     mais il doit nommer le dépôt qu'il consomme, sinon aucune clé ne lui sera
     jamais remise et il sonderait à vide pour toujours.
     """
+    if getattr(provider, "CLES_CLIENTS_EXIGEES", False) and not _cles_clients_seules():
+        raise SystemExit(
+            f"ce provider ne tourne que sur la clé de l'org : lance-le avec "
+            f"{_ENV_CLES_CLIENTS}=1. Sans ce mode, le backend lui servirait les agents posés "
+            "sans modèle et ceux des orgs sans clé, qu'il ferait échouer tentative après "
+            "tentative au lieu que la réservation les arrête, raison écrite.")
     if not _cles_clients_seules():
         provider.resolve_key()
         return
@@ -270,7 +301,8 @@ def _exiger_tentative(job: dict) -> None:
 
 def _exiger_effort_servi(p: dict, provider) -> None:
     effort = str(p.get("effort") or "").strip()
-    if effort and getattr(provider, "ONE_SHOT", False):
+    if (effort and getattr(provider, "ONE_SHOT", False)
+            and not getattr(provider, "EFFORT_SERVI", False)):
         raise EffortNonServi(
             f"ce travail demande l'effort `{effort}` et ce worker sert la voie "
             "Conversations, qui ne l'envoie pas. Il n'est pas exécuté : le servir sans "
@@ -341,7 +373,56 @@ def _contexte_du_sandbox(job: dict, provider, mcp, file, apposer) -> dict:
     # `apposer` : le FIL du run, tenu EN DIRECT — chaque message du CLI y part à son
     # arrivée, comme les tours de la boucle ordinaire (même rejeux, même prolongation).
     return {"sandbox": job.get("sandbox_id"), "mcp": mcp, "prolonger": prolonger,
-            "apposer": apposer}
+            "apposer": apposer,
+            # La voie ferme par clé lance le run dans le sandbox de l'org DU TRAVAIL.
+            **({"org": job.get("org_id")} if getattr(provider, "ORG_DU_TRAVAIL", False)
+               else {})}
+
+
+def _bornes_du_one_shot(spec: AgentSpec, provider, note) -> dict:
+    """Les limites du run que le provider ONE-SHOT sait tenir — et ce qu'il ne sait pas
+    tenir, dit au journal plutôt que tu.
+
+    `max_seconds` : les deux (Conversations la rabote à son échéance de chemin, la ferme
+    la tient sur le flux). `max_tokens` : la ferme seule — Conversations rend son usage à
+    la FIN de la conversation, il n'y a rien à arrêter en vol."""
+    bornes = {}
+    if spec.max_seconds is not None:
+        bornes["max_seconds"] = spec.max_seconds
+    if spec.max_tokens is not None:
+        if getattr(provider, "SANDBOX", False):
+            bornes["max_tokens"] = spec.max_tokens
+        else:
+            note("borne_non_suivie", borne="max_tokens", max_tokens=spec.max_tokens,
+                 raison="chemin one-shot : l'usage n'est connu qu'à la fin de la conversation")
+    return bornes
+
+
+def _paye_par(provider, cle: Optional[str]) -> str:
+    """Qui a payé les jetons de ce run — dit dans le résultat, pas déduit d'une facture.
+    Un provider qui le sait le déclare (`PAYE_PAR` : l'abonnement) ; sinon, la clé."""
+    declare = getattr(provider, "PAYE_PAR", None)
+    if declare:
+        return declare
+    return "cle_org" if cle else "cle_plateforme"
+
+
+def _moteur(provider) -> str:
+    """Ce qui a EXÉCUTÉ le run — pour distinguer deux moteurs qui servent la même famille
+    (la boucle maison et Claude Code dans la ferme, pendant une bascule)."""
+    return (getattr(provider, "MOTEUR", None)
+            or ("conversations" if getattr(provider, "ONE_SHOT", False) else "boucle"))
+
+
+def _reglages_du_one_shot(spec: AgentSpec, provider, workspace: Optional[str]) -> dict:
+    """Ce qu'un provider ONE-SHOT sait recevoir en plus, s'il le déclare : l'effort
+    (`EFFORT_SERVI`), le workspace d'une clé d'organisation (`WORKSPACE_SERVI`)."""
+    out = {}
+    if getattr(provider, "EFFORT_SERVI", False) and spec.effort:
+        out["effort"] = spec.effort
+    if getattr(provider, "WORKSPACE_SERVI", False) and workspace:
+        out["workspace"] = workspace
+    return out
 
 
 def _instruction_du(job: dict) -> str:
@@ -502,7 +583,9 @@ def _traiter(backend: Backend, job: dict, provider,
         res = provider.run_once(instructions=spec.system, inputs=ordre,
                                 tools=p.get("tools") or (), api_key=cle,
                                 modele=spec.model, on_event=on_event,
-                                **_contexte_du_sandbox(job, provider, mcp, file, apposer))
+                                **_contexte_du_sandbox(job, provider, mcp, file, apposer),
+                                **_bornes_du_one_shot(spec, provider, note),
+                                **_reglages_du_one_shot(spec, provider, workspace))
         if not en_direct:
             # Chemin Conversations : le fil garde l'ORDRE et la SYNTHÈSE (l'observabilité
             # au grain run) — le verbatim des tours vit et meurt chez Mistral
@@ -534,6 +617,8 @@ def _traiter(backend: Backend, job: dict, provider,
     # Large annonçait une substitution qui n'a jamais eu lieu.
     demande = journal.modele_demande(job, provider) or _modele_courant(provider)
     resultat = conclusion.resultat_declare(res, demande)
+    resultat["paye_par"] = _paye_par(provider, cle)
+    resultat["moteur"] = _moteur(provider)
     jetons, lus_en_cache = resultat["usage_tokens"], resultat["usage_cache_read"]
     echec = conclusion.echec_nomme(res)
     outcome = "failed" if echec else ("done" if res.stopped == "end_turn" else "blocked")
@@ -675,6 +760,7 @@ def main() -> None:
     # Échoue FORT au boot si le worker ne peut payer aucun tour, pas au 1er job.
     _verifier_cle_au_demarrage(provider, depot)
     cles_seules = _cles_clients_seules()
+    orgs = _orgs_servies()   # lu au boot : une valeur illisible échoue ICI
     lease_s = 960 if getattr(provider, "ONE_SHOT", False) else _LEASE_S
     # L'alias configuré ET ce qu'il résout : deux workers lancés de part et
     # d'autre d'une bascule le disent au journal, sans qu'on ait à le deviner.
@@ -694,7 +780,8 @@ def main() -> None:
             # autre implémentation de `claim` (doublures, file de flotte) reste
             # compatible sans être touchée.
             job = backend.claim(lease_seconds=lease_s, depot=depot,
-                                **({"org_key_only": True} if cles_seules else {}))
+                                **({"org_key_only": True} if cles_seules else {}),
+                                **({"org_ids": orgs} if orgs else {}))
         except BackendError as e:
             logger.warning("claim : %s", e)
             time.sleep(_POLL_S)

@@ -92,6 +92,15 @@ class AgentSpec:
     # le cumul en temps réel. Posée sur l'ordonnanceur, elle arrive après coup :
     # elle empêche le PROCHAIN travail, jamais celui qui dérive.
     max_tokens: Optional[int] = None
+    # La durée MURALE du déroulé, déclarée sur l'agent (oto-backend, `max_run_seconds` →
+    # charge `max_seconds`). `None` = aucune échéance : la boucle n'en avait pas, et un
+    # agent qui n'en déclare pas garde exactement ce comportement.
+    #
+    # ⚠️ Vérifiée AVANT chaque tour, comme la borne de jetons l'est après : un tour
+    # entamé va au bout (jusqu'aux 420 s d'une requête, plus ses appels d'outils). Le
+    # dépassement est donc d'un tour au plus — couper en plein appel d'outil laisserait
+    # une écriture à moitié faite, ce qu'aucune échéance ne justifie.
+    max_seconds: Optional[int] = None
     # La température du déroulé, DÉCLARÉE par le passage. `None` = on n'envoie
     # rien et le fournisseur applique son défaut — le comportement d'avant.
     #
@@ -156,8 +165,8 @@ class AgentStep:
 class AgentResult:
     reply: str
     steps: list = field(default_factory=list)
-    stopped: str = "end_turn"   # end_turn | max_steps | max_tokens | refusal | no_reply
-    #                             | appel_mal_encode
+    stopped: str = "end_turn"   # end_turn | max_steps | max_tokens | max_seconds | refusal
+    #                             | no_reply | appel_mal_encode
     usage: dict = field(default_factory=dict)
     messages: list = field(default_factory=list)
     raw_outputs: Optional[list] = None   # les entrées BRUTES du fournisseur,
@@ -172,6 +181,8 @@ class AgentResult:
     # les tours, et par poste combien l'ont déclaré et quoi. `None` = non compté.
     abonnement: Optional[dict] = None    # l'état du FORFAIT du porteur, tel que le
     # fournisseur l'annonce (voie `claude-subscription` seule) — `None` ailleurs.
+    par_modele: Optional[dict] = None    # l'usage PAR MODÈLE, sous-agents compris,
+    # quand le transport le rend (voie ferme : `result.modelUsage`) — `None` ailleurs.
 
 
 # `on_turn(role, content_neutre, provider_raw)` : le point d'ancrage du FIL (R1).
@@ -344,7 +355,8 @@ def _run(spec: AgentSpec, transport: ToolTransport, provider, compte: dict,
     # à deviner sous quel plafond de sortie d'outil il a tourné.
     limite_sortie = max_tool_output()
     note("systeme", texte=spec.system, outils=sorted(spec.tools),
-         max_steps=plafond, max_tokens=spec.max_tokens, label=spec.label,
+         max_steps=plafond, max_tokens=spec.max_tokens, max_seconds=spec.max_seconds,
+         label=spec.label,
          max_tool_output=limite_sortie, **_reglages_du_provider(provider))
     if history:
         note("historique", messages=list(messages), total=len(history),
@@ -372,8 +384,17 @@ def _run(spec: AgentSpec, transport: ToolTransport, provider, compte: dict,
     servi: Optional[str] = None
     defaut: Optional[dict] = None
     n_tours = 0
+    debut_deroule = time.monotonic()
 
     for _ in range(plafond + 1):
+        # L'échéance murale, AVANT d'entamer le tour (cf. `AgentSpec.max_seconds`).
+        if spec.max_seconds is not None:
+            ecoule = time.monotonic() - debut_deroule
+            if ecoule >= spec.max_seconds:
+                note("borne_atteinte", borne="max_seconds", max_seconds=spec.max_seconds,
+                     ecoule_s=int(ecoule), tour=n_tours)
+                stopped = "max_seconds"
+                break
         # ⚠️ Le tour est CHRONOMÉTRÉ : sans ça, un journal ne dit pas si un tour a
         # pris deux secondes ou cinq minutes — et c'est la première question qu'on
         # se pose devant un travail mort sur un délai d'attente du fournisseur.

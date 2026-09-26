@@ -430,6 +430,76 @@ maximum 107 204 — plus aucune ligne folle.
 > attrape « ça tourne à vide », ce sont les **faux départs en série**, décrits
 > ci-dessus.
 
+### Claude Code dans la ferme, sur la clé de l'org : `claude-farm` (25/09/2026)
+
+`OTO_RUNNER_PROVIDER=claude-farm` sert la famille **`anthropic`** — les modèles et les
+agents d'aujourd'hui, inchangés — en exécutant chaque travail avec **Claude Code** dans la
+ferme (`otomata-tech/claude-sandbox-manager`), au lieu de la boucle maison. C'est le
+pendant, par clé, de `claude-subscription` :
+
+| | `claude-subscription` | `claude-farm` |
+| --- | --- | --- |
+| famille | `claude_subscription` (`sub:*`) | `anthropic` (inchangée) |
+| sandbox | celui de la personne (`u…`), qui détient sa session | celui de l'org (`o…`), qui ne détient rien |
+| ce qui paie | la session, jamais une clé | la clé de l'org, **remise avec chaque run**, effacée par la ferme à la fin |
+| `apiKeySource` attendu | `none` | `ANTHROPIC_API_KEY` |
+| en parallèle | un run par sandbox (rafraîchissement OAuth) | plusieurs, dans la limite des places de la box (429 réessayé, bail prolongé) |
+| rapport | forfait (`abonnement`) | aucun ; `paye_par: cle_org` |
+
+Effort (`--effort`) et workspace d'une clé d'organisation partent avec le run. La
+plateforme ne paie aucun run : sans clé d'org, rien ne part — à lancer en
+`OTO_RUNNER_ORG_KEYS_ONLY=1`.
+
+**Basculer = remplacer les workers**, pas migrer les agents : la famille ne change pas.
+⚠️ Démarre seulement en `OTO_RUNNER_ORG_KEYS_ONLY=1` (sinon `SystemExit`) : une org sans
+clé déposée voit donc ses agents Claude ARRÊTÉS à la réservation, raison écrite — le prix
+de « la plateforme ne paie aucun run ».
+
+**Essayer sur une org d'abord** : `OTO_RUNNER_ORGS=<org>` — ce worker ne réserve que ces
+orgs. ⚠️ Il ne les réserve pas SEUL : les workers `anthropic` de la boucle maison prennent
+toujours aussi les travaux de ces orgs, l'essai est donc un MÉLANGE. Chaque résultat dit
+quel moteur a tourné (`moteur` : `claude_code_ferme`, `boucle`, …) : c'est là qu'on lit
+l'essai. ⚠️ `org_ids` exige un backend qui le déclare au claim — posé face à un backend
+plus ancien, chaque réservation part en `400 : unknown_fields`.
+
+Une box pleine (429) se réessaie (4 essais, bail prolongé) sur **les deux** voies de la
+ferme : clé et abonnement partagent les mêmes places.
+
+### Les limites d'UN run déclarées sur l'agent (25/09/2026)
+
+Un agent (déclencheur ou flotte) peut déclarer `max_run_seconds` et, sur un
+déclencheur, `max_tokens` (oto-backend). Le travail les porte en `max_seconds` et
+`max_tokens` — **seulement s'ils sont déclarés : absents, aucune échéance nouvelle**,
+chaque moteur garde exactement ce qu'il avait. Qui les tient, et comment :
+
+| moteur | `max_seconds` | `max_tokens` |
+| --- | --- | --- |
+| boucle ordinaire | vérifiée **avant** chaque tour : un tour entamé va au bout (dépassement ≤ un tour) | après chaque tour, comme avant |
+| Conversations (one-shot) | partagée par passes et relances, **rabotée à 900 s** (échéance du chemin, `borne_rabotee` au journal) | **non tenue** : l'usage n'arrive qu'à la fin — `borne_non_suivie` au journal |
+| ferme (`claude-subscription`, `claude-farm`) | tenue sur le flux ; un silence au-delà de l'échéance est une borne, pas une panne ; aussi envoyée à la ferme | tenue **en vol** sur le flux |
+
+Atteinte, une limite conclut `stopped: max_seconds` ou `max_tokens` — `blocked`, jamais
+un échec : le rejeu rejouerait la même limite. Sur la ferme, quitter le flux ferme la
+connexion ; l'agent de la ferme ne s'en aperçoit qu'à sa prochaine écriture, et arrête
+alors l'unité du run. ⚠️ D'ici là le CLI continue : un appel muet va au bout, le tour
+suivant se paie, et le sandbox reste occupé — **le dépassement est d'un tour au plus**,
+pas zéro. La durée de l'unité (`RuntimeMaxSec`, posée depuis `max_seconds`) est le
+filet ; si ce dépassement compte, le remède est une route d'arrêt côté ferme. Quand
+c'est la ferme qui tue l'unité à sa durée, le flux finit sans `result` : au-delà de
+l'échéance, c'est la borne atteinte, pas une panne.
+
+⚠️ **Le flux du CLI répète l'usage d'un message sur chacun de ses blocs**, et n'y
+annonce qu'une sortie **partielle** (1 ou 3 jetons pour un message qui en fera des
+centaines). La borne en vol garde donc le maximum par identifiant de message, et sa
+sortie est un minorant : un run arrêté en vol publie `usage_output: null`, jamais ce
+minorant. Le compte qui fait foi est celui du `result` final.
+
+Sur la ferme, les postes d'usage sont la **somme de `result.modelUsage`** — chaque
+modèle qui a servi, sous-agents compris ; `usage` n'en porte que le fil principal. Le
+détail part en `usage_par_modele` (`{modèle: {entree, sortie, cache_lu, cache_ecrit,
+cout_usd}}`, coût au tarif public calculé par le CLI). Chaque résultat dit aussi
+**qui a payé** : `paye_par` ∈ `cle_org` | `cle_plateforme` | `abonnement`.
+
 Chaque job conclu déclare son coût et sa sortie (`usage_tokens`, `usage_input`,
 `usage_input_total`, `usage_output`, `usage_cache_read`, `usage_cache_write`,
 `usage_couverture`, `tool_counts`, `claims`, `writes`, `claim_vide`, `faux_depart`,
