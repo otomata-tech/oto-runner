@@ -236,3 +236,18 @@ def test_le_claim_n_envoie_org_ids_que_s_il_est_pose(monkeypatch):
     client.claim(lease_seconds=600, depot="anthropic", org_ids=[4242])
     assert "org_ids" not in vus[0]
     assert vus[1]["org_ids"] == [4242]
+
+
+def test_seul_le_worker_de_ferme_declare_son_moteur(monkeypatch):
+    """`engine=farm` ouvre les travaux qu'une org a réservés à la ferme : la ferme le
+    déclare, la boucle jamais — un worker ordinaire envoie le corps d'avant."""
+    vus = []
+    client = B.Backend.__new__(B.Backend)
+    monkeypatch.setattr(client, "_post", lambda chemin, corps, **k: vus.append(corps) or {},
+                        raising=False)
+    client.claim(lease_seconds=600, depot="anthropic")
+    client.claim(lease_seconds=600, depot="anthropic", engine=F.ENGINE)
+    assert "engine" not in vus[0]
+    assert vus[1]["engine"] == "farm"
+    from oto_runner import agent_llm
+    assert getattr(agent_llm, "ENGINE", "") == "", "la boucle ne se dit pas de la ferme"

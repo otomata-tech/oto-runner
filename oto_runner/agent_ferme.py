@@ -45,6 +45,10 @@ logger = logging.getLogger("oto_runner")
 ONE_SHOT = True
 SANDBOX = True
 MOTEUR = "claude_code_ferme"   # ce que le résultat dit de ce qui a tourné
+#: Le moteur que le worker DÉCLARE au claim (`engine`) : seul un worker qui le déclare
+#: réserve les travaux d'une org routée vers la ferme (option d'org `claude_farm`,
+#: oto-backend). Sans lui, ces travaux attendraient ce worker-ci sans qu'il les voie.
+ENGINE = "farm"
 EFFORT_SERVI = True       # le CLI prend `--effort` (cf. `worker._exiger_effort_servi`)
 ORG_DU_TRAVAIL = True     # le sandbox est celui de l'org DU TRAVAIL (`worker._contexte_du_sandbox`)
 #: Ne démarre qu'en worker « clés clients seules » (`worker._verifier_cle_au_demarrage`) :

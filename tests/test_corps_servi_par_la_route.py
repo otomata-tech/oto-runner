@@ -60,6 +60,10 @@ _DECLARES_PAR_LA_ROUTE = {
     # ENVOYÉ que par un worker `OTO_RUNNER_ORGS=…` : ne pas poser la variable avant que la
     # route servie ne le déclare — relire l'OpenAPI de la prod.
     "org_ids",
+    # oto-backend, routage d'une org vers la ferme (29/09/2026). ⚠️ N'est ENVOYÉ que par
+    # un worker de ferme (`agent_ferme.ENGINE`) : déployer le backend qui le déclare
+    # AVANT ce runner, sinon le worker de ferme seul répond `unknown_fields`.
+    "engine",
 }
 
 

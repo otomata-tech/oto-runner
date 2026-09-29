@@ -796,6 +796,8 @@ def main() -> None:
     _verifier_cle_au_demarrage(provider, depot)
     cles_seules = _cles_clients_seules()
     orgs = _orgs_servies()   # lu au boot : une valeur illisible échoue ICI
+    # Le moteur déclaré au claim : la ferme seule en déclare un (`agent_ferme.ENGINE`).
+    engine = getattr(provider, "ENGINE", "")
     lease_s = 960 if getattr(provider, "ONE_SHOT", False) else _LEASE_S
     # L'alias configuré ET ce qu'il résout : deux workers lancés de part et
     # d'autre d'une bascule le disent au journal, sans qu'on ait à le deviner.
@@ -816,7 +818,8 @@ def main() -> None:
             # compatible sans être touchée.
             job = backend.claim(lease_seconds=lease_s, depot=depot,
                                 **({"org_key_only": True} if cles_seules else {}),
-                                **({"org_ids": orgs} if orgs else {}))
+                                **({"org_ids": orgs} if orgs else {}),
+                                **({"engine": engine} if engine else {}))
         except BackendError as e:
             logger.warning("claim : %s", e)
             time.sleep(_POLL_S)
