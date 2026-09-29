@@ -29,7 +29,7 @@ def test_un_run_conclu_rend_reponse_pas_usage_et_forfait():
 
 
 def test_un_run_paye_par_une_cle_est_refuse():
-    with pytest.raises(RuntimeError, match="abonnement"):
+    with pytest.raises(RuntimeError, match="apiKeySource"):
         A.lire_flux([dict(INIT, apiKeySource="ANTHROPIC_API_KEY"), FIN])
 
 

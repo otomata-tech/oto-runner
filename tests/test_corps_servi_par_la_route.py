@@ -56,6 +56,10 @@ _DECLARES_PAR_LA_ROUTE = {
     # d'oto-backend. ⚠️ N'est ENVOYÉ que par un worker `OTO_RUNNER_ORG_KEYS_ONLY=1` :
     # un tel worker exige ce backend-là ; un worker ordinaire n'envoie pas le champ.
     "org_key_only",
+    # oto-backend `feat/claim-par-org` (pas encore servi en prod au 25/09/2026). ⚠️ N'est
+    # ENVOYÉ que par un worker `OTO_RUNNER_ORGS=…` : ne pas poser la variable avant que la
+    # route servie ne le déclare — relire l'OpenAPI de la prod.
+    "org_ids",
 }
 
 

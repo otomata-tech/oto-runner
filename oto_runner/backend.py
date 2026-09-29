@@ -220,7 +220,8 @@ class Backend:
 
     # ── la file de jobs (runner.jobs, R2) ────────────────────────────────────
     def claim(self, lease_seconds: int = 600, depot: str = "",
-              org_key_only: bool = False) -> Optional[dict]:
+              org_key_only: bool = False,
+              org_ids: Optional[list] = None) -> Optional[dict]:
         """Réserve un travail — et NOMME le dépôt de clé qu'on sait consommer.
 
         Le backend y répond par `model_key` quand l'org du travail a déposé cette
@@ -250,6 +251,10 @@ class Backend:
         # backend qui le déclare (oto-backend, `runner.jobs op=claim`).
         if org_key_only:
             corps["org_key_only"] = True
+        # ⚠️ `org_ids` (ne servir que ces orgs — un essai sur une org avant tout le parc)
+        # n'est envoyé QUE s'il est posé, même leçon : il exige un backend qui le déclare.
+        if org_ids:
+            corps["org_ids"] = [int(o) for o in org_ids]
         return self._post("/api/me/runner/jobs", corps).get("job")
 
     def enqueue(self, kind: str, payload: dict,

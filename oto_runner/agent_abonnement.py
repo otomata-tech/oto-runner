@@ -39,6 +39,8 @@ from .agent_runtime import AgentResult, AgentStep
 logger = logging.getLogger("oto_runner")
 
 ONE_SHOT = True     # le worker choisit le chemin là-dessus
+PAYE_PAR = "abonnement"   # ce que le résultat dit de qui a payé (`worker._paye_par`)
+MOTEUR = "claude_code_abonnement"   # ce que le résultat dit de ce qui a tourné
 SANDBOX = True          # … et remet à ce provider le contexte du sandbox (cf. worker._traiter)
 
 FAMILLE = "claude_subscription"
@@ -54,11 +56,48 @@ _LECTURE_S = 600    # silence toléré entre deux événements (un outil lent)
 _SORTIE_MAX = 50_000
 
 # Les fins du CLI (`result.subtype`) → le vocabulaire de la boucle (`AgentResult.stopped`).
-_FINS = {"success": "end_turn", "error_max_turns": "max_steps"}
+_FINS = {"success": "end_turn"}
+# Les BORNES de la ferme (`--max-turns`, `--max-budget-usd`) : le CLI les rend avec
+# `is_error: true`, mais une borne atteinte a fait son travail — elle conclut `blocked`,
+# jamais un échec rejoué, qui repaierait le même plafond à chaque tentative.
+_BORNES = {"error_max_turns": "max_steps", "error_max_budget_usd": "max_budget"}
+#: Les tours que la ferme accepte (`max_turns`, borné 1–1000 de son côté).
+_TOURS_MIN, _TOURS_MAX = 1, 1000
 
 
 class LlmUnavailable(RuntimeError):
     pass
+
+
+class FermePleine(RuntimeError):
+    """La ferme tient déjà toutes ses places, essai après essai."""
+
+
+#: Une box pleine (429) : réessayée, bail prolongé entre deux essais, puis l'échec nommé.
+#: Commun aux deux voies de la ferme : les runs par clé et par abonnement se partagent
+#: les mêmes places, et un travail d'abonnement ne doit pas perdre une tentative parce
+#: que des runs par clé occupent la box.
+_PLEINE_ESSAIS, _PLEINE_ATTENTE_S = 4, 20
+
+
+def poster_le_run(url: str, corps: dict, entetes: dict, lecture: int,
+                  prolonger=None, on_event=None, attendre=time.sleep):
+    """`POST …/runs` en flux — la réponse OUVERTE (à fermer par `with`), une fois qu'elle
+    n'est plus un 429."""
+    for essai in range(_PLEINE_ESSAIS):
+        r = requests.post(url, json=corps, headers=entetes, stream=True,
+                          timeout=(10, lecture))
+        if r.status_code != 429:
+            return r
+        r.close()
+        if on_event:
+            on_event("ferme_pleine", {"essai": essai + 1})
+        if prolonger:
+            prolonger()
+        if essai + 1 < _PLEINE_ESSAIS:
+            attendre(_PLEINE_ATTENTE_S * (essai + 1))
+    raise FermePleine(f"la ferme est restée pleine sur {_PLEINE_ESSAIS} essais — "
+                      "le travail repassera à sa prochaine tentative")
 
 
 def model() -> str:
@@ -110,16 +149,98 @@ def _message_borne(message: dict) -> dict:
     return {**message, "content": blocs}
 
 
+class _Compteur:
+    """Ce que le flux a déjà coûté, EN VOL — pour arrêter un run à sa borne de jetons.
+
+    ⚠️ Le CLI répète l'usage d'un message sur CHAQUE bloc qu'il émet (texte, pensée,
+    appel) : on garde, par identifiant de message, le maximum de chaque poste — une
+    somme naïve compterait deux à trois fois le même message.
+
+    ⚠️ La sortie d'un message, en vol, est PARTIELLE (le flux annonce 1 ou 3 jetons pour
+    un message qui en fera des centaines) : ce compte en est un MINORANT. L'entrée non
+    cachée et l'écriture de cache, elles, sont exactes dès le premier bloc. La borne
+    compte comme la boucle ordinaire (`comptage._pour_la_borne`) : entrée non cachée +
+    sortie + écriture de cache, jamais la lecture de cache. Le compte qui fait foi est
+    celui du `result` final ; celui-ci ne sert qu'à arrêter."""
+
+    def __init__(self):
+        self.messages: dict = {}
+
+    def ajouter(self, message: dict) -> None:
+        usage = message.get("usage") or {}
+        cle = message.get("id") or f"sans-id-{len(self.messages)}"
+        vu = self.messages.setdefault(cle, {})
+        for poste in ("input_tokens", "output_tokens", "cache_creation_input_tokens",
+                      "cache_read_input_tokens"):
+            if isinstance(usage.get(poste), int):
+                vu[poste] = max(vu.get(poste, 0), usage[poste])
+
+    def borne(self) -> int:
+        return sum(m.get("input_tokens", 0) + m.get("output_tokens", 0)
+                   + m.get("cache_creation_input_tokens", 0) for m in self.messages.values())
+
+    def usage_connu(self) -> dict:
+        """L'usage d'un run ARRÊTÉ en vol : l'entrée et les caches sont exacts, la
+        sortie ne l'est pas — elle reste NON DÉCLARÉE (`None`), jamais un minorant
+        publié comme un compte (cf. `comptage`)."""
+        somme = lambda p: sum(m.get(p, 0) for m in self.messages.values())  # noqa: E731
+        return {"input_tokens": somme("input_tokens"), "output_tokens": None,
+                "cache_creation_input_tokens": somme("cache_creation_input_tokens"),
+                "cache_read_input_tokens": somme("cache_read_input_tokens")}
+
+
+def _usage_du_resultat(resultat: dict) -> tuple[dict, Optional[dict]]:
+    """L'usage d'un run conclu, et son détail PAR MODÈLE.
+
+    `result.modelUsage` porte chaque modèle qui a servi, sous-agents compris ; `usage`
+    ne porte que le fil principal. Quand le premier est là, il fait foi pour les postes
+    (leur somme) et se rapporte en détail. Sinon, `usage` comme avant."""
+    par_modele = resultat.get("modelUsage")
+    if not isinstance(par_modele, dict) or not par_modele:
+        return resultat.get("usage") or {}, None
+    total = {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0,
+             "cache_read_input_tokens": 0}
+    champs = {"input_tokens": "inputTokens", "output_tokens": "outputTokens",
+              "cache_creation_input_tokens": "cacheCreationInputTokens",
+              "cache_read_input_tokens": "cacheReadInputTokens"}
+    detail = {}
+    for nom, u in par_modele.items():
+        u = u or {}
+        for poste, champ in champs.items():
+            total[poste] += int(u.get(champ) or 0)
+        # Deux clés brutes du même modèle (fenêtres de contexte différentes) s'ADDITIONNENT.
+        vu = detail.setdefault(u.get("canonicalModel") or nom, {
+            "entree": 0, "sortie": 0, "cache_lu": 0, "cache_ecrit": 0, "cout_usd": None})
+        for cle, champ in (("entree", "inputTokens"), ("sortie", "outputTokens"),
+                           ("cache_lu", "cacheReadInputTokens"),
+                           ("cache_ecrit", "cacheCreationInputTokens")):
+            vu[cle] += int(u.get(champ) or 0)
+        # Le coût que le CLI calcule au TARIF PUBLIC (`costBasis: list`) — une estimation
+        # lisible, pas une facture.
+        if isinstance(u.get("costUSD"), (int, float)):
+            vu["cout_usd"] = round((vu["cout_usd"] or 0) + float(u["costUSD"]), 4)
+    return total, detail
+
+
 def lire_flux(evenements, on_event=None, prolonger: Optional[Callable[[], None]] = None,
               apposer: Optional[Callable[[str, dict, dict], None]] = None,
-              horloge=time.monotonic) -> AgentResult:
+              horloge=time.monotonic, max_tokens: Optional[int] = None,
+              echeance: Optional[float] = None, source_attendue: str = "none") -> AgentResult:
     """Le flux `stream-json` du CLI (plus le résumé de l'agent) → `AgentResult`.
 
     `apposer(role, neutre, brut)` : le fil du run, tenu EN DIRECT — chaque message du CLI y
     part à son arrivée, au format de la boucle ordinaire (`assistant` : texte + appels ;
     `tool` : issue de chaque appel). Le brut est le message Anthropic que le CLI a rendu.
 
+    `max_tokens` / `echeance` (instant `horloge()`) : les limites du run déclarées sur
+    l'agent. Atteinte, la lecture S'ARRÊTE et rend `stopped=max_tokens|max_seconds` —
+    l'appelant ferme alors le flux, et l'agent de la ferme arrête l'unité du run.
+    L'événement `ferme_arret` (posé par le transport quand le flux se tait au-delà de
+    l'échéance) vaut la même chose.
+
     Séparé du transport pour se tester sur un flux enregistré."""
+    compteur = _Compteur()
+    arret: Optional[str] = None
     steps: list[AgentStep] = []
     en_vol: dict = {}          # tool_use_id → (nom, instant du départ)
     init, resultat, forfait, resume = {}, None, None, {}
@@ -132,8 +253,23 @@ def lire_flux(evenements, on_event=None, prolonger: Optional[Callable[[], None]]
             prolonger()
             dernier = maintenant
         t = ev.get("type")
+        if t == "ferme_arret":
+            arret = ev.get("raison") or "max_seconds"
+            break
+        if echeance is not None and maintenant >= echeance and t not in ("result", "ferme_resume"):
+            arret = "max_seconds"
+            break
         if t == "system" and ev.get("subtype") == "init":
             init = ev
+            # Vérifié DÈS l'annonce, pas à la fin : un run arrêté à sa borne ne passe
+            # jamais par la fin, et il doit être refusé avant le premier tour payé.
+            source = ev.get("apiKeySource")
+            if source != source_attendue:
+                # Le CLI paie avec autre chose que ce qui a été servi : une clé dans le
+                # sandbox d'un abonnement, ou une session là où on a remis une clé.
+                raise RuntimeError(
+                    f"le run n'a pas tourné sur ce qui devait le payer "
+                    f"(apiKeySource={source!r}, attendu {source_attendue!r})")
         elif t == "rate_limit_event":
             forfait = ev.get("rate_limit_info")
         elif t == "assistant":
@@ -148,6 +284,10 @@ def lire_flux(evenements, on_event=None, prolonger: Optional[Callable[[], None]]
                     textes.append(bloc.get("text") or "")
             if apposer:
                 apposer("assistant", {"text": "".join(textes), "tool_calls": appels}, message)
+            compteur.ajouter(message)
+            if max_tokens is not None and compteur.borne() >= max_tokens:
+                arret = "max_tokens"
+                break
         elif t == "user":
             message = ev.get("message") or {}
             issues = []
@@ -165,18 +305,53 @@ def lire_flux(evenements, on_event=None, prolonger: Optional[Callable[[], None]]
             resultat = ev
         elif t == "ferme_resume":
             resume = ev
+    if arret is not None:
+        if on_event:
+            on_event("borne_atteinte", {"borne": arret, "max_tokens": max_tokens,
+                                        "jetons_bornes": compteur.borne(),
+                                        "sortie": "minorant"})
+        # Pas une exception : une borne DÉCLARÉE a fait son travail. Le travail conclut
+        # `blocked`, comme à `max_tokens` sur la boucle ordinaire.
+        return AgentResult(reply="", steps=steps, stopped=arret,
+                           usage=compteur.usage_connu(), model=init.get("model"),
+                           abonnement=({"etat": forfait.get("status"),
+                                        "fenetres": forfait.get("unifiedWindows")}
+                                       if forfait else None))
     if resume.get("connecte") is False:
         # Pas une exception : c'est une CONCLUSION que le backend doit lire
         # (`deconnecte` → la personne passe `needs_login`, ses travaux attendent).
         return AgentResult(reply="", stopped="fin_anormale",
                            defaut={"finish_reason": "sandbox_deconnecte"},
                            abonnement={"deconnecte": True})
+    if resultat is None and echeance is not None and horloge() >= echeance:
+        # La ferme a arrêté l'unité à SA durée (le filet) avant qu'un événement ne nous
+        # rende la main : sans résultat, mais au-delà de l'échéance — la borne, pas une
+        # panne. Sans ça, le travail échouait et son rejeu retombait sur la même borne.
+        if on_event:
+            on_event("borne_atteinte", {"borne": "max_seconds", "par": "ferme",
+                                        "erreur": resume.get("erreur")})
+        return AgentResult(reply="", steps=steps, stopped="max_seconds",
+                           usage=compteur.usage_connu(), model=init.get("model"),
+                           abonnement=({"etat": forfait.get("status"),
+                                        "fenetres": forfait.get("unifiedWindows")}
+                                       if forfait else None))
     if resultat is None:
         raise RuntimeError(f"le CLI n'a rendu aucun résultat ({resume.get('erreur') or 'flux coupé'})")
-    source = init.get("apiKeySource")
-    if source != "none":
-        # Une clé d'API dans le sandbox ferait payer quelqu'un d'autre que l'abonnement.
-        raise RuntimeError(f"le run n'a pas tourné sur l'abonnement (apiKeySource={source!r})")
+    if init.get("apiKeySource") != source_attendue:
+        raise RuntimeError(f"le run n'a pas tourné sur ce qui devait le payer "
+                           f"(apiKeySource={init.get('apiKeySource')!r}, "
+                           f"attendu {source_attendue!r})")
+    usage, par_modele = _usage_du_resultat(resultat)
+    borne = _BORNES.get(resultat.get("subtype"))
+    if borne is not None:
+        if on_event:
+            on_event("borne_atteinte", {"borne": borne, "par": "ferme",
+                                        "fin": resultat.get("subtype")})
+        return AgentResult(reply=resultat.get("result") or "", steps=steps, stopped=borne,
+                           usage=usage, par_modele=par_modele, model=init.get("model"),
+                           abonnement=({"etat": forfait.get("status"),
+                                        "fenetres": forfait.get("unifiedWindows")}
+                                       if forfait else None))
     erreur_du_cli = bool(resultat.get("is_error"))
     return AgentResult(
         reply=resultat.get("result") or "",
@@ -187,7 +362,8 @@ def lire_flux(evenements, on_event=None, prolonger: Optional[Callable[[], None]]
                  else _FINS.get(resultat.get("subtype"), resultat.get("subtype") or "no_reply")),
         defaut=({"finish_reason": resultat.get("subtype") or "erreur_du_cli"}
                 if erreur_du_cli else None),
-        usage=resultat.get("usage") or {},
+        usage=usage,
+        par_modele=par_modele,
         model=init.get("model"),
         abonnement=({"etat": forfait.get("status"), "fenetres": forfait.get("unifiedWindows")}
                     if forfait else None))
@@ -196,8 +372,17 @@ def lire_flux(evenements, on_event=None, prolonger: Optional[Callable[[], None]]
 def run_once(*, instructions: str, inputs: str, tools, api_key: Optional[str] = None,
              modele: Optional[str] = None, on_event=None, sandbox: Optional[str] = None,
              mcp=None, prolonger: Optional[Callable[[], None]] = None,
-             apposer: Optional[Callable[[str, dict, dict], None]] = None) -> AgentResult:
-    """UN run complet dans le sandbox `sandbox`, outils compris (côté CLI), → AgentResult."""
+             apposer: Optional[Callable[[str, dict, dict], None]] = None,
+             max_tokens: Optional[int] = None, max_seconds: Optional[int] = None,
+             max_turns: Optional[int] = None,
+             horloge=time.monotonic, attendre=time.sleep) -> AgentResult:
+    """UN run complet dans le sandbox `sandbox`, outils compris (côté CLI), → AgentResult.
+
+    `max_tokens` / `max_seconds` : les limites déclarées sur l'agent, tenues ICI, sur le
+    flux (`lire_flux`). Quitter le `with` ferme la connexion ; l'agent de la ferme arrête
+    alors l'unité du run (son `finally`). `max_seconds` part aussi dans le corps : une
+    ferme qui sait le lire pose la même échéance à l'unité — les deux se recouvrent,
+    aucune n'est de trop."""
     if api_key:
         raise RuntimeError("un travail d'abonnement ne porte jamais de clé de modèle")
     if not sandbox:
@@ -211,13 +396,48 @@ def run_once(*, instructions: str, inputs: str, tools, api_key: Optional[str] = 
         "system": instructions,
         "mcp": {"url": mcp.url, "token": mcp.token, "org": mcp.org, "project": mcp.project,
                 "run_id": mcp.run_id, "tools": sorted(tools or ())},
+        **({"max_seconds": int(max_seconds)} if max_seconds else {}),
+        **champ_des_tours(max_turns),
     }
+    # Le silence toléré entre deux événements, jamais au-delà de l'échéance : sans ça, un
+    # outil qui tourne sans rien dire ferait survivre le run à sa limite.
+    lecture = min(_LECTURE_S, max_seconds) if max_seconds else _LECTURE_S
     url = f"{os.environ[_ENV_AGENT].rstrip('/')}/api/sandboxes/{sandbox}/runs"
     entetes = {"Authorization": f"Bearer {os.environ[_ENV_JETON]}",
                "Accept": "application/x-ndjson"}
-    with requests.post(url, json=corps, headers=entetes, stream=True,
-                       timeout=(10, _LECTURE_S)) as r:
+    with poster_le_run(url, corps, entetes, lecture, prolonger=prolonger,
+                       on_event=on_event, attendre=attendre) as r:
         if r.status_code != 200:
             raise RuntimeError(f"agent de la ferme : {r.status_code} {r.text[:300]}")
+        echeance = echeance_du_run(max_seconds, horloge)
         lignes = (json.loads(l) for l in r.iter_lines(decode_unicode=True) if l)
-        return lire_flux(lignes, on_event=on_event, prolonger=prolonger, apposer=apposer)
+        return lire_flux(_jusqu_a(lignes, echeance, horloge), on_event=on_event,
+                         prolonger=prolonger, apposer=apposer, horloge=horloge,
+                         max_tokens=max_tokens, echeance=echeance)
+
+
+def champ_des_tours(max_turns: Optional[int]) -> dict:
+    """`max_turns` pour la ferme, s'il est déclaré — ramené dans ce qu'elle accepte.
+    Absent : rien, la ferme garde son défaut."""
+    if not max_turns:
+        return {}
+    return {"max_turns": max(_TOURS_MIN, min(int(max_turns), _TOURS_MAX))}
+
+
+def echeance_du_run(max_seconds: Optional[int], horloge) -> Optional[float]:
+    """L'échéance du run, posée quand la ferme l'a ACCEPTÉ (réponse 200) : les
+    attentes d'une box pleine (429) ne se prennent pas sur la durée du run — la ferme
+    ne lance l'unité, et sa propre échéance, qu'à ce moment-là."""
+    return horloge() + max_seconds if max_seconds else None
+
+
+def _jusqu_a(lignes, echeance: Optional[float], horloge):
+    """Le flux, tel quel — sauf un silence qui dépasse l'échéance : il devient
+    `ferme_arret`, une borne atteinte, plutôt qu'une panne de transport. Avant
+    l'échéance, un silence reste la panne qu'il était."""
+    try:
+        yield from lignes
+    except requests.exceptions.RequestException:
+        if echeance is None or horloge() < echeance:
+            raise
+        yield {"type": "ferme_arret", "raison": "max_seconds"}
