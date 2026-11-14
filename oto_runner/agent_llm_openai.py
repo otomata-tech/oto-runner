@@ -265,7 +265,7 @@ def reglages() -> dict:
 # les deux, et croire qu'une clé « openai » appartient à Mistral demanderait à
 # une org la clé d'un fournisseur chez qui elle ne tourne pas. Un hôte absent de
 # cette table n'a PAS de dépôt : la plateforme paie, et ça se dit ainsi.
-_DEPOTS_PAR_HOTE = {"api.mistral.ai": "mistral"}
+_DEPOTS_PAR_HOTE = {"api.mistral.ai": "mistral", "openrouter.ai": "openrouter"}
 
 
 def depot() -> str:
@@ -278,7 +278,15 @@ def depot() -> str:
 # doesn't serve tokens from cache, `cached_tokens` is `0` or omitted. » Scaleway ne
 # rapporte aucun cache sur le chat, et OpenAI a retiré sa garantie du zéro : chez eux
 # l'absence reste INCONNUE. Le zéro est celui du contrat, jamais décidé ici.
-_CACHE_ABSENT_VAUT_ZERO = frozenset({"mistral"})
+#
+# OpenRouter : traité comme un zéro, à dessein. Sans `cached_tokens`, le non-caché resterait
+# INCONNU et le backend refuserait le règlement (`usage_unmeasured`), arrêtant le travail.
+# Un zéro compte tout l'entrée au plein tarif d'entrée : un tour jamais sous son coût.
+_CACHE_ABSENT_VAUT_ZERO = frozenset({"mistral", "openrouter"})
+
+#: Le dépôt dont l'hôte ROUTE vers des hôtes tiers (OpenRouter) : lui seul reçoit le
+#: corps `provider` (hôtes épinglés, sans collecte de données) et `reasoning`.
+_DEPOT_ROUTEUR = "openrouter"
 
 
 def usage_declare(u: Optional[dict]) -> dict:
@@ -304,6 +312,13 @@ def usage_declare(u: Optional[dict]) -> dict:
             usage["input_tokens"] = max(0, int(u["prompt_tokens"]) - int(caches))
     if u.get("completion_tokens") is not None:
         usage["output_tokens"] = int(u["completion_tokens"])
+    cout = u.get("cost")
+    if isinstance(cout, (int, float)) and not isinstance(cout, bool):
+        # Ce que le fournisseur a FACTURÉ pour l'appel, en USD : OpenRouter le rend avec
+        # chaque réponse (`usage.cost`, mesuré le 12/11/2026 sur ses quatre modèles). Un
+        # modèle de la famille `openrouter` se facture sur ce chiffre, pas au jeton : le
+        # même id y est servi par plusieurs hôtes, à des prix différents.
+        usage["cost_usd"] = float(cout)
     return usage
 
 
@@ -361,7 +376,8 @@ def complete(*, system: str, messages: list, tools: list[dict],
              effort: Optional[str] = None,
              max_output_tokens: Optional[int] = None,
              on_event: Optional[Callable[[str, dict], None]] = None,
-             workspace: Optional[str] = None) -> Turn:
+             workspace: Optional[str] = None,
+             providers: Optional[tuple] = None) -> Turn:
     """UN tour de modèle — synchrone, le worker a le droit d'attendre.
 
     Le `system` passe en premier message (la convention OpenAI) ; `messages` est
@@ -378,6 +394,13 @@ def complete(*, system: str, messages: list, tools: list[dict],
             "ce travail porte un workspace de clé Anthropic (`model_workspace`), et ce "
             "worker sert la voie Chat Completions, qui n'en a pas l'usage : il n'est pas "
             "exécuté.")
+    routeur = depot() == _DEPOT_ROUTEUR
+    if providers and not routeur:
+        # Des hôtes épinglés n'ont de sens que chez un routeur : les recevoir ailleurs,
+        # c'est un travail mal routé — refusé en le nommant, comme le workspace.
+        raise LlmUnavailable(
+            "ce travail épingle des hôtes OpenRouter (`providers`), et ce worker ne parle "
+            "pas à OpenRouter : il n'est pas exécuté.")
     nom = modele or model()
     # Calculé UNE fois : il part au fournisseur ET au journal, porté par le tour.
     plafond = plafond_de_sortie(max_output_tokens, effort)
@@ -404,8 +427,29 @@ def complete(*, system: str, messages: list, tools: list[dict],
     # l'API (`mistral-medium-2604` n'accepte que `high` et `none`, 400 sur `medium`,
     # mesuré le 14/09/2026). L'omettre laisserait le défaut du fournisseur, qui peut
     # raisonner et le facturer.
-    if effort_retenu:
+    if effort_retenu and routeur:
+        # OpenRouter normalise le raisonnement sous `reasoning` pour tous ses hôtes
+        # (`effort` ∈ max|xhigh|high|medium|low|minimal|none ; `none` l'éteint), lu le
+        # 12/11/2026 sur openrouter.ai/docs/guides/best-practices/reasoning-tokens.md.
+        corps["reasoning"] = {"effort": effort_retenu}
+    elif effort_retenu:
         corps["reasoning_effort"] = effort_retenu
+    if routeur:
+        # ⚠️ Aucun hôte épinglé ne déclare `prompt_cache_key` dans ses paramètres
+        # (`supported_parameters`, /api/v1/models/<id>/endpoints, 12/11/2026) : avec
+        # `require_parameters`, l'envoyer pourrait les écarter TOUS. Leur cache est
+        # implicite (préfixe identique), il n'a pas besoin de la clé.
+        corps.pop("prompt_cache_key", None)
+        # ⚠️ Les données d'un agent sont celles du client : jamais un hôte qui les garde ou
+        # s'en sert (`data_collection: deny`). Les hôtes épinglés par le catalogue d'abord,
+        # et SEULS (`only`) : la liste borne le prix et la quantification ; un repli entre
+        # eux reste permis. `require_parameters` écarte un hôte qui ignorerait les outils
+        # ou le raisonnement demandés.
+        routage: dict = {"data_collection": "deny", "require_parameters": True}
+        if providers:
+            routage.update(order=list(providers), only=list(providers),
+                           allow_fallbacks=True)
+        corps["provider"] = routage
     # Le passage d'abord, l'hôte à défaut, rien sinon. Le calcul est fait UNE
     # fois : appeler deux fois relisait l'environnement entre le test et l'usage.
     retenue = temperature if temperature is not None else temperature_hote()
@@ -440,6 +484,11 @@ def complete(*, system: str, messages: list, tools: list[dict],
     msg = choix.get("message") or {}
     fin = choix.get("finish_reason")
     usage = usage_declare(d.get("usage"))
+    if routeur and isinstance(d.get("provider"), str) and d["provider"].strip():
+        # L'HÔTE qui a répondu à ce tour (OpenRouter le nomme : « StepFun »). Il change
+        # d'un tour à l'autre sur un secours, et c'est lui qui dit dans quel pays le tour
+        # est parti : il voyage jusqu'au règlement, puis au journal.
+        usage["host"] = d["provider"].strip()
 
     # Ce que le fournisseur DIT avoir servi, à défaut ce qu'on a demandé.
     servi = d.get("model") or nom
