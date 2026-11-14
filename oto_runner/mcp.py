@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Optional
 
 import requests  # noqa: F401 — la forme des kwargs
@@ -144,6 +145,60 @@ def _sans_jetons_de_contexte(schema: dict) -> dict:
 #: Mesuré le 11/09/2026 : l'API Mistral accepte au moins 65 536 caractères ; l'ancienne coupe muette
 #: à 1 024 masquait les règles de `data_write`. Une description coupée est DITE au journal du travail
 #: (`descriptions_outils`).
+
+
+_ENV_ATTENTE_BAC = "OTO_RUNNER_SANDBOX_WAIT_S"
+#: L'attente totale d'une place dans le bac à sable, par appel. Sous le bail du travail
+#: (600 s, prolongé entre les tours) avec de la marge. Une recette tient sa place au plus
+#: son `max_seconds` (120 s par défaut côté backend, 600 s au plus) : 180 s couvre le
+#: cas courant ; au-delà, le refus remonte au modèle comme avant.
+ATTENTE_BAC_DEFAUT = 180
+#: Le plafond du réglage : la moitié du bail (600 s). Pendant l'attente, aucun tour ne
+#: prolonge le bail ; au-delà, la ligne pourrait expirer et être reprise par un pair
+#: pendant que ce worker attend encore. Un réglage plus haut LÈVE.
+ATTENTE_BAC_PLAFOND = 300
+_PAUSE_BAC_MIN, _PAUSE_BAC_MAX = 2, 60
+
+
+def attente_bac_max() -> int:
+    """`OTO_RUNNER_SANDBOX_WAIT_S`, sinon le défaut. `0` = ne jamais attendre. Une
+    valeur illisible, ou au-delà de `ATTENTE_BAC_PLAFOND`, LÈVE : une attente qu'on
+    croit réglée et qui ne l'est pas ne se voit pas."""
+    brut = os.environ.get(_ENV_ATTENTE_BAC, "").strip()
+    if not brut:
+        return ATTENTE_BAC_DEFAUT
+    if not brut.isdigit():
+        raise ValueError(f"{_ENV_ATTENTE_BAC} = {brut!r} : un entier ≥ 0 est attendu")
+    if int(brut) > ATTENTE_BAC_PLAFOND:
+        raise ValueError(f"{_ENV_ATTENTE_BAC} = {brut} : au plus {ATTENTE_BAC_PLAFOND} s, "
+                         "sous le bail du travail")
+    return int(brut)
+
+
+def _bac_occupe(d) -> Optional[int]:
+    """Le délai à attendre si `d` est un refus `sandbox_busy` du backend, sinon None.
+    Lu sur l'erreur MCP (`error.data = {code, retry_after_seconds}`) ou, à défaut, sur
+    le message ou le texte du résultat, qui commencent par `sandbox_busy`."""
+    if not isinstance(d, dict):
+        return None
+    err = d.get("error") if isinstance(d.get("error"), dict) else {}
+    donnees = err.get("data") if isinstance(err.get("data"), dict) else {}
+    occupe = donnees.get("code") == "sandbox_busy" or \
+        str(err.get("message") or "").startswith("sandbox_busy")
+    if not occupe:
+        res = d.get("result") if isinstance(d.get("result"), dict) else {}
+        if res.get("isError"):
+            for bloc in res.get("content") or ():
+                if isinstance(bloc, dict) and "sandbox_busy" in str(bloc.get("text") or "")[:200]:
+                    occupe = True
+                    break
+    if not occupe:
+        return None
+    try:
+        delai = int(donnees.get("retry_after_seconds") or 10)
+    except (TypeError, ValueError):
+        delai = 10
+    return max(_PAUSE_BAC_MIN, min(delai, _PAUSE_BAC_MAX))
 
 
 class McpSession:
@@ -301,6 +356,17 @@ class McpSession:
                     "flotte travaille dans l'org de sa flotte, sans équipe",
                     name, jeton)
         declares = self._declares(name)
+        if declares:
+            # Un jeton de contexte que l'outil ne DÉCLARE pas ne lui sert à rien et le
+            # fait refuser (pydantic `unexpected_keyword_argument`). Mesuré du 03 au
+            # 09/11/2026 : 34 `oto_recipe` refusés pour un `_project` posé par le modèle
+            # (« 793 », en chaîne), surtout un même agent à chaque passage. Il est
+            # retiré, jamais transmis. Schéma inconnu (`declares` vide) : on ne
+            # retire rien, faute de savoir.
+            for jeton in ("_project", "_run_id", "_org"):
+                if jeton not in declares and args.pop(jeton, None) is not None:
+                    logger.warning("%s : `%s` posé par le modèle a été RETIRÉ — l'outil "
+                                   "ne le déclare pas", name, jeton)
         if self.project is not None and "_project" in declares:
             args.setdefault("_project", self.project)
         if self.org is not None and "_org" in declares:
@@ -360,6 +426,7 @@ class McpSession:
                     f"session MCP rouverte mais {name} reste refusé "
                     f"({str((d or {}).get('error') or d)[:200]}) — le job échoue "
                     "pour être rejoué")
+        d = self._attendre_le_bac(name, corps, d)
         res = (d or {}).get("result") or {}
         texte, images = lire(res.get("content"))
         if res.get("isError"):
@@ -372,6 +439,32 @@ class McpSession:
         if err:
             return serialize(err), True, ()
         return serialize(d), False, ()
+
+    def _attendre_le_bac(self, name: str, corps: dict, d):
+        """Le bac à sable du backend est plein (429 `sandbox_busy`) : rien n'a été lancé.
+        Le runner ATTEND le `Retry-After` et rejoue, jusqu'à `attente_bac_max()` secondes
+        au total. Rendu au modèle, ce refus lui faisait réessayer à chaque tour : un tour
+        de modèle payé par tentative, pour une place qui se libère seule (une recette
+        tient sa place au plus son `max_seconds`). Le délai épuisé, le refus remonte tel
+        quel au modèle. Rejouer est sûr : un `sandbox_busy` n'a rien exécuté."""
+        budget = attente_bac_max()
+        attendu = 0
+        delai = _bac_occupe(d)
+        while delai is not None and attendu < budget:
+            pause = min(delai, budget - attendu)
+            logger.info("%s : bac à sable occupé (sandbox_busy), attente %ss "
+                        "(%ss déjà attendues sur %ss)", name, pause, attendu, budget)
+            time.sleep(pause)
+            attendu += pause
+            self._n += 1
+            d = self._post(dict(corps, id=self._n))
+            delai = _bac_occupe(d)
+        if delai is not None:
+            logger.warning("%s : bac à sable toujours occupé après %ss, refus rendu "
+                           "au modèle", name, attendu)
+        elif attendu:
+            logger.info("%s : place obtenue dans le bac à sable après %ss", name, attendu)
+        return d
 
     def outil(self, name: str, arguments: Optional[dict] = None) -> dict:
         """Appel direct hors boucle (run_start, run_finish…) — rend le payload."""
