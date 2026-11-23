@@ -286,3 +286,19 @@ def test_une_instance_INVENTEE_par_le_modele_est_RETIREE(monkeypatch):
     args = vu["appel"]["arguments"]
     assert "_instance" not in args, "un `_instance` inventé ne part pas vers la plateforme"
     assert args["_org"] == 226, "l'org du runner reste posée"
+
+
+def test_oto_trigger_ne_recoit_pas_org_recopie_par_le_modele(monkeypatch, caplog):
+    """`oto_trigger` déclare `_org`, pas `org` : un `org` recopié par le modèle fait
+    refuser l'appel (« unexpected keyword argument 'org' »). `_org` reste posé."""
+    s, vu = _session_org(monkeypatch, {"oto_trigger": ["op", "_org", "_project"]})
+    s.call("oto_trigger", {"op": "list", "org": "196"})
+    args = vu["appel"]["arguments"]
+    assert "org" not in args
+    assert args["_org"] == 226
+
+
+def test_un_outil_qui_declare_org_le_recoit(monkeypatch):
+    s, vu = _session_org(monkeypatch, {"autre": ["org", "_org"]})
+    s.call("autre", {"org": "196"})
+    assert vu["appel"]["arguments"]["org"] == "196"
