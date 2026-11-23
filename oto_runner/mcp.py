@@ -420,7 +420,13 @@ class McpSession:
             # (« 793 », en chaîne), surtout un même agent à chaque passage. Il est
             # retiré, jamais transmis. Schéma inconnu (`declares` vide) : on ne
             # retire rien, faute de savoir.
-            for jeton in ("_project", "_run_id", "_org"):
+            #
+            # `org` (sans tiret bas) en est : le runner ne le pose jamais, c'est le
+            # modèle qui recopie `_org` dans le champ voisin (`org='196'` sur
+            # `oto_trigger`, qui ne déclare que `_org` : « unexpected keyword
+            # argument 'org' »). Retiré SEULEMENT si l'outil ne le déclare pas :
+            # un outil qui déclare vraiment `org` le reçoit.
+            for jeton in ("_project", "_run_id", "_org", "org"):
                 if jeton not in declares and args.pop(jeton, None) is not None:
                     logger.warning("%s : `%s` posé par le modèle a été RETIRÉ — l'outil "
                                    "ne le déclare pas", name, jeton)
